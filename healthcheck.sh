@@ -16,6 +16,7 @@ command -v ffmpeg >/dev/null && ok "ffmpeg $(ffmpeg -version | head -1 | awk '{p
 command -v ffprobe >/dev/null && ok "ffprobe" || fail "ffprobe 없음"
 command -v liquidsoap >/dev/null && ok "liquidsoap $(liquidsoap --version 2>/dev/null | head -1 | awk '{print $2}')" || fail "liquidsoap 없음"
 command -v vnstat >/dev/null && ok "vnstat" || warn "vnstat 없음 — 월 트래픽 집계 불가"
+command -v stunnel4 >/dev/null && ok "stunnel4 (RTMPS TLS 중계)" || warn "stunnel4 없음 — 직접 RTMPS 로 송출되어 트래픽 약 30% 증가 (install.sh 재실행)"
 [[ -x "$PY" ]] && ok "venv" || { fail "venv 없음 — install.sh 실행 필요"; exit 1; }
 
 echo "== 재인코딩 금지 가드"
@@ -65,7 +66,9 @@ if command -v systemctl >/dev/null; then
 import json, sys, time
 d = json.load(open(sys.argv[1]))
 age = time.time() - d.get("updated_at", 0)
-print(f"         state={d.get('state')} speed={d.get('speed')} 갱신 {age:.0f}초 전 clip={(d.get('current_clip') or {}).get('path','-').rsplit('/',1)[-1]}")
+print(f"         state={d.get('state')} speed={d.get('speed')} 전송={d.get('transport','-')} 갱신 {age:.0f}초 전 clip={(d.get('current_clip') or {}).get('path','-').rsplit('/',1)[-1]}")
+if d.get('transport') == 'rtmps-direct':
+    print("         [WARN] TLS 중계 없이 직접 RTMPS 로 송출 중 — 트래픽 약 30% 증가. /var/log/livemax/tls-*.log 확인")
 EOF
     fi
   done

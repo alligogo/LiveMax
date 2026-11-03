@@ -108,6 +108,8 @@ def live_rows(conn, server: dict, paths: Paths) -> tuple[list[dict], dict[str, s
             "clip_folder": clip_path.parent.name if clip_path else "",
             "segment": clip.get("segment", ""),
             "bitrate_kbps": lv.bitrate_kbps,
+            "transport": {"rtmps-relay": "RTMPS (TLS 중계)", "rtmps-direct": "RTMPS 직접 (트래픽 +30%)",
+                          "direct": "직접"}.get((st or {}).get("transport", ""), "-"),
             "video_id": lv.youtube_video_id,
             "timezone": lv.timezone,
             "restart_at": lv.restart_at,
@@ -148,6 +150,9 @@ def alerts(conn, server: dict, rows: list[dict], sysd: dict, errors: dict[str, s
     if sysd and time.time() - float(sysd.get("ts", 0)) > 60:
         out.append({"level": "warn", "ts": None, "live": None, "message": "지표 수집기 응답 없음 (livemax-collector 확인)"})
     for r in rows:
+        if r["state"] in ("ok", "warn") and r.get("transport", "").startswith("RTMPS 직접"):
+            out.append({"level": "warn", "ts": None, "live": r["id"],
+                        "message": "TLS 중계 없이 직접 RTMPS 송출 중 — 트래픽 약 30% 증가 (tls 로그 확인)"})
         if r["state"] in ("warn", "down"):
             out.append({"level": "warn" if r["state"] == "warn" else "error", "ts": None, "live": r["id"],
                         "message": f"{r['label']}: {r['state_desc']}"})

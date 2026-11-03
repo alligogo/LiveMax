@@ -76,6 +76,9 @@ DEFAULT_SERVER: dict[str, Any] = {
         # 유튜브 인제스트 주소 (서버 고유값 아님). 나중에 MediaMTX 를 끼우면 여기만 바꾼다.
         "default_url": "rtmps://a.rtmp.youtube.com/live2",
         "audio_connect_timeout": 90,
+        # RTMPS 암호화를 ffmpeg 대신 라이브별 stunnel 이 큰 TLS 레코드로 처리 → 송출 트래픽 약 30% 절감
+        # (tls_relay.py 참고). 띄우지 못하면 직접 RTMPS 로 자동 전환.
+        "tls_relay": {"enabled": True, "verify": True},
     },
     "concat": {
         "hours": 24,

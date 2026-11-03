@@ -68,7 +68,8 @@ def assert_copy_only(args: list[str]) -> None:
         raise ReencodeForbidden("재인코딩 금지 위반: " + "; ".join(problems))
 
 
-def build(concat_list: Path, audio_url: str, output_url: str, rw_timeout_s: int = 15) -> list[str]:
+def build(concat_list: Path, audio_url: str, output_url: str, rw_timeout_s: int = 15,
+          extra_out: list[str] | None = None) -> list[str]:
     """송출 명령. 출력 URL 에는 스트림 키가 들어가므로 이 리스트를 절대 그대로 로그에 찍지 말 것."""
     args = [
         FFMPEG, "-hide_banner", "-nostdin",
@@ -81,6 +82,7 @@ def build(concat_list: Path, audio_url: str, output_url: str, rw_timeout_s: int 
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy", "-c:a", "copy",
         "-max_muxing_queue_size", "1024",
+        *(extra_out or []),  # 출력 프로토콜 옵션 (예: TLS 중계 시 -rtmp_tcurl)
         "-f", "flv", "-flvflags", "no_duration_filesize",
         output_url,
     ]

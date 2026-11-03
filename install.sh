@@ -60,7 +60,7 @@ step "2/9 패키지 설치"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # --no-upgrade: 이미 설치된 송출 도구(ffmpeg, liquidsoap)를 install.sh 가 몰래 올리지 않는다 (업데이트는 점검 시간에 수동)
-apt-get install -y -qq --no-upgrade ffmpeg liquidsoap python3-venv python3-pip vnstat ufw fail2ban \
+apt-get install -y -qq --no-upgrade ffmpeg liquidsoap stunnel4 python3-venv python3-pip vnstat ufw fail2ban \
   unattended-upgrades sqlite3 caddy curl ca-certificates logrotate >/dev/null
 
 FF_VER=$(ffmpeg -version | head -1 | awk '{print $3}')

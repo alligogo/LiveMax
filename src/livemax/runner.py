@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import concat, config, db, ffmpeg_cmd, logsetup, secrets
+from . import concat, config, db, ffmpeg_cmd, logsetup, secrets, tls_relay
 from .state import write_json_atomic
 
 EX_CONFIG = 78  # systemd RestartPreventExitStatus=78 — 비활성 라이브는 재시작하지 않음
@@ -64,6 +64,7 @@ class Runner:
         self.status: dict = {"live_id": live_id, "state": "starting", "runner_pid": os.getpid(),
                              "started_at": time.time(), "updated_at": time.time()}
         self.meta_path: Path | None = None
+        self.relay: tls_relay.Relay | None = None
 
     # ---------------- 상태 ----------------
     def publish(self, **kw) -> None:
@@ -138,6 +139,8 @@ class Runner:
         self.stopping = True
         if self.proc and self.proc.poll() is None:
             self.proc.send_signal(signal.SIGINT)  # ffmpeg 는 SIGINT 에 깔끔히 마무리한다
+        elif self.relay:
+            self.relay.stop()
 
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self._on_signal)
@@ -179,7 +182,6 @@ class Runner:
             time.sleep(30)
             return 1
         base = (live.output_url or self.server["output"]["default_url"]).rstrip("/")
-        output_url = f"{base}/{key}"
 
         # 3) 오디오 대기
         audio_url = f"http://127.0.0.1:{live.harbor_port}/{live.id}.aac"
@@ -189,14 +191,25 @@ class Runner:
             self.publish(state="error", message="오디오 소스 없음")
             return 1
 
-        # 4) ffmpeg
-        args = ffmpeg_cmd.build(list_path, audio_url, output_url)  # 내부에서 assert_copy_only
+        # 4) RTMPS TLS 중계 (라이브 전용 stunnel). 실패하면 직접 RTMPS.
+        relay_port = None
+        rcfg = self.server["output"].get("tls_relay", {})
+        if rcfg.get("enabled", True):
+            self.relay = tls_relay.Relay(live.id, self.paths.run_dir, self.paths.log_dir)
+            relay_port = self.relay.start(base, verify=bool(rcfg.get("verify", True)))
+        out = tls_relay.plan(base, key, relay_port)
+        if rcfg.get("enabled", True) and out.mode == "rtmps-direct":
+            db.add_event(conn, "warn", "runner", "TLS 중계 실패 — 직접 RTMPS 로 송출 (트래픽 증가)", live.id)
+
+        # 5) ffmpeg
+        args = ffmpeg_cmd.build(list_path, audio_url, out.url, extra_out=out.extra_args)  # 내부에서 assert_copy_only
         self.log.info("ffmpeg 시작: %s", ffmpeg_cmd.redacted(args, key))
         self.log.info("bitrate(설정)=%dk tz=%s restart_at=%s concat=%s", live.bitrate_kbps, live.timezone,
                       live.restart_at, list_path.name)
         self.proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
         self.publish(state="running", ffmpeg_pid=self.proc.pid, concat=str(list_path), speed=None,
-                     ffmpeg_started_at=time.time(), message="")
+                     ffmpeg_started_at=time.time(), message="", transport=out.mode)
+        self.log.info("전송 방식: %s", out.mode)
         db.add_event(conn, "info", "runner", f"송출 시작 (pid {self.proc.pid}, {list_path.name})", live.id)
 
         t_err = threading.Thread(target=self._read_stderr, daemon=True)
@@ -208,6 +221,8 @@ class Runner:
             self.proc.kill()
             rc = self.proc.wait()
         t_err.join(timeout=2)
+        if self.relay:
+            self.relay.stop()
 
         msg = f"ffmpeg 종료 rc={rc}" + (" (요청에 의한 정지)" if self.stopping else "")
         (self.log.info if self.stopping else self.log.error)(msg)

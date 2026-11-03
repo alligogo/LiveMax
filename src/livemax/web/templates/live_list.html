@@ -26,6 +26,7 @@
         <dt>영상</dt><dd>{{ r.clip }} {% if r.segment %}<span class="muted">({{ r.segment }} 구간)</span>{% endif %}</dd>
         <dt>재시작</dt><dd>1시간 {{ r.restarts_hour }} · 누적 {{ r.restarts_total }} · 마지막 중단 {{ r.last_stop }}</dd>
         <dt>설정</dt><dd>{{ r.bitrate_kbps }}k · {{ r.timezone }} · 재시작 {{ r.restart_at }}</dd>
+        <dt>전송</dt><dd>{{ r.transport }}</dd>
       </dl>
     </article>
   {% else %}
