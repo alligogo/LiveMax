@@ -19,7 +19,7 @@ from pathlib import Path
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
-from .. import paths as _paths
+from ..paths import get_paths
 from ..secrets import write_secret
 
 _ph = PasswordHasher()
@@ -28,15 +28,15 @@ MIN_PASSWORD_LEN = 12
 
 
 def hash_file() -> Path:
-    return _paths.SECRETS_DIR / "admin.hash"
+    return get_paths().secrets / "admin.hash"
 
 
 def must_change_file() -> Path:
-    return _paths.SECRETS_DIR / "admin.must_change"
+    return get_paths().secrets / "admin.must_change"
 
 
 def initial_file() -> Path:
-    return _paths.SECRETS_DIR / "admin.initial_password"
+    return get_paths().secrets / "admin.initial_password"
 
 
 def generate_password(length: int = 20) -> str:
@@ -51,6 +51,13 @@ def set_password(pw: str, must_change: bool = False) -> None:
     else:
         must_change_file().unlink(missing_ok=True)
         initial_file().unlink(missing_ok=True)  # 초기 비밀번호 파일은 변경 후 즉시 삭제
+
+
+def ensure_initial_password() -> str | None:
+    """관리자 비밀번호가 없으면 랜덤 생성 (고정 초기값 금지, DESIGN 9.2). 새로 만들었으면 평문 반환."""
+    if hash_file().exists():
+        return None
+    return reset_to_random()
 
 
 def reset_to_random() -> str:
