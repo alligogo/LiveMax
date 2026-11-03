@@ -22,7 +22,6 @@ systemd 에서 IOSchedulingClass=idle (= ionice -c3), Nice=19 로 실행되어 �
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
@@ -30,7 +29,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config, db, logsetup
+from . import db
+from .config import LiveStore
 from .paths import Paths, is_within
 
 log = logging.getLogger("livemax.cleanup")
@@ -137,9 +137,9 @@ def clean_rejected(paths: Paths, rep: Report, dry: bool, now: float, days: float
 
 
 def clean_logs(paths: Paths, rep: Report, dry: bool, now: float, days: float) -> None:
-    if not paths.log_dir.is_dir():
+    if not paths.logs.is_dir():
         return
-    for p in paths.log_dir.iterdir():
+    for p in paths.logs.iterdir():
         # 현재 기록 중인 *.log 는 logrotate 담당. 회전된 *.log.N / *.gz 만 기간 초과 시 삭제
         if p.is_file() and not p.name.endswith(".log") and _older_than(p, days * 86400, now):
             safe_unlink(paths, p, rep, "오래된 로그", dry)
@@ -222,26 +222,31 @@ def _execute_user_delete(paths: Paths, conn, rep: Report, dry: bool) -> None:
             conn.execute("DELETE FROM pending_deletes WHERE path=?", (r["path"],))
 
 
-def run(emergency: bool = False, dry: bool = False, manual: bool = False) -> Report:
-    server = config.load_server()
-    paths = config.get_paths(server)
-    cl = server["cleanup"]
+def clean_uploads(paths: Paths, rep: Report, dry: bool, now: float, hours: float) -> None:
+    """끊긴 웹 업로드 조각 (state/uploads) — 24시간 지나면 삭제."""
+    if not paths.uploads.is_dir():
+        return
+    for p in paths.uploads.iterdir():
+        if p.is_file() and _older_than(p, hours * 3600, now):
+            safe_unlink(paths, p, rep, "중단된 업로드", dry)
+
+
+def run(paths: Paths, settings: dict, emergency: bool = False, dry: bool = False, manual: bool = False) -> Report:
+    cl = settings["cleanup"]
     now = time.time()
     rep = Report()
-    db.init(paths.db)
     conn = db.connect(paths.db)
-
     rejected_days = 0 if emergency else float(cl["rejected_days"])
     log_days = 2 if emergency else float(cl["log_days"])
     incoming_h = 6 if emergency else float(cl["incoming_stale_hours"])
     mode = "긴급" if emergency else ("수동" if manual else "정기")
     log.info("정리 시작 (%s%s)", mode, ", dry-run" if dry else "")
-
-    lives, _ = config.load_all_lives(server=server, cross=False)
+    lives = LiveStore(paths, settings).all()
     steps = [
         ("썸네일", lambda: clean_thumbs(paths, rep, dry)),
         ("concat", lambda: clean_concat(paths, rep, dry, now)),
         ("업로드 임시", lambda: clean_incoming(paths, rep, dry, now, incoming_h)),
+        ("웹 업로드 조각", lambda: clean_uploads(paths, rep, dry, now, incoming_h)),
         ("격리", lambda: clean_rejected(paths, rep, dry, now, rejected_days)),
         ("로그", lambda: clean_logs(paths, rep, dry, now, log_days)),
         ("런타임", lambda: clean_runtime(paths, rep, dry, {lv.id for lv in lives})),
@@ -253,35 +258,17 @@ def run(emergency: bool = False, dry: bool = False, manual: bool = False) -> Rep
         except ProtectedPathError:
             log.critical("보호 경로 삭제 시도 차단 — 정리 중단 (%s)", name)
             raise
-        except Exception:  # noqa: BLE001 — 한 단계 실패가 나머지를 막으면 안 됨
+        except Exception:  # noqa: BLE001
             log.exception("정리 단계 실패: %s", name)
     try:
         n = rollup_metrics(conn, float(cl["metrics_raw_days"]), now, dry)
         if n:
-            rep.add("지표 원본→시간 집계", 0)
             log.info("지표 축약: 원본 %d행", n)
     except Exception:  # noqa: BLE001
         log.exception("지표 축약 실패")
-
     msg = f"정리 완료 ({mode}): {rep.summary()}"
     log.info(msg)
     if not dry:
         db.add_event(conn, "info", "cleanup", msg)
     conn.close()
     return rep
-
-
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="LiveMax 자동 정리")
-    ap.add_argument("--emergency", action="store_true", help="디스크 90%% 초과 시 긴급 정리 (보관 기간 단축)")
-    ap.add_argument("--manual", action="store_true", help="대시보드 수동 정리 버튼")
-    ap.add_argument("--dry-run", action="store_true")
-    a = ap.parse_args(argv)
-    server = config.load_server()
-    logsetup.setup("cleanup", server)
-    run(emergency=a.emergency, dry=a.dry_run, manual=a.manual)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

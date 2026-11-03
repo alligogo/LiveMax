@@ -1,4 +1,4 @@
-"""업로드 처리 서비스 (DESIGN 4.2) — livemax-ingest.service
+"""업로드 처리 (DESIGN 4.2) — livemaxd 의 ingest 스레드가 scan_once 를 주기적으로 호출
 
     업로드 → _incoming/<video|audio>/<폴더>/<파일>
           → (전송 완료 판정: 크기·mtime 이 stable_seconds 동안 불변)
@@ -14,27 +14,19 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
-import signal
 import time
 from pathlib import Path
 
-from . import catalog, config, db, logsetup, probe, thumbs
+from . import catalog, config, db, probe, thumbs
 from .paths import Paths
 
 log = logging.getLogger("livemax.ingest")
 
 PARTIAL_SUFFIXES = (".part", ".tmp", ".filepart", ".crdownload", ".partial")
 KINDS = ("video", "audio")
-
-
-def ensure_dirs(paths: Paths) -> None:
-    for d in (paths.incoming, paths.incoming_tmp, paths.rejected, paths.video, paths.audio,
-              paths.incoming / "video", paths.incoming / "audio"):
-        d.mkdir(parents=True, exist_ok=True)
 
 
 def _unique_dest(dest: Path) -> Path:
@@ -159,49 +151,3 @@ def _is_stable(f: Path, seen: dict[Path, tuple[int, float, float]], now: float, 
         seen[f] = (sig[0], sig[1], now)
         return False
     return now - prev[2] >= stable and now - st.st_mtime >= stable
-
-
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="LiveMax 업로드 검증·이동 서비스")
-    ap.add_argument("--once", action="store_true", help="한 번만 훑고 종료")
-    args = ap.parse_args(argv)
-
-    server = config.load_server()
-    paths = config.get_paths(server)
-    logsetup.setup("ingest", server)
-    ensure_dirs(paths)
-    db.init(paths.db)
-    conn = db.connect(paths.db)
-
-    stop = False
-
-    def _sig(*_):
-        nonlocal stop
-        stop = True
-
-    signal.signal(signal.SIGTERM, _sig)
-    signal.signal(signal.SIGINT, _sig)
-
-    seen: dict[Path, tuple[int, float, float]] = {}
-    log.info("ingest 시작: %s", paths.incoming)
-    if args.once:
-        # --once: 안정 판정 대기 없이 즉시 처리 (수동 실행용)
-        server = {**server, "ingest": {**server["ingest"], "stable_seconds": 0}}
-        scan_once(paths, server, conn, seen)
-        scan_once(paths, server, conn, seen)
-        return 0
-    while not stop:
-        try:
-            scan_once(paths, server, conn, seen)
-        except Exception:  # noqa: BLE001
-            log.exception("scan 실패")
-        for _ in range(int(server["ingest"]["poll_seconds"] * 10)):
-            if stop:
-                break
-            time.sleep(0.1)
-    log.info("ingest 종료")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -28,12 +28,8 @@ class UTCFormatter(logging.Formatter):
 FMT = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
 
 
-def setup(component: str, server: dict | None = None, to_stderr: bool = True) -> logging.Logger:
-    level_name = "DEBUG"
-    log_dir: Path | None = None
-    if server:
-        level_name = str(server.get("logging", {}).get("level", "DEBUG")).upper()
-        log_dir = Path(server["paths"]["log_dir"])
+def setup(component: str, log_dir: Path | None = None, level_name: str = "INFO", to_stderr: bool = True) -> logging.Logger:
+    level_name = str(level_name).upper()
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, level_name, logging.DEBUG))

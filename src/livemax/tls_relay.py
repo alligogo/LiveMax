@@ -83,7 +83,17 @@ def is_listening(port: int) -> bool:
     return False
 
 
-def render_conf(listen_port: int, host: str, port: int, log_path: Path, verify: bool = True) -> str:
+def resolve_ipv4(host: str, port: int) -> str | None:
+    """유튜브 인제스트의 IPv4 주소. (v1 live1: IPv6 경로가 약 10분마다 끊겨 송출이 멈췄다)"""
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+        return infos[0][4][0] if infos else None
+    except OSError:
+        return None
+
+
+def render_conf(listen_port: int, host: str, port: int, log_path: Path, verify: bool = True,
+                connect_addr: str | None = None) -> str:
     lines = [
         "; LiveMax 자동 생성 — 라이브 1개 전용 TLS 중계 (runner 가 매 시작마다 만든다)",
         "foreground = yes",
@@ -95,9 +105,13 @@ def render_conf(listen_port: int, host: str, port: int, log_path: Path, verify: 
         "[rtmps]",
         "client = yes",
         f"accept = 127.0.0.1:{listen_port}",
-        f"connect = {host}:{port}",
-        "delay = yes",  # 접속할 때마다 DNS 조회 (인제스트 IP 변경 대응)
+        # IPv4 고정 시 주소를 직접 쓰고, 인증서 검증·SNI 는 호스트 이름으로 한다
+        f"connect = {connect_addr or host}:{port}",
+        *([] if connect_addr else ["delay = yes"]),
         f"sni = {host}",
+        "socket = r:SO_KEEPALIVE=1",
+        "socket = r:TCP_KEEPIDLE=30",
+        "socket = r:TCP_KEEPINTVL=10",
         "TIMEOUTclose = 0",
     ]
     if verify:
@@ -109,13 +123,14 @@ class Relay:
     """라이브 1개의 stunnel 자식 프로세스."""
 
     def __init__(self, live_id: str, run_dir: Path, log_dir: Path):
+        self.connect_addr: str | None = None
         self.live_id = live_id
         self.conf_path = run_dir / f"{live_id}.stunnel.conf"
         self.log_path = log_dir / f"tls-{live_id}.log"
         self.proc: subprocess.Popen | None = None
         self.port: int | None = None
 
-    def start(self, base_url: str, verify: bool = True, wait_s: float = 5.0) -> int | None:
+    def start(self, base_url: str, verify: bool = True, wait_s: float = 5.0, ipv4: bool = True) -> int | None:
         t = relay_target(base_url)
         if not t:
             return None
@@ -124,7 +139,9 @@ class Relay:
             return None
         host, port, _ = t
         self.port = free_port()
-        self.conf_path.write_text(render_conf(self.port, host, port, self.log_path, verify), encoding="utf-8")
+        self.connect_addr = resolve_ipv4(host, port) if ipv4 else None
+        self.conf_path.write_text(render_conf(self.port, host, port, self.log_path, verify, self.connect_addr),
+                                  encoding="utf-8")
         self.proc = subprocess.Popen([STUNNEL, str(self.conf_path)], stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + wait_s
@@ -132,8 +149,9 @@ class Relay:
             if self.proc.poll() is not None:
                 break
             if is_listening(self.port):
-                log.info("%s: TLS 중계 시작 (stunnel pid %d, 127.0.0.1:%d → %s:%d)",
-                         self.live_id, self.proc.pid, self.port, host, port)
+                log.info("%s: TLS 중계 시작 (stunnel pid %d, 127.0.0.1:%d → %s:%d %s)",
+                         self.live_id, self.proc.pid, self.port, host, port,
+                         f"[IPv4 {self.connect_addr}]" if self.connect_addr else "")
                 return self.port
             time.sleep(0.1)
         log.warning("%s: TLS 중계를 띄우지 못함 — 직접 RTMPS 로 송출 (로그: %s)", self.live_id, self.log_path)
