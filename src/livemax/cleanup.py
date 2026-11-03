@@ -11,18 +11,16 @@
   - 로그: logrotate 가 돌린 압축본 중 보관 기간 초과분
   - 지표 DB: 원본 30일, 그 이전은 시간 단위로 집계 후 축약
   - 런타임 찌꺼기: 없어진 라이브의 /run/livemax 파일
-  - 삭제 예약(pending_deletes): 사용자가 지운 영상 중 이제 어떤 concat 목록도 참조하지 않는 것
 
 절대 건드리지 않는 것: /media/video/, /media/audio/ 의 업로드 원본 (DESIGN 11-11).
-  → safe_unlink() 가 보호 경로 아래의 삭제를 무조건 거부한다. 유일한 예외는 사용자가 대시보드에서
-    명시적으로 삭제를 요청한 pending_deletes 항목이며, 이것도 별도 함수(_execute_user_delete)로 분리했다.
+  → safe_unlink() 가 보호 경로 아래의 삭제를 무조건 거부한다. 원본 삭제는 사용자가 웹에서 직접 할 때뿐이다
+    (라이브가 쓰는 폴더의 파일은 웹에서도 지울 수 없다).
 
 systemd 에서 IOSchedulingClass=idle (= ionice -c3), Nice=19 로 실행되어 송출을 방해하지 않는다.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
@@ -183,45 +181,6 @@ def rollup_metrics(conn, raw_days: float, now: float, dry: bool) -> int:
     return n
 
 
-def _referenced_by_concat(paths: Paths) -> set[str]:
-    refs: set[str] = set()
-    if not paths.concat_dir.is_dir():
-        return refs
-    for meta in paths.concat_dir.glob("*/*.json"):
-        try:
-            for e in json.loads(meta.read_text(encoding="utf-8")).get("entries", []):
-                refs.add(e["path"])
-        except (OSError, json.JSONDecodeError, KeyError):
-            continue
-    return refs
-
-
-def _execute_user_delete(paths: Paths, conn, rep: Report, dry: bool) -> None:
-    """사용자가 명시적으로 삭제를 요청한 영상 — 오늘 목록이 더 이상 참조하지 않을 때 실행.
-    자동 정리 판단으로 원본을 지우는 경로가 아니다 (요청 기록이 있는 파일만)."""
-    rows = conn.execute("SELECT path FROM pending_deletes").fetchall()
-    if not rows:
-        return
-    refs = _referenced_by_concat(paths)
-    for r in rows:
-        p = Path(r["path"])
-        if str(p) in refs:
-            continue
-        if not (is_within(p, paths.video) or is_within(p, paths.audio)):
-            conn.execute("DELETE FROM pending_deletes WHERE path=?", (r["path"],))
-            continue
-        try:
-            size = p.stat().st_size
-            if not dry:
-                p.unlink()
-                conn.execute("DELETE FROM pending_deletes WHERE path=?", (r["path"],))
-                conn.execute("DELETE FROM media_files WHERE path=?", (r["path"],))
-            rep.add("사용자 삭제 요청 실행", size)
-            log.info("사용자 삭제 요청 실행: %s", p)
-        except FileNotFoundError:
-            conn.execute("DELETE FROM pending_deletes WHERE path=?", (r["path"],))
-
-
 def clean_uploads(paths: Paths, rep: Report, dry: bool, now: float, hours: float) -> None:
     """끊긴 웹 업로드 조각 (state/uploads) — 24시간 지나면 삭제."""
     if not paths.uploads.is_dir():
@@ -250,7 +209,6 @@ def run(paths: Paths, settings: dict, emergency: bool = False, dry: bool = False
         ("격리", lambda: clean_rejected(paths, rep, dry, now, rejected_days)),
         ("로그", lambda: clean_logs(paths, rep, dry, now, log_days)),
         ("런타임", lambda: clean_runtime(paths, rep, dry, {lv.id for lv in lives})),
-        ("삭제 예약", lambda: _execute_user_delete(paths, conn, rep, dry)),
     ]
     for name, fn in steps:
         try:

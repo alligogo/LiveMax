@@ -31,11 +31,28 @@ def test_restart_times_are_staggered(settings):
 
 
 @pytest.mark.parametrize("field,value", [("video_folders", []), ("audio_folders", []), ("name", " "),
-                                         ("audio_mode", "x"), ("crossfade", 11), ("bitrate", "500k")])
+                                         ("audio_mode", "x"), ("crossfade", 11), ("timer_mode", "x"),
+                                         ("timer_gap_minutes", 0)])
 def test_validation_rejects(field, value):
     lv = make_live(**{field: value})
     with pytest.raises(ConfigError):
         lv.validate()
+
+
+def test_timer_end_at():
+    assert make_live().timer_end_at(1000.0) is None
+    assert make_live(timer_mode="duration", timer_minutes=710).timer_end_at(1000.0) == 1000.0 + 710 * 60
+    assert make_live(timer_mode="until", timer_until=5000.0).timer_end_at(1000.0) == 5000.0
+    with pytest.raises(ConfigError):
+        make_live(timer_mode="until", timer_until=0).validate()
+    with pytest.raises(ConfigError):
+        make_live(timer_mode="duration", timer_minutes=5).validate()
+
+
+def test_old_yaml_with_bitrate_still_loads():
+    lv = config.live_from_dict({"id": "live1", "name": "x", "bitrate": "5500k", "video_folders": ["a"],
+                                "audio_folders": ["b"], "harbor_port": 8101})
+    assert lv.timer_mode == "off" and "bitrate" not in lv.to_dict()
 
 
 @pytest.mark.parametrize("name,ok", [("morning", True), ("저녁 재즈", True), ("_incoming", False), ("a/b", False), ("x#{y}", False)])

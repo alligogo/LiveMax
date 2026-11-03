@@ -31,13 +31,19 @@ const fmt = {
   bytes(b) { if (b == null) return "-"; const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return `${b.toFixed(i ? 1 : 0)} ${u[i]}`; },
   num(v, d = 1, unit = "") { return v == null ? "-" : `${Number(v).toFixed(d)}${unit}`; },
 };
-const STATUS = { ok: "정상", warn: "경고", down: "중단", restarting: "재시작중", stopped: "정지됨" };
+const STATUS = { ok: "정상", warn: "경고", down: "중단", restarting: "재시작중", stopped: "정지됨", waiting: "다음 방송 대기" };
 const MODES = [["random_norepeat", "중복방지 랜덤"], ["random", "완전 랜덤"], ["sequential_loop", "순차 반복"], ["sequential", "순차 1회"]];
 const ICON = {
   edit: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
   out: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   trash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>',
+  music: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
+  video: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="14" height="14" rx="2.5"/><path d="m16 10 6-3.5v11L16 14"/></svg>',
+  timer: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>',
+  plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  film: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/></svg>',
 };
+const ico = (name, cls) => h("span", { class: "ico " + (cls || ""), html: ICON[name] });
 
 function toast(msg, isErr) {
   const t = h("div", { class: "toast" + (isErr ? " err" : "") }, msg);
@@ -65,7 +71,7 @@ let pollTimer = null;
 function stopPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
 
 function shell(active, ...content) {
-  const nav = [["#/", "라이브", "lives"], ["#/media/video", "영상", "video"], ["#/media/audio", "음원", "audio"], ["#/system", "설정", "system"]];
+  const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/system", "설정", "system"]];
   return h("div", {},
     h("header", { class: "topbar" },
       h("a", { class: "brand", href: "#/" }, h("span", { class: "dot" }), "LiveMax"),
@@ -174,22 +180,37 @@ function renderLives(grid, ov) {
           tile(lv.started_at ? fmt.dur(now - lv.started_at) : "-", "가동 시간"),
           tile(lv.bitrate_kbps ? Math.round(lv.bitrate_kbps).toLocaleString() : "-", "kbit/s"),
           tile(lv.speed != null ? lv.speed.toFixed(2) + "x" : "-", "speed", speedCls)),
-        h("div", { class: "nowline" }, h("span", { class: "lbl" }, "♪"), h("span", { class: "val" }, lv.song_title ? `${lv.song_title}${lv.song_artist ? " — " + lv.song_artist : ""}` : "-")),
-        h("div", { class: "nowline" }, h("span", { class: "lbl" }, "▶"), h("span", { class: "val" }, lv.clip ? `${lv.clip_folder} / ${lv.clip}` : "-")),
+        h("div", { class: "nowline" }, ico("music", "lbl"), h("span", { class: "val" }, lv.song_title ? `${lv.song_title}${lv.song_artist ? " — " + lv.song_artist : ""}` : "-")),
+        h("div", { class: "nowline" }, ico("video", "lbl"), h("span", { class: "val" }, lv.clip ? `${lv.clip_folder} / ${lv.clip}` : "-")),
+        timerLine(lv, now),
         lv.message ? h("div", { class: "msg" + (lv.status === "down" ? " err" : "") }, lv.message) : null,
         h("div", { class: "actions" },
           lv.enabled
-            ? h("button", { class: "btn danger", onclick: () => liveAction(lv, "stop") }, "정지")
+            ? h("button", { class: "btn danger", onclick: () => liveAction(lv, "stop") }, lv.status === "waiting" ? "반복 끄고 정지" : "정지")
             : h("button", { class: "btn primary", onclick: () => liveAction(lv, "start") }, "시작"),
           h("button", { class: "btn", disabled: !lv.enabled, onclick: () => liveAction(lv, "restart") }, "재시작")),
         h("div", { class: "links" },
           lv.youtube_video_id ? h("a", { onclick: () => openPreview(lv) }, "유튜브 미리보기") : null,
           h("a", { onclick: () => openLog(lv) }, "로그"),
-          h("span", { class: "faint" }, `다음 자동 재시작 ${fmt.time(lv.next_restart)}`))));
+          h("span", { class: "faint" }, lv.timer_mode !== "off" ? "타이머 방송 — 일일 재시작 안 함" : `다음 자동 재시작 ${fmt.time(lv.next_restart)}`))));
   });
-  cards.push(h("button", { class: "add-card", onclick: () => openLiveEditor(null) }, h("div", {}, h("span", { class: "plus" }, "+"), "라이브 추가")));
-  grid.replaceChildren(...cards);
+  if (!cards.length) cards.push(h("div", { class: "card empty" }, h("div", { class: "card-body" },
+    h("b", {}, "아직 라이브가 없습니다"), h("p", { class: "muted" }, "비디오·음악 폴더에 파일을 올린 뒤 오른쪽의 '라이브 추가'를 누르세요."))));
+  grid.replaceChildren(addBtn("m-only"), ...cards);
 }
+const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => openLiveEditor(null) }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
+
+function timerLine(lv, now) {
+  if (lv.timer_mode === "off") return null;
+  let text;
+  if (lv.next_start_at) text = `다음 방송 ${fmt.time(lv.next_start_at)} 시작 (${fmt.dur(Math.max(0, lv.next_start_at - now))} 뒤)`;
+  else if (lv.timer_end_at) text = `${fmt.time(lv.timer_end_at)} 자동 종료 · 남은 시간 ${fmt.dur(Math.max(0, lv.timer_end_at - now))}`;
+  else if (lv.timer_mode === "duration") text = `시작하면 ${fmtHM(lv.timer_minutes)} 뒤 자동 종료${lv.timer_repeat ? " · 반복" : ""}`;
+  else text = `${fmt.time(lv.timer_until)} 자동 종료`;
+  return h("div", { class: "nowline timer" }, ico("timer", "lbl"), h("span", { class: "val" }, text));
+}
+function toLocalInput(ts) { const d = new Date(ts * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+function fmtHM(min) { const hh = Math.floor(min / 60), mm = min % 60; return hh ? `${hh}시간${mm ? " " + mm + "분" : ""}` : `${mm}분`; }
 
 function renderSide(side, ov) {
   const s = ov.system || {}, c = ov.capacity || {};
@@ -198,6 +219,7 @@ function renderSide(side, ov) {
   const ratio = Math.min(1, c.usage_ratio || 0);
   const kv = (k, v) => h("div", { class: "kv" }, h("span", { class: "muted" }, k), h("b", {}, v));
   side.replaceChildren(
+    addBtn("d-only"),
     h("div", { class: "card" }, h("div", { class: "card-head" }, "용량"),
       h("div", { class: "card-body" },
         h("div", { class: "big" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "개 더 추가 가능 (안전 기준)")),
@@ -226,7 +248,7 @@ function liveName(id) { const l = (lastOverview?.lives || []).find((x) => x.id =
 
 async function liveAction(lv, action) {
   const label = { start: "시작", stop: "정지", restart: "재시작" }[action];
-  if (action !== "start" && !confirm(`'${lv.name}' 을(를) ${label}할까요?\n${action === "stop" ? "유튜브 송출이 멈춥니다." : "몇 초 끊겼다가 같은 방송으로 돌아옵니다."}`)) return;
+  if (action !== "start" && !confirm(`'${lv.name}' 을(를) ${label}할까요?\n${action === "stop" ? "유튜브 송출이 멈춥니다." + (lv.timer_repeat ? " (타이머 반복도 꺼집니다)" : "") : "비디오만 다시 띄워 1~3초 끊겼다가 같은 방송으로 돌아옵니다. 음악은 이어서 나옵니다."}`)) return;
   try { await api("POST", `/api/lives/${lv.id}/${action}`); toast(`${lv.name}: ${label} 요청`); setTimeout(route, 800); }
   catch (e) { toast(e.message, true); }
 }
@@ -245,7 +267,7 @@ async function openLog(lv) {
     try { const r = await api("GET", `/api/logs?name=${name}&lines=300`); pre.textContent = r.text; pre.scrollTop = pre.scrollHeight; }
     catch (e) { pre.textContent = e.message; }
   };
-  [["live", "송출"], ["audio", "음원"], ["tls", "TLS 중계"]].forEach(([p, label]) =>
+  [["live", "송출"], ["audio", "음악"], ["tls", "TLS 중계"]].forEach(([p, label]) =>
     sel.append(h("button", { "data-n": `${p}-${lv.id}`, onclick: () => load(`${p}-${lv.id}`) }, label)));
   openModal(`로그 — ${lv.name}`, [sel, h("div", { style: "height:12px" }), pre], null, { wide: true });
   load(`live-${lv.id}`);
@@ -257,12 +279,13 @@ async function openLiveEditor(lv) {
   let media;
   try { media = { video: await api("GET", "/api/media/video"), audio: await api("GET", "/api/media/audio") }; }
   catch (e) { toast(e.message, true); return; }
-  const cur = lv || { name: "", video_folders: [], audio_folders: [], audio_mode: "random_norepeat", norepeat_count: 30, crossfade: 0, bitrate: "5500k", youtube_video_id: "" };
+  const cur = lv || { name: "", video_folders: [], audio_folders: [], audio_mode: "random_norepeat", norepeat_count: 30, crossfade: 0, youtube_video_id: "",
+    timer_mode: "off", timer_minutes: 710, timer_until: 0, timer_repeat: false, timer_gap_minutes: 2 };
   const name = h("input", { class: "input", value: cur.name, placeholder: "예: 재즈 색소폰 24/7", maxlength: 80 });
   const key = h("input", { class: "input", type: "password", autocomplete: "off", placeholder: lv ? `현재 키 ${lv.key_masked || "없음"} — 바꿀 때만 입력` : "유튜브 스튜디오의 스트림 키" });
   const checks = (kind, selected) => {
     const box = h("div", { class: "checks" });
-    if (!media[kind].folders.length) box.append(h("div", { class: "muted small" }, `${kind === "video" ? "영상" : "음원"} 폴더가 없습니다. 먼저 '${kind === "video" ? "영상" : "음원"}' 메뉴에서 폴더를 만들고 파일을 올리세요.`));
+    if (!media[kind].folders.length) box.append(h("div", { class: "muted small" }, `${kind === "video" ? "비디오" : "음악"} 폴더가 없습니다. 먼저 '${kind === "video" ? "비디오" : "음악"}' 메뉴에서 폴더를 만들고 파일을 올리세요.`));
     media[kind].folders.forEach((f) => {
       const cb = h("input", { type: "checkbox", value: f.name });
       cb.checked = selected.includes(f.name);
@@ -279,34 +302,59 @@ async function openLiveEditor(lv) {
     const b = h("button", { type: "button", class: v === mode ? "on" : "", onclick: () => { mode = v; [...modeSeg.children].forEach((x) => x.classList.toggle("on", x === b)); } }, l);
     return b;
   }));
-  const bitrate = h("input", { class: "input", value: cur.bitrate });
   const norep = h("input", { class: "input", type: "number", min: 0, max: 1000, value: cur.norepeat_count });
   const xfade = h("input", { class: "input", type: "number", min: 0, max: 10, step: 0.5, value: cur.crossfade });
   const vid = h("input", { class: "input", value: cur.youtube_video_id || "", placeholder: "선택 — youtu.be/ 뒤의 영상 ID" });
   const msg = h("div", { class: "msg err" });
   const adv = h("details", {}, h("summary", { class: "muted", style: "cursor:pointer;margin:6px 0 14px" }, "고급 설정"),
-    h("label", { class: "field" }, h("span", {}, "비트레이트"), bitrate, h("div", { class: "hint" }, "copy 송출이라 실제 비트레이트는 영상 파일 자체의 값입니다. 이 값은 용량 계산에 쓰입니다.")),
     h("label", { class: "field" }, h("span", {}, "중복방지 곡 수"), norep),
     h("label", { class: "field" }, h("span", {}, "크로스페이드 (초)"), xfade, h("div", { class: "hint" }, "0 = 오디오 copy (CPU 최소). 0보다 크면 이 라이브만 오디오를 디코딩·재인코딩합니다.")),
     h("label", { class: "field" }, h("span", {}, "유튜브 영상 ID"), vid, h("div", { class: "hint" }, "넣으면 카드에서 유튜브 미리보기를 열 수 있습니다.")));
 
+  // 타이머
+  let tmode = cur.timer_mode || "off";
+  const tH = h("input", { class: "input", type: "number", min: 0, max: 24, value: Math.floor(cur.timer_minutes / 60), style: "width:84px" });
+  const tM = h("input", { class: "input", type: "number", min: 0, max: 59, step: 5, value: cur.timer_minutes % 60, style: "width:84px" });
+  const untilDefault = cur.timer_until && cur.timer_until > Date.now() / 1000 ? cur.timer_until : Date.now() / 1000 + 710 * 60;
+  const tU = h("input", { class: "input", type: "datetime-local", value: toLocalInput(untilDefault), style: "max-width:240px" });
+  const tRep = h("input", { type: "checkbox" }); tRep.checked = !!cur.timer_repeat;
+  const tGap = h("input", { class: "input", type: "number", min: 1, max: 120, value: cur.timer_gap_minutes, style: "width:84px" });
+  const repLab = h("label", { class: "check" + (tRep.checked ? " on" : ""), style: "max-width:340px" }, tRep, h("span", { class: "nm" }, "끝나면 새 방송으로 다시 시작 (반복)"));
+  tRep.addEventListener("change", () => repLab.classList.toggle("on", tRep.checked));
+  const pDur = h("div", { class: "timer-pane" },
+    h("div", { class: "row" }, tH, h("span", {}, "시간"), tM, h("span", {}, "분 동안 방송하고 자동 종료")),
+    h("div", { class: "row", style: "margin-top:10px" }, repLab, h("span", { class: "muted small" }, "간격"), tGap, h("span", { class: "muted small" }, "분")),
+    h("div", { class: "hint" }, "시작 버튼을 누른 시각부터 잽니다. 자동 재시작(감시)이 있어도 같은 방송으로 이어서 계산합니다."));
+  const pUntil = h("div", { class: "timer-pane" }, h("div", { class: "row" }, tU, h("span", {}, "에 자동 종료 (내 시간 기준)")));
+  const showPane = () => { pDur.hidden = tmode !== "duration"; pUntil.hidden = tmode !== "until"; tipYT.hidden = tmode === "off"; };
+  const tipYT = h("div", { class: "tip" }, "유튜브 스튜디오의 스트림 설정에서 ", h("b", {}, "'자동 시작'과 '자동 중지 사용'"),
+    "을 켜 두세요. 송출이 멈추면 방송이 끝나고 다시보기 영상으로 남습니다. 12시간이 넘는 방송은 다시보기가 남지 않을 수 있어 11시간 50분을 권장합니다.");
+  const timerSeg = h("div", { class: "seg" }, [["off", "끄기"], ["duration", "방송 시간"], ["until", "종료 시각"]].map(([v, l]) => {
+    const b = h("button", { type: "button", class: v === tmode ? "on" : "", onclick: () => { tmode = v; [...timerSeg.children].forEach((x) => x.classList.toggle("on", x === b)); showPane(); } }, l);
+    return b;
+  }));
+  showPane();
+
   const payload = (apply) => ({ name: name.value, stream_key: key.value, video_folders: vbox.values(), audio_folders: abox.values(),
-    audio_mode: mode, bitrate: bitrate.value, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, apply });
+    audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, apply,
+    timer_mode: tmode, timer_minutes: Number(tH.value || 0) * 60 + Number(tM.value || 0),
+    timer_until: tU.value ? new Date(tU.value).getTime() / 1000 : 0, timer_repeat: tRep.checked, timer_gap_minutes: Number(tGap.value || 2) });
   const save = async (apply) => {
     msg.textContent = "";
     try {
-      if (isNew) await api("POST", "/api/lives", payload(apply));
-      else await api("PUT", `/api/lives/${lv.id}`, payload(apply));
-      closeModal(); toast(apply === "now" ? (isNew ? "저장하고 송출을 시작했습니다" : "저장하고 적용했습니다 (몇 초 끊겼다가 복귀)") : "저장했습니다");
+      const r = isNew ? await api("POST", "/api/lives", payload(apply)) : await api("PUT", `/api/lives/${lv.id}`, payload(apply));
+      closeModal();
+      toast(r.message || (apply !== "now" ? "저장했습니다" : isNew ? "저장하고 송출을 시작했습니다" : r.restarted ? "저장하고 적용했습니다 (잠깐 끊겼다가 복귀)" : "저장했습니다 (재시작 없이 바로 반영)"));
       route();
     } catch (e) { msg.textContent = e.message; }
   };
   openModal(isNew ? "라이브 추가" : `라이브 설정 — ${lv.name}`, [
     h("label", { class: "field" }, h("span", {}, "이름"), name),
     h("label", { class: "field" }, h("span", {}, "스트림 키"), key, h("div", { class: "hint" }, "유튜브 스튜디오 → 라이브 스트리밍 → 스트림 키. 저장 후에는 마지막 4자리만 보입니다.")),
-    h("div", { class: "field" }, h("span", { class: "muted small", style: "display:block;margin-bottom:8px;font-weight:600" }, "영상 폴더 (여러 개 선택 가능)"), vbox),
-    h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "muted small", style: "display:block;margin-bottom:8px;font-weight:600" }, "음원 폴더 (여러 개 선택 가능)"), abox),
-    h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "muted small", style: "display:block;margin-bottom:8px;font-weight:600" }, "재생 방식"), modeSeg),
+    h("div", { class: "field" }, h("span", { class: "flabel" }, "비디오 폴더 (여러 개 선택 가능)"), vbox),
+    h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "음악 폴더 (여러 개 선택 가능)"), abox),
+    h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "재생 방식"), modeSeg),
+    h("div", { class: "field", style: "margin-top:18px" }, h("span", { class: "flabel" }, "타이머 (자동 종료)"), timerSeg, pDur, pUntil, tipYT),
     adv, msg,
   ], [
     isNew ? null : h("button", { class: "btn danger", onclick: async () => {
@@ -315,7 +363,7 @@ async function openLiveEditor(lv) {
     } }, "삭제"),
     h("span", { class: "spacer" }),
     h("button", { class: "btn ghost", onclick: closeModal }, "취소"),
-    h("button", { class: "btn", onclick: () => save("later") }, isNew ? "저장만" : "저장 (다음 재시작 때 적용)"),
+    h("button", { class: "btn", onclick: () => save("later") }, isNew ? "저장만" : "저장만 (다음 시작 때 적용)"),
     h("button", { class: "btn primary", onclick: () => save("now") }, isNew ? "저장하고 시작" : "저장하고 지금 적용"),
   ], { wide: true });
   setTimeout(() => name.focus(), 50);
@@ -326,7 +374,7 @@ let mediaFolder = { video: null, audio: null };
 
 async function showMedia(kind) {
   stopPoll();
-  const label = kind === "video" ? "영상" : "음원";
+  const label = kind === "video" ? "비디오" : "음악";
   const left = h("div", { class: "card" });
   const right = h("div", {});
   mount(shell(kind, h("div", { class: "media-layout" }, left, right)));
@@ -372,15 +420,16 @@ async function renderFolder(kind, root, data) {
 
   const files = kind === "video"
     ? h("div", { class: "files" }, detail.files.map((f) => h("div", { class: "file" },
-        h("div", { class: "th" }, f.thumb ? h("img", { loading: "lazy", alt: "", src: `/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}` }) : "🎞"),
+        h("div", { class: "th" }, f.thumb ? h("img", { loading: "lazy", alt: "", src: `/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}` }) : ico("film")),
         h("div", { class: "meta" }, h("div", { class: "nm", title: f.name }, f.name),
-          h("div", { class: "faint" }, `${fmt.dur(f.duration)} · ${fmt.bytes(f.size)}`, f.status === "delete_pending" ? " · 삭제 예약" : "")),
+          h("div", { class: "faint" }, `${fmt.dur(f.duration)} · ${fmt.bytes(f.size)}`)),
         h("button", { class: "btn sm danger del", html: ICON.trash, title: "삭제", onclick: () => delFile(kind, folder, f.name) }))))
     : h("table", { class: "list-table" }, h("tbody", {}, detail.files.map((f) => h("tr", {},
         h("td", {}, f.name), h("td", { class: "r" }, fmt.dur(f.duration)), h("td", { class: "r" }, fmt.bytes(f.size)),
         h("td", { class: "r", style: "width:40px" }, h("button", { class: "btn sm danger", html: ICON.trash, title: "삭제", onclick: () => delFile(kind, folder, f.name) }))))));
 
-  root.replaceChildren(
+  const inUse = info?.used_by?.length > 0;
+  root.replaceChildren(...[
     h("div", { class: "card" },
       h("div", { class: "card-head" }, folder, h("span", { class: "spacer" }),
         info?.used_by?.length ? h("span", { class: "pill g", style: "text-transform:none" }, `사용 중: ${info.used_by.map(liveName).join(", ")}`) : null,
@@ -388,15 +437,17 @@ async function renderFolder(kind, root, data) {
         h("button", { class: "btn sm danger", onclick: () => deleteFolder(kind, folder) }, "삭제")),
       h("div", { class: "card-body" }, drop, list,
         detail.pending.length ? h("div", { class: "small", style: "margin-top:12px" }, h("span", { class: "pill y" }, "규격 검증 중"), " ", detail.pending.join(", ")) : null,
-        h("div", { class: "small muted", style: "margin-top:14px" }, `${detail.files.length}개 · ${fmt.bytes(info?.size || 0)}`),
+        h("div", { class: "small muted", style: "margin-top:14px" }, `${detail.files.length}개 · ${fmt.bytes(info?.size || 0)}`,
+          inUse ? h("span", { class: "faint" }, " · 라이브에서 쓰는 폴더라 파일을 지울 수 없습니다 (추가는 가능)") : null),
         detail.files.length ? files : h("div", { class: "muted small", style: "margin-top:10px" }, "아직 파일이 없습니다."))),
     data.rejected.length ? h("div", { class: "card", style: "margin-top:20px" }, h("div", { class: "card-head" }, "검증 실패 (규격 불일치)"),
       h("div", { class: "card-body" }, h("ul", { class: "alerts" }, data.rejected.slice(0, 30).map((r) =>
-        h("li", { class: "warn" }, h("span", { class: "ic" }), h("span", {}, h("time", {}, fmt.time(r.ts)), h("b", {}, `${r.folder}/${r.name} `), r.reasons.join(" · "))))))) : null);
+        h("li", { class: "warn" }, h("span", { class: "ic" }), h("span", {}, h("time", {}, fmt.time(r.ts)), h("b", {}, `${r.folder}/${r.name} `), r.reasons.join(" · "))))))) : null,
+  ].filter(Boolean));
 }
 
 async function delFile(kind, folder, name) {
-  if (!confirm(`'${name}' 을(를) 삭제할까요?`)) return;
+  if (!confirm(`'${name}' 을(를) 바로 삭제할까요? 되돌릴 수 없습니다.`)) return;
   try { const r = await api("DELETE", `/api/media/${kind}/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`); toast(r.message || "삭제했습니다"); showMedia(kind); }
   catch (e) { toast(e.message, true); }
 }
@@ -461,7 +512,7 @@ async function showSystem() {
   const base = h("input", { class: "input", type: "time", value: `${pad(local.getHours())}:${pad(local.getMinutes())}`, style: "max-width:160px" });
   const relay = h("input", { type: "checkbox" }); relay.checked = s.settings.tls_relay;
   const logSel = h("select", { class: "input", style: "max-width:260px" }, h("option", { value: "livemaxd" }, "관리 프로그램 (livemaxd)"),
-    (lastOverview?.lives || []).flatMap((l) => [["live", "송출"], ["audio", "음원"], ["tls", "TLS"]].map(([p, n]) => h("option", { value: `${p}-${l.id}` }, `${l.name} — ${n}`))));
+    (lastOverview?.lives || []).flatMap((l) => [["live", "송출"], ["audio", "음악"], ["tls", "TLS"]].map(([p, n]) => h("option", { value: `${p}-${l.id}` }, `${l.name} — ${n}`))));
   const pre = h("pre", { class: "log", style: "max-height:40vh" }, "");
   const card = (title, ...body) => h("div", { class: "card", style: "margin-bottom:20px" }, h("div", { class: "card-head" }, title), h("div", { class: "card-body" }, body));
   const imp = h("input", { type: "file", accept: ".zip", hidden: true });
@@ -483,7 +534,7 @@ async function showSystem() {
         s.reboot_packages.length ? h("p", { class: "small muted" }, s.reboot_packages.join(", ")) : null) : null,
       card("송출 설정",
         h("label", { class: "field" }, h("span", {}, "일일 자동 재시작 시작 시각 (내 시간 기준)"), base,
-          h("div", { class: "hint" }, "라이브마다 이 시각부터 2분 간격으로 하루 1번 재시작합니다 (몇 초 끊김). 시청자가 적은 시간으로 정하세요.")),
+          h("div", { class: "hint" }, "라이브마다 이 시각부터 2분 간격으로 하루 1번 비디오만 재시작합니다 (1~3초 끊김). 타이머를 켠 라이브는 건너뜁니다.")),
         h("label", { class: "check", style: "margin-bottom:14px" }, relay, h("span", { class: "nm" }, "TLS 중계 사용 (송출 트래픽 약 25% 절감)")),
         h("button", { class: "btn primary", onclick: async () => {
           const [lh, lm] = base.value.split(":").map(Number); const d = new Date(2000, 0, 1, lh, lm);
@@ -493,11 +544,12 @@ async function showSystem() {
       card("디스크",
         h("table", { class: "list-table", style: "margin-top:0" }, h("tbody", {}, s.disk.map((d) => h("tr", {}, h("td", {}, d.label), h("td", { class: "r" }, fmt.bytes(d.bytes)))))),
         h("button", { class: "btn", style: "margin-top:12px", onclick: async () => { const r = await api("POST", "/api/system/cleanup"); toast(r.message); } }, "지금 정리 실행"),
-        h("p", { class: "hint" }, "임시 파일·지난 목록·오래된 로그만 지웁니다. 올린 영상·음원 원본은 건드리지 않습니다.")),
+        h("p", { class: "hint" }, "임시 파일·지난 목록·오래된 로그만 지웁니다. 올린 비디오·음악 원본은 건드리지 않습니다.")),
       card("설정 백업",
         h("p", { class: "small muted" }, "라이브 설정을 내려받아 다른 서버에 그대로 옮길 수 있습니다. 스트림 키는 포함되지 않습니다."),
         h("div", { class: "row" }, h("a", { class: "btn", href: "/api/system/export" }, "내보내기"), h("button", { class: "btn", onclick: () => imp.click() }, "가져오기"), imp))),
     h("div", {},
+      notifyCard(s.notify, card),
       card("보안",
         h("button", { class: "btn", onclick: () => showChangePassword(false) }, "비밀번호 변경"),
         h("div", { class: "section-title", style: "margin-top:18px" }, "로그인된 기기"),
@@ -511,6 +563,47 @@ async function showSystem() {
       card("로그",
         h("div", { class: "row" }, logSel, h("button", { class: "btn sm", onclick: async () => { const r = await api("GET", `/api/logs?name=${logSel.value}&lines=300`); pre.textContent = r.text; pre.scrollTop = pre.scrollHeight; } }, "보기")),
         h("div", { style: "height:12px" }), pre)))));
+}
+
+function notifyCard(n, card) {
+  const en = h("input", { type: "checkbox" }); en.checked = n.enabled;
+  const enLab = h("label", { class: "check" + (en.checked ? " on" : ""), style: "margin-bottom:14px" }, en, h("span", { class: "nm" }, "휴대폰 알림 켜기"));
+  en.addEventListener("change", () => enLab.classList.toggle("on", en.checked));
+  const tok = h("input", { class: "input", type: "password", autocomplete: "off",
+    placeholder: n.token_masked ? `현재 토큰 ${n.token_masked} — 바꿀 때만 입력` : "o.xxxxxxxxxxxxxxxx (Access Token)" });
+  const label = h("input", { class: "input", value: n.server_label, maxlength: 40, placeholder: n.default_label || "예: 서버1" });
+  const cats = h("div", { class: "checks one" }, n.catalog.map((c) => {
+    const cb = h("input", { type: "checkbox", value: c.key }); cb.checked = !!n.categories[c.key];
+    const lab = h("label", { class: "check" + (cb.checked ? " on" : "") }, cb, h("span", { class: "nm" }, h("b", {}, c.label), h("span", { class: "desc" }, c.desc)));
+    cb.addEventListener("change", () => lab.classList.toggle("on", cb.checked));
+    return lab;
+  }));
+  const msg = h("div", { class: "msg err" }, n.last_error ? `최근 발송 실패: ${n.last_error}` : "");
+  const save = async () => {
+    msg.textContent = "";
+    const categories = Object.fromEntries([...cats.querySelectorAll("input")].map((x) => [x.value, x.checked]));
+    try {
+      const r = await api("PUT", "/api/system/notify", { enabled: en.checked, token: tok.value, server_label: label.value, categories });
+      toast(r.message); showSystem();
+    } catch (e) { msg.textContent = e.message; }
+  };
+  return card("모바일 알림 (Pushbullet)",
+    enLab,
+    h("label", { class: "field" }, h("span", {}, "Pushbullet Access Token"), tok,
+      h("div", { class: "hint" }, "휴대폰에 Pushbullet 앱 설치·로그인 → PC에서 pushbullet.com → Settings → Access Tokens → Create Access Token 으로 만든 값을 붙여 넣으세요. 저장할 때 토큰이 맞는지 확인합니다.")),
+    h("label", { class: "field" }, h("span", {}, "알림에 붙일 서버 이름"), label, h("div", { class: "hint" }, "서버가 여러 대일 때 어느 서버인지 구분됩니다. 비우면 " + (n.default_label || "서버 이름") + ".")),
+    h("span", { class: "flabel" }, "보낼 알림"), cats,
+    h("p", { class: "hint" }, "같은 내용은 10분에 한 번, 시간당 최대 20건까지만 보냅니다 (Pushbullet 무료는 월 500건)."),
+    msg,
+    h("div", { class: "row", style: "margin-top:10px" },
+      h("button", { class: "btn primary", onclick: save }, "저장"),
+      h("button", { class: "btn", disabled: !n.token_masked, onclick: async () => {
+        try { const r = await api("POST", "/api/system/notify/test"); toast(r.message); } catch (e) { toast(e.message, true); }
+      } }, "테스트 알림 보내기"),
+      n.token_masked ? h("button", { class: "btn ghost", onclick: async () => {
+        if (!confirm("저장된 토큰을 지우고 알림을 끌까요?")) return;
+        try { await api("PUT", "/api/system/notify", { clear_token: true, enabled: false }); toast("토큰을 지웠습니다"); showSystem(); } catch (e) { toast(e.message, true); }
+      } }, "토큰 삭제") : null));
 }
 
 // ------------------------------------------------------------------ 라우터

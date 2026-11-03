@@ -112,9 +112,9 @@ def validate_video(path: Path, spec: dict) -> ProbeResult:
     if not _container_ok(fmt.get("format_name", ""), ext, spec["containers"]):
         r.reasons.append(f"컨테이너 {fmt.get('format_name')} — MP4 또는 MKV 여야 함")
     if len(vids) != 1:
-        r.reasons.append(f"영상 스트림 {len(vids)}개 — 정확히 1개여야 함")
+        r.reasons.append(f"비디오 스트림 {len(vids)}개 — 정확히 1개여야 함")
     if auds:
-        r.reasons.append(f"오디오 트랙 {len(auds)}개 있음 — 영상 클립에는 오디오가 없어야 함")
+        r.reasons.append(f"오디오 트랙 {len(auds)}개 있음 — 비디오 클립에는 오디오가 없어야 함")
     if not vids:
         return r
 
@@ -205,7 +205,7 @@ def validate_audio(path: Path, spec: dict) -> ProbeResult:
     if len(auds) != 1:
         r.reasons.append(f"오디오 스트림 {len(auds)}개 — 정확히 1개여야 함")
     if vids:
-        r.reasons.append("영상 트랙이 들어 있음 — 음원 파일에는 오디오만 있어야 함")
+        r.reasons.append("비디오 트랙이 들어 있음 — 음악 파일에는 오디오만 있어야 함")
     if not auds:
         return r
 

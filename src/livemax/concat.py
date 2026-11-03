@@ -41,10 +41,9 @@ def _escape(p: Path) -> str:
 def build(live: Live, paths: Paths, conn: sqlite3.Connection, hours: float = 24, margin_minutes: float = 45,
           seed: int | None = None) -> list[Entry]:
     rng = random.Random(seed)
-    excluded = {Path(r["path"]) for r in conn.execute("SELECT path FROM pending_deletes").fetchall()}
     files: list[Path] = []
     for f in live.video_folders:
-        files.extend(p for p in catalog.list_files(paths, "video", f) if p not in excluded)
+        files.extend(catalog.list_files(paths, "video", f))
     durations: dict[Path, float] = {}
     for p in files:
         d = catalog.get_duration(conn, "video", p.parent.name, p)
@@ -54,7 +53,7 @@ def build(live: Live, paths: Paths, conn: sqlite3.Connection, hours: float = 24,
             log.warning("%s: 길이를 알 수 없는 클립 제외: %s", live.id, p)
     usable = [p for p in files if p in durations]
     if not usable:
-        raise ConcatError(f"선택한 영상 폴더 {live.video_folders} 에 송출할 클립이 없습니다")
+        raise ConcatError(f"선택한 비디오 폴더 {live.video_folders} 에 송출할 파일이 없습니다")
 
     total = hours * 3600 + margin_minutes * 60
     entries: list[Entry] = []

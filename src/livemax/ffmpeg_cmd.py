@@ -78,7 +78,9 @@ def build(concat_list: Path, audio_url: str, output_url: str, rw_timeout_s: int 
         # 영상: 24시간치 concat 목록을 실시간 속도로 읽음
         "-re", "-f", "concat", "-safe", "0", "-i", str(concat_list),
         # 오디오: Liquidsoap harbor (로컬). 끊기면 rw_timeout 후 종료 → systemd/워치독이 재시작
-        "-thread_queue_size", "1024", "-rw_timeout", str(rw_timeout_s * 1_000_000), "-i", audio_url,
+        # 로컬 Liquidsoap 의 ADTS AAC — 기본 탐색(최대 5초) 대신 0.5초만 보고 바로 시작 (재시작 공백 단축)
+        "-thread_queue_size", "1024", "-rw_timeout", str(rw_timeout_s * 1_000_000),
+        "-analyzeduration", "500000", "-probesize", "65536", "-i", audio_url,
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy", "-c:a", "copy",
         "-max_muxing_queue_size", "1024",

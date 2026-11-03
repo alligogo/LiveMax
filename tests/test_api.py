@@ -10,33 +10,6 @@ ORIGIN = {"origin": "https://testserver"}
 NEW = "Correct-Horse-Battery-9"
 
 
-class _Collector:
-    latest, per_live = {}, {}
-
-
-@pytest.fixture
-def client(paths, settings):
-    from fastapi.testclient import TestClient
-
-    from livemax.supervisor import Supervisor
-    from livemax.web.api import create_app
-
-    class Core:
-        pass
-
-    core = Core()
-    core.paths, core.settings, core.version, core.started_at = paths, settings, "test", time.time()
-    core.supervisor = Supervisor(paths, settings)
-    core.collector = _Collector()
-    core.cleanup_async = lambda **k: True
-    app = create_app(core)
-    c = TestClient(app, base_url="https://testserver")
-    pw = (paths.secrets / "admin.initial_password").read_text().strip()
-    c.core = core
-    c.initial_pw = pw
-    return c
-
-
 def login(c, pw):
     return c.post("/api/login", json={"username": "admin", "password": pw}, headers=ORIGIN)
 
@@ -81,7 +54,7 @@ def test_create_live_masks_key(client):
 def test_create_live_requires_folders_and_key(client):
     _ready(client)
     r = client.post("/api/lives", headers=ORIGIN, json={"name": "x", "stream_key": "k", "video_folders": [], "audio_folders": ["재즈-색소폰"]})
-    assert r.status_code == 400 and "영상 폴더" in r.json()["error"]
+    assert r.status_code == 400 and "비디오 폴더" in r.json()["error"]
     r = client.post("/api/lives", headers=ORIGIN, json={"name": "x", "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"]})
     assert r.status_code == 400 and "스트림 키" in r.json()["error"]
 
@@ -100,6 +73,37 @@ def test_resumable_upload(client):
     assert client.post(f"/api/uploads/{uid}/complete", headers=ORIGIN).json()["ok"]
     staged = client.core.paths.incoming / "audio" / "재즈-색소폰" / "a.m4a"
     assert staged.read_bytes() == data  # 방송 폴더가 아니라 스테이징으로 (DESIGN 11-3)
+
+
+def test_delete_blocked_in_used_folder(client):
+    _ready(client)
+    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "stream_key": "fake-0000-0000-0000-9z9z",
+                                                  "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later"})
+    p = client.core.paths.audio / "재즈-색소폰" / "a.m4a"
+    p.write_bytes(b"x")
+    r = client.delete("/api/media/audio/재즈-색소폰/a.m4a", headers=ORIGIN)
+    assert r.status_code == 400 and "재즈" in r.json()["error"] and p.exists()  # 예약 없이 그냥 거부
+    client.put("/api/lives/live1", headers=ORIGIN, json={"audio_folders": ["재즈-색소폰"], "video_folders": ["Sax After Six"]})
+    client.post("/api/media/audio", json={"name": "free"}, headers=ORIGIN)
+    q = client.core.paths.audio / "free" / "b.m4a"
+    q.write_bytes(b"x")
+    assert client.delete("/api/media/audio/free/b.m4a", headers=ORIGIN).json()["ok"] and not q.exists()  # 바로 삭제
+
+
+def test_timer_fields_roundtrip(client):
+    _ready(client)
+    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "stream_key": "fake-0000-0000-0000-9z9z",
+                                                  "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later",
+                                                  "timer_mode": "duration", "timer_minutes": 710, "timer_repeat": True,
+                                                  "timer_gap_minutes": 3})
+    lv = client.get("/api/overview").json()["lives"][0]
+    assert (lv["timer_mode"], lv["timer_minutes"], lv["timer_repeat"], lv["timer_gap_minutes"]) == ("duration", 710, True, 3)
+    assert lv["timer_end_at"] is None and lv["next_start_at"] is None and "bitrate" not in lv
+    r = client.put("/api/lives/live1", headers=ORIGIN, json={"timer_mode": "until", "timer_until": 0})
+    assert r.status_code == 400
+    # 지난 종료 시각으로는 시작할 수 없다
+    client.put("/api/lives/live1", headers=ORIGIN, json={"timer_mode": "until", "timer_until": time.time() - 10})
+    assert client.post("/api/lives/live1/start", headers=ORIGIN).status_code == 400
 
 
 def test_reboot_flag_shown(client):

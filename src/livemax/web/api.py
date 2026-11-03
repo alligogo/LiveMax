@@ -23,8 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import capacity, catalog, config, db, secrets, thumbs
-from ..cleanup import _referenced_by_concat
+from .. import capacity, catalog, config, db, notify, secrets, thumbs
 from ..config import ConfigError, Live, live_from_dict
 from . import auth
 
@@ -49,6 +48,7 @@ def client_ip(request: Request) -> str:
 def create_app(core) -> FastAPI:  # core = daemon.App
     paths, settings, sup = core.paths, core.settings, core.supervisor
     store = sup.store
+    notifier = getattr(core, "notifier", None) or notify.Notifier(paths, settings)
     # 호스트의 /var/run/reboot-required 를 livemax tick(호스트 타이머)이 data/state/host 로 복사해 준다
     REBOOT_FLAG = paths.state / "host" / "reboot-required"
     app = FastAPI(title="LiveMax", docs_url=None, redoc_url=None, openapi_url=None)
@@ -103,6 +103,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         ok = user == d["username"] and auth.verify_password(pw)
         auth.record_attempt(conn, ip, user, ok)
         if not ok:
+            if auth.blocked_seconds(conn, ip, int(d["login_max_failures"]), int(d["login_block_minutes"])):
+                notifier.send("security", "로그인 차단", f"IP {ip} 에서 비밀번호를 {d['login_max_failures']}번 틀려 "
+                                                       f"{d['login_block_minutes']}분간 차단했습니다")
             return err("아이디 또는 비밀번호가 올바르지 않습니다", 401)
         token = auth.create_session(conn, ip, request.headers.get("user-agent", ""), float(d["session_hours"]))
         resp = JSONResponse({"ok": True, "must_change": auth.must_change()})
@@ -137,7 +140,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         s = snap.get(lv.id, {})
         state = s.get("state", "stopped")
         speed = s.get("speed")
-        if not lv.enabled and state == "stopped":
+        tinfo = sup.timer_info(lv)
+        if tinfo["next_start_at"] and state == "stopped":
+            kind = "waiting"  # 타이머 반복 — 다음 방송 대기
+        elif not lv.enabled and state == "stopped":
             kind = "stopped"
         elif state == "running":
             wd = settings["watchdog"]
@@ -162,13 +168,28 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "restarts": s.get("restarts", []), "next_restart": lv.next_restart(settings).timestamp(),
             "key_masked": key_masked, "cpu": (core.collector.per_live.get(lv.id) or {}).get("cpu"),
             "rss_mb": (core.collector.per_live.get(lv.id) or {}).get("rss_mb"),
+            **tinfo,
         }
+
+    def _video_kbps(conn, lv: dict) -> float:
+        """라이브 1개의 영상 비트레이트: 송출 중이면 실측(전체 - 오디오), 아니면 고른 비디오 폴더의 평균."""
+        audio = float(settings["capacity"]["audio_kbps"])
+        if lv["state"] == "running" and lv.get("bitrate_kbps") and (lv.get("out_time") or 0) > 30:
+            return max(500.0, float(lv["bitrate_kbps"]) - audio)
+        if lv["video_folders"]:
+            q = ",".join("?" * len(lv["video_folders"]))
+            r = conn.execute(f"SELECT SUM(bitrate_kbps*duration)/SUM(duration) AS k FROM media_files "
+                             f"WHERE kind='video' AND folder IN ({q}) AND bitrate_kbps>0 AND duration>0",
+                             lv["video_folders"]).fetchone()
+            if r and r["k"]:
+                return float(r["k"])
+        return 5500.0
 
     def overview_data(conn) -> dict:
         snap = sup.snapshot()
         lives = [live_view(lv, snap) for lv in store.all()]
         sysd = dict(core.collector.latest)
-        cap = capacity.compute(settings["capacity"], [config.parse_bitrate(lv["bitrate"]) for lv in lives if lv["enabled"]],
+        cap = capacity.compute(settings["capacity"], [_video_kbps(conn, lv) for lv in lives if lv["enabled"]],
                                sysd.get("month_tx_bytes"), sysd.get("net_tx_mbps"), sysd.get("cpu_pct"),
                                sysd.get("mem_used_mb"), sysd.get("mem_total_mb"))
         alerts = []
@@ -206,7 +227,11 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lv.audio_mode = str(b.get("audio_mode", lv.audio_mode))
         lv.norepeat_count = int(b.get("norepeat_count", lv.norepeat_count))
         lv.crossfade = float(b.get("crossfade", lv.crossfade) or 0)
-        lv.bitrate = str(b.get("bitrate", lv.bitrate)).strip()
+        lv.timer_mode = str(b.get("timer_mode", lv.timer_mode))
+        lv.timer_minutes = int(b.get("timer_minutes", lv.timer_minutes))
+        lv.timer_until = float(b.get("timer_until", lv.timer_until) or 0)
+        lv.timer_repeat = bool(b.get("timer_repeat", lv.timer_repeat))
+        lv.timer_gap_minutes = int(b.get("timer_gap_minutes", lv.timer_gap_minutes))
         lv.youtube_video_id = str(b.get("youtube_video_id", lv.youtube_video_id) or "").strip()
         return lv, str(b.get("stream_key", "") or "").strip(), str(b.get("apply", "now"))
 
@@ -224,7 +249,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         secrets.write_secret(paths.stream_key(lv.id), key)
         db.add_event(request.state.conn, "info", "web", f"라이브 생성: {lv.name}", lv.id)
         if apply == "now":
-            sup.start(lv.id)
+            try:
+                sup.start(lv.id)
+            except ConfigError as e:
+                return {"ok": True, "id": lv.id, "message": f"저장했지만 시작하지 못했습니다: {e}"}
         return {"ok": True, "id": lv.id}
 
     @app.put("/api/lives/{live_id}")
@@ -232,6 +260,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lv = store.get(live_id)
         if not lv:
             return err("라이브 없음", 404)
+        before = lv.to_dict()
         try:
             lv, key, apply = await _live_payload(request, lv)
             store.save(lv)
@@ -240,9 +269,14 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if key:
             secrets.write_secret(paths.stream_key(lv.id), key)
         db.add_event(request.state.conn, "info", "web", "설정 변경" + (" (스트림 키 교체)" if key else ""), lv.id)
-        if apply == "now" and lv.enabled:
-            sup.restart(lv.id, "설정 적용", audio_too=True)
-        return {"ok": True}
+        after = lv.to_dict()
+        audio_changed = any(before[k] != after[k] for k in ("audio_folders", "audio_mode", "norepeat_count", "crossfade"))
+        video_changed = bool(key) or before["video_folders"] != after["video_folders"]
+        running = sup.proc(lv.id).desired
+        if apply == "now" and running and (audio_changed or video_changed):
+            # 바뀐 것만 다시 띄운다: 음악 설정 → 전체(약 8초), 비디오·키 → 영상만(약 2초). 이름·타이머는 재시작 없음
+            sup.restart(lv.id, "설정 적용", audio_too=audio_changed)
+        return {"ok": True, "restarted": bool(apply == "now" and running and (audio_changed or video_changed))}
 
     @app.delete("/api/lives/{live_id}")
     def live_delete(request: Request, live_id: str):
@@ -260,7 +294,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             elif action == "stop":
                 sup.stop(live_id)
             elif action == "restart":
-                sup.restart(live_id, "사용자 재시작", audio_too=True)
+                sup.restart(live_id, "사용자 재시작", audio_too=False)
             else:
                 return err("알 수 없는 동작", 404)
         except ConfigError as e:
@@ -311,11 +345,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         out = []
         for p in catalog.list_files(paths, kind, folder):
             r = conn.execute("SELECT * FROM media_files WHERE path=?", (str(p),)).fetchone()
-            pend = conn.execute("SELECT 1 FROM pending_deletes WHERE path=?", (str(p),)).fetchone()
             out.append({"name": p.name, "size": p.stat().st_size, "duration": r["duration"] if r else None,
                         "bitrate": r["bitrate_kbps"] if r else None, "thumb": bool(r and r["thumb"]),
-                        "added_at": r["added_at"] if r else p.stat().st_mtime,
-                        "status": "delete_pending" if pend else "ok"})
+                        "added_at": r["added_at"] if r else p.stat().st_mtime})
         pend_dir = paths.incoming / kind / folder
         pending = sorted(p.name for p in pend_dir.iterdir() if p.is_file()) if pend_dir.is_dir() else []
         return {"files": out, "pending": pending}
@@ -371,10 +403,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if not p.is_file():
             return err("파일 없음", 404)
         conn = request.state.conn
-        if kind == "video" and str(p) in _referenced_by_concat(paths):
-            conn.execute("INSERT OR IGNORE INTO pending_deletes(path, requested_at) VALUES (?,?)", (str(p), time.time()))
-            return {"ok": True, "deferred": True,
-                    "message": "지금 송출 목록에 들어 있어 '삭제 예약'했습니다. 다음 재시작 뒤 자동 삭제됩니다"}
+        used = store.folder_usage(kind).get(folder)
+        if used:
+            names = ", ".join(lv.name for lv in store.all() if lv.id in used)
+            return err(f"'{names}' 라이브에서 쓰는 폴더라 지울 수 없습니다 — 라이브 설정에서 이 폴더를 빼고 지우세요")
         p.unlink()
         catalog.remove(conn, p)
         if kind == "video":
@@ -459,7 +491,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     def system(request: Request):
         conn = request.state.conn
         disk = []
-        for label, p in (("영상", paths.video), ("음원", paths.audio), ("업로드 대기", paths.incoming),
+        for label, p in (("비디오", paths.video), ("음악", paths.audio), ("업로드 대기", paths.incoming),
                          ("격리", paths.rejected), ("로그", paths.logs), ("상태·DB", paths.state)):
             disk.append({"label": label, "bytes": sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0})
         sess = request.state.session
@@ -474,7 +506,59 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          for r in conn.execute("SELECT * FROM sessions ORDER BY last_seen DESC").fetchall()],
             "attempts": [dict(r) for r in conn.execute("SELECT ts, ip, username, success FROM login_attempts ORDER BY ts DESC LIMIT 30").fetchall()],
             "update_requested": (paths.state / "update.request").exists(),
+            "notify": _notify_view(),
         }
+
+    def _notify_view() -> dict:
+        cfg = notifier.cfg
+        tok = notify.read_token(paths)
+        return {"enabled": bool(cfg.get("enabled")), "server_label": cfg.get("server_label") or "",
+                "default_label": notifier.label() if not cfg.get("server_label") else "",
+                "categories": dict(cfg["categories"]), "token_masked": secrets.mask(tok) if tok else "",
+                "last_error": notifier.last_error,
+                "catalog": [{"key": k, "label": lb, "desc": ds} for k, lb, ds, _ in notify.CATEGORIES]}
+
+    @app.put("/api/system/notify")
+    async def notify_settings(request: Request):
+        b = await request.json()
+        tok = str(b.get("token") or "").strip()
+        if tok:
+            if len(tok) > 200 or not tok.isascii() or " " in tok:
+                return err("Access Token 형식이 올바르지 않습니다")
+            try:
+                who = notify.check_token(tok)
+            except notify.PushError as e:
+                return err(str(e))
+            secrets.write_secret(notify.token_file(paths), tok)
+        elif b.get("clear_token"):
+            notify.token_file(paths).unlink(missing_ok=True)
+            who = None
+        else:
+            who = None
+        cfg = notifier.cfg
+        if "enabled" in b:
+            if b["enabled"] and not notify.token_file(paths).exists():
+                return err("Access Token 을 먼저 입력하세요")
+            cfg["enabled"] = bool(b["enabled"])
+            config.save_settings_override(paths, ["notify", "enabled"], cfg["enabled"])
+        if "server_label" in b:
+            cfg["server_label"] = str(b["server_label"] or "").strip()[:40]
+            config.save_settings_override(paths, ["notify", "server_label"], cfg["server_label"])
+        if isinstance(b.get("categories"), dict):
+            known = {k for k, *_ in notify.CATEGORIES}
+            for k, v in b["categories"].items():
+                if k in known:
+                    cfg["categories"][k] = bool(v)
+            config.save_settings_override(paths, ["notify", "categories"], dict(cfg["categories"]))
+        db.add_event(request.state.conn, "info", "web", "알림 설정 변경" + (" (토큰 교체)" if tok else ""))
+        return {"ok": True, "message": f"저장했습니다{f' (Pushbullet 계정: {who})' if who else ''}", "notify": _notify_view()}
+
+    @app.post("/api/system/notify/test")
+    def notify_test():
+        try:
+            return {"ok": True, "message": notifier.test()}
+        except notify.PushError as e:
+            return err(str(e))
 
     @app.put("/api/system/settings")
     async def system_settings(request: Request):
@@ -530,7 +614,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 continue
             src = live_from_dict(yaml.safe_load(z.read(n)))
             lv = store.new(src.name)  # 새 서버 기준으로 ID·포트·슬롯 재배정
-            for k in ("video_folders", "audio_folders", "audio_mode", "norepeat_count", "crossfade", "bitrate"):
+            for k in ("video_folders", "audio_folders", "audio_mode", "norepeat_count", "crossfade",
+                      "timer_mode", "timer_minutes", "timer_repeat", "timer_gap_minutes"):
                 setattr(lv, k, getattr(src, k))
             lv.enabled = False  # 키가 없으므로 비활성으로 가져온다
             try:

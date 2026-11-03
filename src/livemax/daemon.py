@@ -5,6 +5,7 @@
   ingest     : _incoming 검증 → 방송 폴더로 원자적 이동
   collector  : 시스템·라이브 지표
   cleanup    : 하루 1회 정리 (+ 긴급·수동)
+  notify     : Pushbullet 모바일 알림 (디스크·재부팅·업로드 거부 감시 포함)
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from . import cleanup, config, db, ingest, logsetup
+from . import cleanup, config, db, ingest, logsetup, notify
 from .collector import Collector
 from .paths import get_paths
 from .supervisor import Supervisor
@@ -33,6 +34,8 @@ class App:
         db.init(self.paths.db)
         self.stop = threading.Event()
         self.supervisor = Supervisor(self.paths, self.settings)
+        self.notifier = notify.Notifier(self.paths, self.settings)
+        self.supervisor.notify = self.notifier.send
         self.collector = Collector(self.paths, self.settings, self.supervisor, on_emergency=self.cleanup_async)
         self.started_at = time.time()
         self._cleanup_lock = threading.Lock()
@@ -75,10 +78,32 @@ class App:
                 done = now.date().isoformat()
                 self.cleanup_async()
 
+    def _notify_loop(self) -> None:
+        """라이브 밖의 알림거리: LiveMax 시작, 디스크 부족, 재부팅 필요, 업로드 검증 실패."""
+        n = self.notifier
+        if not self.stop.wait(20):
+            n.send("system", f"LiveMax 시작 (버전 {self.version})", "서버 또는 LiveMax 가 다시 시작되었습니다. 라이브는 순서대로 복귀합니다")
+        flag = self.paths.state / "host" / "reboot-required"
+        conn = db.connect(self.paths.db)
+        last_ev = (conn.execute("SELECT MAX(id) AS m FROM events").fetchone()["m"] or 0)
+        while not self.stop.wait(60):
+            try:
+                pct = self.collector.latest.get("disk_pct")
+                if pct and pct >= float(self.settings["cleanup"]["disk_warn_percent"]):
+                    n.send("system", f"디스크 {pct:.0f}% 사용 중", "비디오·음악 파일을 정리하세요", dedupe_s=6 * 3600)
+                if flag.exists():
+                    n.send("system", "서버 재부팅 필요", "보안 업데이트 적용 대기 — 한가한 시간에 sudo reboot", dedupe_s=7 * 86400)
+                for e in conn.execute("SELECT id, message FROM events WHERE id > ? AND source='ingest' AND level='warn' "
+                                      "ORDER BY id", (last_ev,)).fetchall():
+                    n.send("media", "업로드 파일 거부", e["message"])
+                last_ev = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()["m"] or last_ev
+            except Exception:  # noqa: BLE001
+                log.exception("알림 감시 실패")
+
     def start_background(self) -> None:
         for name, target in (("supervisor", self.supervisor.loop), ("ingest", self._ingest_loop),
                              ("collector", lambda: self.collector.run(self.stop)), ("cleanup", self._cleanup_loop),
-                             ("boot", self.supervisor.start_all)):
+                             ("notify-watch", self._notify_loop), ("boot", self.supervisor.start_all)):
             threading.Thread(target=target, name=name, daemon=True).start()
         log.info("livemaxd %s 시작 (data=%s)", self.version, self.paths.root)
 

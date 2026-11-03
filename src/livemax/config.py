@@ -146,20 +146,29 @@ class Live:
     audio_mode: str = "random_norepeat"
     norepeat_count: int = 30
     crossfade: float = 0.0
-    bitrate: str = "5500k"
     harbor_port: int = 0
     restart_slot: int = 0
     youtube_video_id: str = ""
     output_url: str = ""
     created_at: float = 0.0
+    # 타이머: off | duration(방송 시간 뒤 종료) | until(지정 시각에 종료)
+    #   유튜브 '자동 중지'를 켜 두면 송출이 끝날 때 방송이 끝나고 다시보기 영상으로 남는다 (12시간 이하만 보관)
+    timer_mode: str = "off"
+    timer_minutes: int = 710          # 11시간 50분
+    timer_until: float = 0.0          # epoch 초
+    timer_repeat: bool = False        # 끝나면 timer_gap_minutes 뒤 새 방송으로 다시 시작 (duration 모드)
+    timer_gap_minutes: int = 2
 
     @property
     def number(self) -> int:
         return int(LIVE_ID_RE.match(self.id).group(1))
 
-    @property
-    def bitrate_kbps(self) -> int:
-        return parse_bitrate(self.bitrate)
+    def timer_end_at(self, started_at: float | None) -> float | None:
+        if self.timer_mode == "duration" and started_at:
+            return started_at + int(self.timer_minutes) * 60
+        if self.timer_mode == "until" and self.timer_until:
+            return float(self.timer_until)
+        return None
 
     def restart_time_utc(self, settings: dict) -> str:
         base = hhmm_to_minutes(settings["restart"]["base_utc"])
@@ -177,8 +186,10 @@ class Live:
             "id": self.id, "name": self.name, "enabled": self.enabled,
             "video_folders": list(self.video_folders), "audio_folders": list(self.audio_folders),
             "audio_mode": self.audio_mode, "norepeat_count": self.norepeat_count, "crossfade": self.crossfade,
-            "bitrate": self.bitrate, "harbor_port": self.harbor_port, "restart_slot": self.restart_slot,
+            "harbor_port": self.harbor_port, "restart_slot": self.restart_slot,
             "youtube_video_id": self.youtube_video_id, "output_url": self.output_url, "created_at": self.created_at,
+            "timer_mode": self.timer_mode, "timer_minutes": int(self.timer_minutes), "timer_until": float(self.timer_until),
+            "timer_repeat": bool(self.timer_repeat), "timer_gap_minutes": int(self.timer_gap_minutes),
         }
 
     def validate(self) -> None:
@@ -187,9 +198,9 @@ class Live:
         if not self.name.strip():
             raise ConfigError("이름을 입력하세요")
         if not self.video_folders:
-            raise ConfigError("영상 폴더를 1개 이상 선택하세요")
+            raise ConfigError("비디오 폴더를 1개 이상 선택하세요")
         if not self.audio_folders:
-            raise ConfigError("음원 폴더를 1개 이상 선택하세요")
+            raise ConfigError("음악 폴더를 1개 이상 선택하세요")
         for f in [*self.video_folders, *self.audio_folders]:
             if not valid_folder_name(f):
                 raise ConfigError(f"폴더 이름 사용 불가: {f}")
@@ -199,10 +210,16 @@ class Live:
             raise ConfigError("중복방지 곡 수는 0~1000")
         if not (0 <= float(self.crossfade) <= 10):
             raise ConfigError("크로스페이드는 0~10초")
-        if not (1000 <= self.bitrate_kbps <= 51000):
-            raise ConfigError(f"비트레이트 범위 오류: {self.bitrate}")
         if not (1024 < int(self.harbor_port) < 65536):
             raise ConfigError("오디오 포트 오류")
+        if self.timer_mode not in ("off", "duration", "until"):
+            raise ConfigError("타이머 방식 오류")
+        if self.timer_mode == "duration" and not (10 <= int(self.timer_minutes) <= 24 * 60):
+            raise ConfigError("방송 시간은 10분 ~ 24시간")
+        if self.timer_mode == "until" and float(self.timer_until) <= 0:
+            raise ConfigError("종료 날짜·시각을 입력하세요")
+        if not (1 <= int(self.timer_gap_minutes) <= 120):
+            raise ConfigError("다시 시작 간격은 1~120분")
         if self.youtube_video_id and not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", self.youtube_video_id):
             raise ConfigError("유튜브 영상 ID 형식 오류")
 
@@ -214,6 +231,8 @@ def live_from_dict(d: dict) -> Live:
     lv.audio_folders = [str(x) for x in (lv.audio_folders or [])]
     lv.crossfade = float(lv.crossfade or 0)
     lv.norepeat_count = int(lv.norepeat_count)
+    lv.timer_minutes, lv.timer_gap_minutes = int(lv.timer_minutes), int(lv.timer_gap_minutes)
+    lv.timer_until, lv.timer_repeat = float(lv.timer_until or 0), bool(lv.timer_repeat)
     return lv
 
 

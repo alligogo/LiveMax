@@ -9,6 +9,15 @@
 감시 (DESIGN 6.2): 진행 정지·speed 저하 → 그 라이브의 ffmpeg 만 재시작. 프로세스가 죽으면 백오프 후 재기동.
 일일 재시작 (DESIGN 6.1): 라이브별 슬롯 시각, 라이브 간 최소 30초 간격 (11-6).
 부팅 시작: 라이브 간 boot_start_gap 간격으로 순차 시작.
+
+타이머 (v2.1): "방송 세션" = 사용자가 시작한 뒤 끊김 없이 이어지는 하나의 유튜브 방송.
+  세션 시작 시각은 run/<id>.session.json 에 남아 자동 재시작·컨테이너 재시작에도 유지된다.
+  종료 시각이 되면 송출을 멈춘다 → 유튜브 '자동 중지'가 방송을 끝내고 다시보기로 저장.
+  반복을 켜 두면 timer_gap_minutes 뒤 새 세션(새 유튜브 방송)으로 다시 시작한다.
+  타이머 세션 안에서는 일일 재시작을 건너뛴다 (재시작 공백으로 방송이 일찍 끊기지 않게).
+
+재시작 속도: 사용자/감시 재시작은 영상(ffmpeg)만 다시 띄운다 — Liquidsoap 기동(5~7초)을 기다리지 않음.
+  의도한 재시작 뒤에는 백오프 없이 바로 다시 띄운다.
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ from . import concat, db, ffmpeg_cmd, liquidsoap, secrets, tls_relay
 from .config import ConfigError, LiveStore
 from .logsetup import UTCFormatter, FMT
 from .paths import Paths
-from .state import read_json
+from .state import read_json, write_json_atomic
 
 log = logging.getLogger("livemax.supervisor")
 LIQUIDSOAP = "liquidsoap"
@@ -65,6 +74,9 @@ class LiveProc:
         self.relay_block_until = 0.0
         self.low_speed_since: float | None = None
         self.pending_reason: str | None = None
+        self.intentional = False  # 마지막 ffmpeg 종료가 의도한 재시작이었나 (백오프 생략)
+        self.bad_since: float | None = None  # 송출하려는데 송출이 안 되는 상태가 시작된 시각 (알림용)
+        self.down_notified = False
         self.st: dict = {"state": "stopped", "message": "", "speed": None, "out_time": None, "bitrate": None,
                          "ffmpeg_started_at": None, "progress_at": None, "transport": None, "clip": None,
                          "audio_started_at": None}
@@ -199,6 +211,9 @@ class LiveProc:
             ok = self._video_once()
             if not self.desired:
                 return
+            if self.intentional:  # 사용자/감시/일일 재시작 — 기다릴 이유 없음
+                self.intentional = False
+                continue
             fails = 0 if ok else fails + 1
             if not self._sleep(self._backoff(fails)):
                 return
@@ -210,7 +225,7 @@ class LiveProc:
         if not live:
             self.desired = False
             return False
-        self.set(state="starting", message="시작 중", speed=None, progress_at=None)
+        self.set(state="starting", message="시작 중", speed=None, progress_at=None, out_time=None, bitrate=None)
         conn = db.connect(paths.db)
         try:
             try:
@@ -231,7 +246,7 @@ class LiveProc:
             while time.time() < deadline and self.desired and not _port_open(live.harbor_port):
                 time.sleep(0.5)
             if not _port_open(live.harbor_port):
-                self.set(state="error", message="오디오 준비 안 됨 (음원 폴더 확인)")
+                self.set(state="error", message="오디오 준비 안 됨 (음악 폴더 확인)")
                 return False
 
             base = (live.output_url or settings["output"]["default_url"]).rstrip("/")
@@ -250,7 +265,7 @@ class LiveProc:
             started = time.time()
             self.low_speed_since = None
             self.set(state="running", message="", transport=out.mode, ffmpeg_started_at=started,
-                     progress_at=started, bitrate_cfg=live.bitrate_kbps)
+                     progress_at=started)
             threading.Thread(target=self._read_stderr, args=(self.video,), daemon=True).start()
             self._read_progress(self.video)
             rc = self.video.wait()
@@ -258,6 +273,7 @@ class LiveProc:
             if self.relay:
                 self.relay.stop()
             reason, self.pending_reason = self.pending_reason, None
+            self.intentional = bool(reason)
             if out.mode == "rtmps-relay" and ran < 60 and not reason and self.desired:
                 self.relay_fails += 1
                 if self.relay_fails >= 3:
@@ -268,6 +284,7 @@ class LiveProc:
                 self.relay_fails = 0
             if self.desired and not reason:
                 self.event("error", f"ffmpeg 종료 rc={rc} (가동 {int(ran)}초) — 재기동")
+                self.sup.notify("restart", f"{live.name}: 송출 프로그램 종료 — 자동 재시작", f"ffmpeg rc={rc}, 가동 {int(ran)}초")
                 self.set(state="restarting", message=f"ffmpeg 종료 rc={rc}")
             return ran >= 300
         finally:
@@ -344,6 +361,8 @@ class Supervisor:
         self.stop_event = threading.Event()
         self.done_today: dict[str, str] = {}
         self.last_planned = 0.0
+        self.last_timer_start = 0.0
+        self.notify = lambda *a, **k: False  # daemon 이 Notifier.send 로 바꿔 끼운다
 
     def proc(self, live_id: str) -> LiveProc:
         with self.lock:
@@ -351,26 +370,66 @@ class Supervisor:
                 self.procs[live_id] = LiveProc(self, live_id)
             return self.procs[live_id]
 
+    # ---------------------------------------------------------------- 방송 세션 (타이머 기준)
+    def _session_file(self, live_id: str) -> Path:
+        return self.paths.run_dir / f"{live_id}.session.json"
+
+    def session(self, live_id: str) -> dict:
+        return read_json(self._session_file(live_id)) or {}
+
+    def _write_session(self, live_id: str, **kw) -> None:
+        self.paths.run_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(self._session_file(live_id), kw)
+
+    def _clear_session(self, live_id: str) -> None:
+        self._session_file(live_id).unlink(missing_ok=True)
+
+    def _new_session(self, live_id: str) -> None:
+        now = time.time()
+        self._write_session(live_id, started_at=now, alive_at=now)
+
+    def timer_info(self, lv) -> dict:
+        """화면용: 세션 시작, 타이머 종료 예정, 다음 방송 시작 예정 (epoch)."""
+        ses = self.session(lv.id)
+        p = self.procs.get(lv.id)
+        live_now = bool(p and p.desired)
+        started = ses.get("started_at") if live_now else None
+        return {"session_started_at": started,
+                "timer_end_at": lv.timer_end_at(started) if live_now else None,
+                "next_start_at": ses.get("next_start_at") if not live_now else None}
+
     # ---------------------------------------------------------------- 공개 API
-    def start(self, live_id: str) -> None:
+    def _check_startable(self, lv) -> None:
+        if not self.paths.stream_key(lv.id).exists():
+            raise ConfigError("스트림 키를 먼저 입력하세요")
+        if lv.timer_mode == "until" and float(lv.timer_until) <= time.time() + 60:
+            raise ConfigError("타이머 종료 시각이 이미 지났습니다 — 라이브 설정에서 바꾸세요")
+
+    def start(self, live_id: str, new_session: bool = True) -> None:
         lv = self.store.get(live_id)
         if not lv:
             raise ConfigError("라이브 없음")
-        if not self.paths.stream_key(live_id).exists():
-            raise ConfigError("스트림 키를 먼저 입력하세요")
+        self._check_startable(lv)
         if not lv.enabled:
             lv.enabled = True
             self.store.save(lv)
-        self.proc(live_id).start()
+        p = self.proc(live_id)
+        if p.desired:
+            return
+        if new_session or not self.session(live_id).get("started_at"):
+            self._new_session(live_id)
+        p.start()
 
-    def stop(self, live_id: str) -> None:
+    def stop(self, live_id: str, reason: str = "사용자 정지") -> None:
         lv = self.store.get(live_id)
         if lv and lv.enabled:
             lv.enabled = False
             self.store.save(lv)
-        self.proc(live_id).stop("사용자 정지")
+        self._clear_session(live_id)
+        self.proc(live_id).stop(reason)
 
-    def restart(self, live_id: str, reason: str = "사용자 재시작", audio_too: bool = True) -> None:
+    def restart(self, live_id: str, reason: str = "사용자 재시작", audio_too: bool = False) -> None:
+        """방송 세션은 그대로 (타이머 계속). 기본은 영상만 — 공백이 가장 짧다."""
         p = self.proc(live_id)
         if not p.desired:
             self.start(live_id)
@@ -382,22 +441,44 @@ class Supervisor:
             p = self.procs.pop(live_id, None)
         if p:
             p.stop("삭제")
+        self._clear_session(live_id)
         self.store.delete(live_id)
 
     def snapshot(self) -> dict[str, dict]:
         return {lid: p.snapshot() for lid, p in list(self.procs.items())}
 
     def start_all(self) -> None:
-        """부팅: 활성 라이브를 간격을 두고 하나씩 시작 (동시 시작 금지)."""
+        """부팅: 활성 라이브를 간격을 두고 하나씩 시작 (동시 시작 금지).
+
+        세션이 5분 안쪽으로 끊겼으면(업데이트·컨테이너 재시작) 같은 방송으로 이어 가고 타이머도 유지한다.
+        더 오래 꺼져 있었으면 유튜브 방송은 이미 끝났으므로 새 세션으로 시작한다.
+        타이머가 이미 지났으면: 반복 → 새 세션, 반복 아님 → 시작하지 않는다.
+        """
         gap = float(self.settings["supervisor"]["boot_start_gap_seconds"])
         first = True
         for lv in self.store.all():
             if not lv.enabled or not self.paths.stream_key(lv.id).exists():
                 continue
+            ses, now = self.session(lv.id), time.time()
+            if ses.get("next_start_at"):
+                continue  # 반복 대기 중 — loop 가 시각이 되면 시작
+            fresh = not ses.get("started_at") or now - float(ses.get("alive_at") or 0) > 300
+            end = None if fresh else lv.timer_end_at(ses.get("started_at"))
+            if end and now >= end:
+                if lv.timer_mode == "duration" and lv.timer_repeat:
+                    fresh = True
+                else:
+                    self._finish_timer(lv, None)
+                    continue
+            if lv.timer_mode == "until" and float(lv.timer_until) <= now + 60:
+                self._finish_timer(lv, None)
+                continue
             if not first and self.stop_event.wait(gap):
                 return
             first = False
-            log.info("부팅 시작: %s", lv.id)
+            log.info("부팅 시작: %s%s", lv.id, " (새 방송)" if fresh else " (이어서)")
+            if fresh:
+                self._new_session(lv.id)
             self.proc(lv.id).start()
 
     def shutdown(self) -> None:
@@ -408,7 +489,56 @@ class Supervisor:
                 p._kill_video()
                 p._kill(p.audio)
 
-    # ---------------------------------------------------------------- 주기 작업 (감시 + 일일 재시작)
+    # ---------------------------------------------------------------- 타이머
+    def _finish_timer(self, lv, p: LiveProc | None) -> None:
+        """타이머 종료: 송출을 멈춘다. 반복이면 다음 방송 예약, 아니면 라이브를 정지 상태로."""
+        repeat = lv.timer_mode == "duration" and lv.timer_repeat
+        if repeat:
+            nxt = time.time() + int(lv.timer_gap_minutes) * 60
+            self._write_session(lv.id, next_start_at=nxt)
+        else:
+            self._clear_session(lv.id)
+            lv.enabled = False
+            try:
+                self.store.save(lv)
+            except ConfigError:
+                log.exception("타이머 종료 저장 실패 %s", lv.id)
+        p = p or self.proc(lv.id)
+        msg = "타이머 종료" + (f" — {int(lv.timer_gap_minutes)}분 뒤 새 방송" if repeat else "")
+        self.notify("timer", f"{lv.name}: {msg}", "유튜브 '자동 중지'가 켜져 있으면 방송이 끝나고 다시보기로 저장됩니다")
+        if p.desired:
+            p.stop(msg)
+        else:
+            p.set(state="stopped", message=msg)
+            p.event("info", msg)
+
+    def _timers(self) -> None:
+        now = time.time()
+        for lv in self.store.all():
+            p = self.procs.get(lv.id)
+            ses = self.session(lv.id)
+            if p and p.desired:
+                end = lv.timer_end_at(ses.get("started_at"))
+                if end and now >= end:
+                    self._finish_timer(lv, p)
+                elif ses.get("started_at") and now - float(ses.get("alive_at") or 0) >= 60:
+                    ses["alive_at"] = now
+                    self._write_session(lv.id, **ses)
+            elif ses.get("next_start_at") and now >= float(ses["next_start_at"]):
+                if not lv.enabled or now - self.last_timer_start < 10:  # 동시 시작 금지 (11-6)
+                    if not lv.enabled:
+                        self._clear_session(lv.id)
+                    continue
+                self.last_timer_start = now
+                try:
+                    self.start(lv.id, new_session=True)
+                    self.proc(lv.id).event("info", "타이머 반복 — 새 방송 시작")
+                    self.notify("timer", f"{lv.name}: 새 방송 시작 (타이머 반복)")
+                except ConfigError as e:
+                    self._clear_session(lv.id)
+                    self.proc(lv.id).set(state="stopped", message=str(e))
+
+    # ---------------------------------------------------------------- 주기 작업 (감시 + 타이머 + 일일 재시작)
     def loop(self) -> None:
         while not self.stop_event.wait(5):
             now = time.time()
@@ -418,13 +548,45 @@ class Supervisor:
                     reason = p.watch(now)
                     if reason:
                         recent = sum(1 for t, _ in p.restarts if now - t < 3600)
+                        lv_ = self.store.get(lid)
+                        name = lv_.name if lv_ else lid
                         if recent >= int(wd["max_restarts_per_hour"]):
                             p.set(message=f"재시작 한도 초과 — {reason}")
+                            self.notify("down", f"{name}: 재시작 한도 초과", f"1시간에 {recent}번 재시작 — {reason}. 확인이 필요합니다",
+                                        dedupe_s=3600)
                             continue
+                        self.notify("restart", f"{name}: 자동 재시작", reason)
                         p.restart(reason)
+                    self._health(p, now)
                 except Exception:  # noqa: BLE001
                     log.exception("watch 실패 %s", lid)
+            try:
+                self._timers()
+            except Exception:  # noqa: BLE001
+                log.exception("타이머 처리 실패")
             self._planned_restarts()
+
+    def _health(self, p: LiveProc, now: float) -> None:
+        """송출하려는데 1분 넘게 송출이 안 되면 '중단' 알림, 다시 30초 이상 정상이면 '복구' 알림."""
+        lv = self.store.get(p.id)
+        name = lv.name if lv else p.id
+        running = p.st.get("state") == "running" and now - float(p.st.get("progress_at") or 0) < 30
+        if not p.desired:
+            p.bad_since, p.down_notified = None, False
+            return
+        if running:
+            if p.down_notified and now - float(p.st.get("ffmpeg_started_at") or now) >= 30:
+                p.down_notified = False
+                self.notify("recovered", f"{name}: 송출 복구", "다시 정상 송출 중입니다", dedupe_s=0)
+            if not p.down_notified:
+                p.bad_since = None
+            return
+        if p.bad_since is None:
+            p.bad_since = now
+        if not p.down_notified and now - p.bad_since >= 60:
+            p.down_notified = True
+            msg = p.st.get("message") or p.st.get("state") or ""
+            self.notify("down", f"{name}: 송출 중단", f"{int(now - p.bad_since)}초째 송출 안 됨 — {msg}", dedupe_s=0)
 
     def _planned_restarts(self) -> None:
         now = datetime.now(timezone.utc)
@@ -433,6 +595,9 @@ class Supervisor:
             p = self.procs.get(lv.id)
             if not p or not p.desired or p.st.get("state") != "running":
                 continue
+            end = lv.timer_end_at(self.session(lv.id).get("started_at"))
+            if end and end - time.time() < 26 * 3600:
+                continue  # 타이머로 곧 끝날 방송 — 재시작 공백으로 유튜브 방송이 끊기지 않게 건너뜀
             h, m = map(int, lv.restart_time_utc(self.settings).split(":"))
             due = now.replace(hour=h, minute=m, second=0, microsecond=0)
             day = now.date().isoformat()
@@ -443,4 +608,3 @@ class Supervisor:
                 self.done_today[lv.id] = day
                 self.last_planned = time.time()
                 p.restart("일일 재시작")
-
