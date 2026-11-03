@@ -1,0 +1,6 @@
+# 셸 스크립트는 반드시 LF (CRLF 가 섞이면 서버에서 bash 가 실행하지 못한다)
+*.sh text eol=lf
+# 윈도우 도구는 저장된 그대로 (CRLF + UTF-8 BOM) — 변환 금지
+*.ps1 -text
+*.bat -text
+*.m4a binary

@@ -231,11 +231,16 @@ chmod 600 /root/.ssh/config
 ssh-keyscan -t ed25519 github.com 2>/dev/null >> /root/.ssh/known_hosts && sort -u -o /root/.ssh/known_hosts /root/.ssh/known_hosts
 
 echo
-echo "${BLD}아래 한 줄을 GitHub → 저장소 Settings → Deploy keys → Add deploy key 에 붙여넣으세요${RST}"
-echo "(Allow write access 는 체크하지 마세요)"
-echo "------------------------------------------------------------------"
-cat "$DK.pub"
-echo "------------------------------------------------------------------"
+if ssh -o BatchMode=yes -o ConnectTimeout=10 -T git@github.com 2>&1 | grep -q 'successfully authenticated'; then
+  # PC 도구(LiveMax.bat)가 공용 deploy key 를 미리 넣어 준 경우 — GitHub 등록이 필요 없다
+  echo "${GRN}GitHub 연결 OK${RST} — 이미 등록된 deploy key 입니다 (추가 등록 필요 없음)"
+else
+  echo "${BLD}아래 한 줄을 GitHub → 저장소 Settings → Deploy keys → Add deploy key 에 붙여넣으세요${RST}"
+  echo "(Allow write access 는 체크하지 마세요)"
+  echo "------------------------------------------------------------------"
+  cat "$DK.pub"
+  echo "------------------------------------------------------------------"
+fi
 
 echo
 echo "${GRN}bootstrap 완료.${RST}"

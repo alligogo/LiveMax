@@ -192,17 +192,8 @@ if (( NO_START == 0 )); then
   done
   systemctl enable --now livemax-cleanup.timer >/dev/null 2>&1
 
-  if ! sudo -u livemax env LIVEMAX_HOME="$LIVEMAX_HOME" PYTHONPATH="$LIVEMAX_HOME/src" "$PY" -m livemax.cli validate; then
-    warn "설정 오류가 있습니다 — 위 FAIL 항목을 고친 뒤 다시 실행하세요"
-  fi
-  # 활성 라이브 중 아직 안 돌고 있는 것만 시작 (이미 돌고 있는 라이브는 재시작하지 않음)
-  for id in $(sudo -u livemax env LIVEMAX_HOME="$LIVEMAX_HOME" PYTHONPATH="$LIVEMAX_HOME/src" "$PY" -m livemax.cli lives --enabled); do
-    if [[ ! -s "$LIVEMAX_HOME/secrets/$id.key" ]]; then warn "$id: 스트림 키 없음 (secrets/$id.key) — 시작 안 함"; continue; fi
-    systemctl is-active --quiet "live@$id.service" && { echo "$id: 실행 중 (유지)"; continue; }
-    systemctl enable --now "live-audio@$id.service" "live@$id.service"
-    echo "$id: 시작"
-    sleep 31  # 동시 시작 금지 (DESIGN 11-6)
-  done
+  # 활성 라이브 중 아직 안 도는 것만 31초 간격으로 시작 (이미 송출 중인 라이브는 건드리지 않음)
+  bash "$LIVEMAX_HOME/start-lives.sh" || warn "라이브 시작 단계에서 문제가 있었습니다 (위 메시지 참고)"
 fi
 
 echo

@@ -153,8 +153,8 @@ async def live_create(request: Request):
         return render(request, "live_edit.html", **_form_ctx(request, None, d, True), err=err)
     db.add_event(request.state.conn, "info", "dashboard", "라이브 설정 생성", lv.id)
     return redirect(f"/live/{lv.id}", ok=(
-        f"{lv.id} 설정을 저장했습니다. 송출 시작: sudo systemctl enable --now live-audio@{lv.id} live@{lv.id} "
-        "(다른 라이브에는 영향 없음)"))
+        f"{lv.id} 설정을 저장했습니다. 송출 시작: PC 의 LiveMax 메뉴 '4. 라이브 시작' "
+        "(또는 서버에서 sudo /opt/livemax/start-lives.sh). 다른 라이브에는 영향 없음"))
 
 
 @router.post("/live/{live_id}")

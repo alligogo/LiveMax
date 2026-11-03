@@ -2,7 +2,9 @@
 
 유튜브 24/7 음악 라이브 다중 송출 시스템. 한 대의 VPS(Contabo Cloud VPS 4)에서 서로 다른 영상·음원 조합의 라이브 여러 개를 동시에, 무중단으로 송출한다.
 
-처음 서버를 만든다면 [서버 구입부터 첫 라이브 송출까지](#서버-구입부터-첫-라이브-송출까지)를 순서대로 따라 하면 된다.
+**서버를 새로 열 때는 [새 서버 오픈 매뉴얼 (docs/NEW_SERVER.md)](docs/NEW_SERVER.md)을 따른다.** PC의 `LiveMax.bat` 메뉴가 설치를 자동으로 하고, 사람이 할 일만 순서대로 적혀 있다.
+
+아래 [서버 구입부터 첫 라이브 송출까지](#서버-구입부터-첫-라이브-송출까지)는 같은 과정을 손으로 하는 방법이다(1번 서버를 연 방식, 참고용).
 
 설계 문서는 [DESIGN.md](DESIGN.md)에 있다. 코드는 그 설계를 그대로 따른다. 특히 **11장 "하지 말아야 할 것"** 을 코드 수준에서 강제한다.
 
@@ -64,6 +66,10 @@
 | `DESIGN.md` | 합의된 설계 문서 (원본) |
 | `bootstrap.sh` | 갓 생성된 서버의 최초 설정: 패키지 업데이트, 타임존 UTC, ufw, fail2ban, 자동 업데이트 정책(보안 패치 자동 / 자동 재부팅 금지 / 송출 도구·커널 제외 / 서비스 자동 재시작 금지), SSH 키 인증 전환(접속 확인 후), GitHub deploy key 생성 |
 | `install.sh` | 빈 서버에 명령 하나로 설치. 멱등성 있음. 기존 설정·미디어·키는 덮어쓰지 않고, 실행 중인 라이브도 재시작하지 않음 |
+| `start-lives.sh` | 활성 라이브 중 아직 안 도는 것만 31초 간격으로 시작. 송출 중인 라이브는 건드리지 않음 |
+| `tools/windows/LiveMax.bat`, `livemax.ps1` | **PC용 서버 관리 메뉴.** PC 준비, 새 서버 자동 설치(비밀번호 1회 입력), 대시보드 열기(SSH 터널), 라이브 시작, 상태 점검, 전체 업데이트, SSH 접속 |
+| `docs/NEW_SERVER.md` | 새 서버 오픈 매뉴얼 (사람이 하는 일만 순서대로) |
+| `.gitattributes` | `*.sh`는 LF 고정 (CRLF가 섞이면 서버에서 실행 불가), 윈도우 도구는 변환 금지 |
 | `healthcheck.sh` | 송출 준비 상태 점검 (바이너리, copy 가드, 설정, 키 권한, 디스크, 서비스, harbor 로컬 바인드) |
 | `reset_password.py` | 대시보드 관리자 비밀번호를 랜덤으로 재설정 (분실 시) |
 | `requirements.txt` | Python 의존성 |
@@ -144,6 +150,8 @@
 ---
 
 ## 서버 구입부터 첫 라이브 송출까지
+
+> 2번째 서버부터는 [docs/NEW_SERVER.md](docs/NEW_SERVER.md)의 자동 방식을 쓴다. 이 절은 손으로 하는 방법이다.
 
 명령어 안의 `서버IP`는 Contabo에서 받은 서버 IP로 바꿔서 실행한다. `PC에서`와 `서버에서`를 구분해서 볼 것.
 
@@ -481,6 +489,7 @@ ffmpeg -i song.wav -af loudnorm=I=-14:TP=-1:LRA=11 -ar 44100 -ac 2 -c:a aac -pro
 | 오늘의 편성 목록 | `ls /var/lib/livemax/concat/ch01/` |
 | 수동 정리 | 대시보드 유지관리의 "지금 정리 실행" 또는 `sudo systemctl start livemax-cleanup` |
 | 비밀번호 분실 | `sudo -u livemax /opt/livemax/venv/bin/python /opt/livemax/reset_password.py` |
+| 라이브 시작 (추가·활성화 후) | PC 메뉴 4, 또는 `sudo /opt/livemax/start-lives.sh` |
 | 라이브 1개 중지·삭제 | `sudo systemctl disable --now live@ch05 live-audio@ch05` 후 `config/ch05.yaml` 삭제 |
 
 ### 업데이트·재부팅 정책 (24/7 송출 서버)
@@ -528,7 +537,7 @@ sudo systemctl restart live-audio@ch01 live@ch01
 
 ### 새 서버(2번 서버) 구축
 
-위 "서버 구입부터 첫 라이브 송출까지"의 1~5단계를 그대로 한다(`--hostname live2`, deploy key 제목 `live2`). 그다음 대시보드에서 **설정 → 설정 가져오기**(1번 서버에서 내보낸 zip) → 라이브마다 스트림 키 입력·활성화 → 미디어 업로드 순서로 진행한다. deploy key는 서버마다 따로 만들어 등록한다.
+[docs/NEW_SERVER.md](docs/NEW_SERVER.md)를 따른다. PC 메뉴 2가 서버 설정과 설치를 자동으로 한다. 공용 deploy key를 복사해 쓰므로 GitHub 등록은 다시 하지 않는다. 그다음 대시보드에서 **설정 → 설정 가져오기**(기존 서버에서 내보낸 zip) → 라이브마다 스트림 키 입력·활성화 → 미디어 업로드 → PC 메뉴 4(라이브 시작) 순서로 진행한다.
 
 내보내기 파일에는 스트림 키가 들어 있지 않다. 그래서 가져온 라이브는 비활성 상태로 들어온다.
 
