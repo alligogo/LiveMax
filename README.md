@@ -2,6 +2,8 @@
 
 유튜브 24/7 음악 라이브 다중 송출 시스템. 한 대의 VPS(Contabo Cloud VPS 4)에서 서로 다른 영상·음원 조합의 라이브 여러 개를 동시에, 무중단으로 송출한다.
 
+처음 서버를 만든다면 [서버 구입부터 첫 라이브 송출까지](#서버-구입부터-첫-라이브-송출까지)를 순서대로 따라 하면 된다.
+
 설계 문서는 [DESIGN.md](DESIGN.md)에 있다. 코드는 그 설계를 그대로 따른다. 특히 **11장 "하지 말아야 할 것"** 을 코드 수준에서 강제한다.
 
 ---
@@ -60,6 +62,7 @@
 | 파일 | 역할 |
 |---|---|
 | `DESIGN.md` | 합의된 설계 문서 (원본) |
+| `bootstrap.sh` | 갓 생성된 서버의 최초 설정: 패키지 업데이트, 타임존 UTC, ufw, fail2ban, 자동 보안 업데이트, SSH 키 인증 전환(접속 확인 후), GitHub deploy key 생성 |
 | `install.sh` | 빈 서버에 명령 하나로 설치. 멱등성 있음. 기존 설정·미디어·키는 덮어쓰지 않고, 실행 중인 라이브도 재시작하지 않음 |
 | `healthcheck.sh` | 송출 준비 상태 점검 (바이너리, copy 가드, 설정, 키 권한, 디스크, 서비스, harbor 로컬 바인드) |
 | `reset_password.py` | 대시보드 관리자 비밀번호를 랜덤으로 재설정 (분실 시) |
@@ -140,18 +143,224 @@
 
 ---
 
-## 설치
+## 서버 구입부터 첫 라이브 송출까지
+
+명령어 안의 `서버IP`는 Contabo에서 받은 서버 IP로 바꿔서 실행한다. `PC에서`와 `서버에서`를 구분해서 볼 것.
+
+### 0단계 — PC 준비 (한 번만)
+
+**0-1. SSH 키 만들기.** 이미 있으면 건너뛴다. 질문은 전부 Enter로 넘겨도 된다.
+
+macOS / Linux:
+
+```bash
+ssh-keygen -t ed25519 -C "my-pc"
+```
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+Windows (PowerShell):
+
+```powershell
+ssh-keygen -t ed25519 -C "my-pc"
+```
+
+```powershell
+Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub
+```
+
+출력된 `ssh-ed25519 AAAA... my-pc` 한 줄이 **공개키**다. 2단계에서 쓴다. `.pub`가 없는 파일(개인키)은 절대 어디에도 붙여넣지 않는다.
+
+**0-2. `bootstrap.sh` 받기.** 저장소가 비공개라 서버에서는 아직 받을 수 없다. 그래서 PC로 먼저 받는다. GitHub에서 `bootstrap.sh`를 열고 **Download raw file** 버튼을 누르면 된다. 받은 폴더에서 터미널을 연다.
+
+**0-3. 테스트 미디어 준비.** 아래 "미디어 업로드"의 규격과 인코딩 예시대로 PC에서 만든다. 영상 클립 3개 이상, 음원 10곡 이상이면 된다. 업로드 전에 규격을 확인하려면 PC의 ffprobe로 보면 된다.
+
+**0-4. 유튜브 설정.** 유튜브 스튜디오 → 만들기 → 라이브 스트리밍 시작 → 스트림 탭.
+- **스트림 키:** 재사용 가능한 기본 키를 복사해 둔다. 7단계에서 쓴다.
+- **자동 시작: 켬. 자동 중지: 끔.** 자동 중지가 켜져 있으면 ffmpeg가 재시작될 때마다 방송이 끝난다.
+
+### 1단계 — 서버 구입 (Contabo)
+
+- 상품: **Cloud VPS 4**, 리전: **European Union**
+- 이미지: **Ubuntu 24.04** (22.04 불가)
+- 로그인: root 비밀번호 설정. SSH 키 입력란이 있으면 0-1의 공개키도 넣는다.
+- 완료 메일에서 **서버 IP**를 확인한다.
+
+### 2단계 — 서버 최초 설정 (`bootstrap.sh`)
+
+PC에서 (0-2에서 받은 폴더):
+
+```bash
+scp bootstrap.sh root@서버IP:/root/
+```
+
+```bash
+ssh root@서버IP
+```
+
+첫 접속은 root 비밀번호로 한다. 호스트 확인 질문에는 `yes`를 입력한다.
+
+서버에서 (따옴표 안에 0-1의 공개키 한 줄을 넣는다):
+
+```bash
+bash /root/bootstrap.sh --hostname live1 --pubkey "ssh-ed25519 AAAA...여기에_공개키... my-pc"
+```
+
+스크립트가 하는 일: 패키지 업데이트, 타임존 UTC + 시간 동기화, ufw(SSH·443만), fail2ban, 자동 보안 업데이트, SSH 키 등록, GitHub deploy key 생성.
+
+중간에 **"키로 접속되는 것을 확인했나요?"** 라고 물으면, **지금 창은 그대로 두고** PC에서 터미널을 하나 더 연다.
+
+```bash
+ssh root@서버IP
+```
+
+비밀번호를 묻지 않고 바로 들어가지면, 원래 창으로 돌아와 `yes`를 입력한다. 그러면 비밀번호 로그인이 꺼진다. 비밀번호를 물으면 `no`를 입력하고 공개키를 다시 확인한다.
+
+끝에 "재부팅이 필요합니다"가 나오면 재부팅하고, 1분 뒤 다시 접속한다.
+
+```bash
+reboot
+```
+
+```bash
+ssh root@서버IP
+```
+
+### 3단계 — GitHub deploy key 등록
+
+`bootstrap.sh` 마지막에 출력된 `ssh-ed25519 ... livemax-deploy@live1` 한 줄을 복사한다. 다시 보려면:
+
+```bash
+cat /root/.ssh/livemax_deploy.pub
+```
+
+GitHub → https://github.com/alligogo/LiveMax/settings/keys → **Add deploy key**
+- Title: `live1`
+- Key: 복사한 한 줄
+- **Allow write access는 체크하지 않는다**
+
+서버에서 연결을 확인한다. `Hi alligogo/LiveMax! You've successfully authenticated`가 나오면 성공이다.
+
+```bash
+ssh -T git@github.com
+```
+
+### 4단계 — LiveMax 설치
+
+서버에서:
+
+```bash
+git clone git@github.com:alligogo/LiveMax.git /opt/livemax
+```
+
+```bash
+cd /opt/livemax && ./install.sh
+```
+
+5~10분 걸린다. 중간에 출력되는 **관리자 초기 비밀번호**를 복사해 둔다. 놓쳤으면 아래로 다시 볼 수 있다. 비밀번호를 바꾸면 이 파일은 지워진다.
+
+```bash
+cat /opt/livemax/secrets/admin.initial_password
+```
+
+### 5단계 — 대시보드 접속 (SSH 터널)
+
+PC에서 새 터미널을 열고 아래를 실행한다. 이 창은 대시보드를 쓰는 동안 열어 둔다.
+
+```bash
+ssh -L 8080:127.0.0.1:8080 root@서버IP
+```
+
+브라우저에서 http://localhost:8080 을 연다. 아이디 `admin`과 초기 비밀번호로 로그인하면 비밀번호 변경 화면이 나온다. 12자 이상으로 바꾼다.
+
+### 6단계 — 폴더 만들기 + 미디어 올리기
+
+대시보드에서:
+1. **영상** 탭 → 새 폴더 이름 `main` → 폴더 만들기
+2. **음원** 탭 → 새 폴더 이름 `main` → 폴더 만들기
+
+파일은 웹에서 폴더를 고른 뒤 드래그앤드롭으로 올리거나, PC에서 scp로 올린다. 대용량은 scp를 권장한다. scp는 0-3의 미디어가 있는 폴더에서 실행한다.
+
+```bash
+scp *.mp4 root@서버IP:/media/_incoming/video/main/
+```
+
+```bash
+scp *.m4a root@서버IP:/media/_incoming/audio/main/
+```
+
+30초쯤 뒤 대시보드에서 해당 폴더를 새로고침하면, 통과한 파일은 목록에 나오고 실패한 파일은 사유와 함께 **검증 실패**에 나온다.
+
+### 7단계 — 라이브 추가
+
+대시보드 **스트리밍** → **+ 라이브 추가**:
+
+| 항목 | 값 |
+|---|---|
+| ID | `ch01` |
+| 이름 | 아무거나 |
+| 송출 활성화 | 체크 |
+| 비트레이트 | `5500k` |
+| 재생 방식 | 중복방지 랜덤 (기본) |
+| 크로스페이드 | `0` |
+| 타깃 시간대 | `America/Chicago` |
+| 구간 | 시작 `00:00`, 영상 폴더 `main`, 음원 폴더 `main` |
+| 일일 재시작 시각 | `04:17` |
+| 스트림 키 | 0-4에서 복사한 키 |
+
+저장한 뒤, 서버에서 송출을 시작한다.
+
+```bash
+systemctl enable --now live-audio@ch01 live@ch01
+```
+
+### 8단계 — 송출 확인
+
+서버에서:
+
+```bash
+/opt/livemax/healthcheck.sh
+```
+
+```bash
+tail -f /var/log/livemax/live-ch01.log
+```
+
+1분마다 `progress speed=1.0x ...` 줄이 찍히면 정상이다. `Ctrl+C`로 빠져나온다.
+
+유튜브 스튜디오의 스트림 탭에서 상태가 **정상**이고 미리보기가 나오는지 확인한다.
+
+문제가 있으면 아래 출력을 그대로 붙여넣어 질문하면 된다.
+
+```bash
+journalctl -u live@ch01 -u live-audio@ch01 -n 150 --no-pager
+```
+
+### 9단계 — 72시간 관찰
+
+- 하루 1~2번 대시보드에서 speed(1.0 유지), 재시작 횟수, 경고를 본다.
+- **72시간 무사고 전에는 라이브를 2개 이상으로 늘리지 않는다** (DESIGN 12장).
+- 이후 도메인·HTTPS, 지역 차단 DB, 유튜브 API 키는 아래 "설치 후 할 일"을 참고해서 붙인다.
+
+---
+
+## 설치 (참고)
+
+위 순서의 4단계에 해당하는 상세 설명이다.
 
 ### 요구사항
 
 - Ubuntu **24.04 LTS** 이상. apt에 Liquidsoap 2.2.x가 있어야 한다. 22.04의 2.0.x는 지원하지 않는다.
-- root 권한, SSH 공개키 등록. 설치 시 비밀번호 로그인을 끄므로 키가 먼저 등록되어 있어야 한다.
+- root 권한, SSH 공개키 등록. 갓 만든 서버라면 `bootstrap.sh`를 먼저 실행한다.
+- 저장소가 비공개이므로 GitHub deploy key가 등록되어 있어야 한다 (`bootstrap.sh`가 생성).
 - (선택) 대시보드용 도메인 하나. DNS A 레코드가 서버 IP를 가리키면 된다.
 
 ### 설치 명령
 
 ```bash
-git clone https://github.com/alligogo/LiveMax.git /opt/livemax
+git clone git@github.com:alligogo/LiveMax.git /opt/livemax
 ```
 
 ```bash
@@ -276,7 +485,7 @@ ffmpeg -i song.wav -af loudnorm=I=-14:TP=-1:LRA=11 -ar 44100 -ac 2 -c:a aac -pro
 
 ### 새 서버(2번 서버) 구축
 
-`install.sh` → 대시보드에서 **설정 → 설정 가져오기**(1번 서버에서 내보낸 zip) → 라이브마다 스트림 키 입력·활성화 → 미디어 업로드.
+위 "서버 구입부터 첫 라이브 송출까지"의 1~5단계를 그대로 한다(`--hostname live2`, deploy key 제목 `live2`). 그다음 대시보드에서 **설정 → 설정 가져오기**(1번 서버에서 내보낸 zip) → 라이브마다 스트림 키 입력·활성화 → 미디어 업로드 순서로 진행한다. deploy key는 서버마다 따로 만들어 등록한다.
 
 내보내기 파일에는 스트림 키가 들어 있지 않다. 그래서 가져온 라이브는 비활성 상태로 들어온다.
 

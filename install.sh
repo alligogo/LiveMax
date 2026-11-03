@@ -51,10 +51,8 @@ MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 echo "RAM: ${MEM_MB}MB"
 
 port_owner() { ss -ltnpH "sport = :$1" 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1; }
-for p in 443; do
-  o="$(port_owner $p)"
-  [[ -z "$o" || "$o" == "caddy" ]] || die "포트 $p 를 '$o' 가 사용 중입니다"
-done
+o="$(port_owner 443)"
+[[ -z "$o" || "$o" == "caddy" ]] || die "포트 443 을 '$o' 가 사용 중입니다"
 
 # ---------------------------------------------------------------------------
 step "2/9 패키지 설치"
