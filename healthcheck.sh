@@ -71,6 +71,15 @@ EOF
   done
 fi
 
+echo "== 업데이트 정책"
+if [[ -f /var/run/reboot-required ]]; then
+  warn "재부팅 필요 ($(tr '\n' ' ' < /var/run/reboot-required.pkgs 2>/dev/null)) — 점검 시간에 sudo reboot"
+else ok "재부팅 대기 중인 업데이트 없음"; fi
+ar=$(apt-config dump 2>/dev/null | sed -n 's/^Unattended-Upgrade::Automatic-Reboot "\(.*\)";/\1/p')
+[[ "$ar" == "false" ]] && ok "자동 재부팅 꺼짐" || warn "자동 재부팅 설정: ${ar:-기본값} — bootstrap.sh 실행 권장"
+apt-config dump 2>/dev/null | grep -q 'Package-Blacklist:: "liquidsoap"' && ok "ffmpeg·Liquidsoap·커널 자동 업데이트 제외" || warn "송출 도구 자동 업데이트 제외 미설정 — bootstrap.sh 실행 권장"
+[[ -f /etc/needrestart/conf.d/50-livemax.conf ]] && ok "업데이트 후 서비스 자동 재시작 꺼짐 (needrestart 'l')" || warn "needrestart 자동 재시작 정책 미설정"
+
 echo "== 네트워크 · 보안"
 command -v ufw >/dev/null && { ufw status | grep -q "Status: active" && ok "ufw 활성" || warn "ufw 비활성"; }
 systemctl is-active --quiet fail2ban && ok "fail2ban" || warn "fail2ban 비활성"

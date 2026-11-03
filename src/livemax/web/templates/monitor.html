@@ -3,6 +3,17 @@
 {% block content %}
 <div id="monitor" data-refresh="10">
 
+{# 커널 등 재부팅이 필요한 업데이트 대기 — 자동 재부팅은 꺼져 있으므로 사람이 점검 시간에 실행 #}
+<div class="flash warn reboot" id="reboot-banner" role="status" {{ 'hidden' if not reboot.required }}>
+  <b>▲ 재부팅 필요</b> — 설치된 업데이트(커널 등)가 재부팅 후에 적용됩니다.
+  <span class="small" data-reboot-pkgs>{% if reboot.packages %}대상: {{ reboot.packages|join(', ') }}{% endif %}</span>
+  <details class="small"><summary>재부팅 방법</summary>
+    송출 영향이 적은 시간에 SSH 로 접속해 <code>sudo reboot</code>.
+    재부팅 중에는 모든 라이브가 1~2분 끊기며, 재사용 스트림 키라면 부팅 후 같은 방송으로 복귀합니다.
+    커널·ffmpeg·Liquidsoap 은 자동 업데이트에서 제외되어 있으므로 함께 올리려면 먼저 <code>sudo apt upgrade</code>.
+  </details>
+</div>
+
 {# ---- 한 화면 요약: 폰에서 상태 목록 + 경고가 한 번에 보이도록 위쪽에 배치 (DESIGN 8.5) ---- #}
 <section class="summary">
   <div class="pill s-ok"><span class="ic">●</span> 정상 <b data-k="counts.ok">{{ counts.ok }}</b></div>

@@ -9,7 +9,8 @@
 #   2. 타임존 UTC + NTP 시간 동기화 (DESIGN 4.5: 서버 시계는 항상 UTC)
 #   3. 방화벽 ufw — SSH, 443 만 개방 (DESIGN 9.4)
 #   4. fail2ban — SSH 무차별 대입 차단
-#   5. unattended-upgrades — 보안 패치 자동 적용
+#   5. 자동 업데이트 정책 — 보안 패치는 자동, 자동 재부팅 금지, ffmpeg·Liquidsoap·커널 제외,
+#      업데이트 후 서비스 자동 재시작 금지 (needrestart 'l')
 #   6. SSH 키 인증 전환 — 키 등록 → (키 접속 확인 후) 비밀번호 로그인 비활성화
 #   7. GitHub deploy key 생성 (비공개 저장소 클론용, 읽기 전용)
 #
@@ -32,7 +33,7 @@ while (( $# )); do
     --hostname) NEW_HOSTNAME="${2:-}"; shift 2 ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --keep-password-login) KEEP_PW=1; shift ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *) echo "알 수 없는 옵션: $1 (--help 참고)"; exit 2 ;;
   esac
 done
@@ -54,7 +55,7 @@ step "1/7 패키지 업데이트"
 # ---------------------------------------------------------------------------
 apt-get update -q
 apt-get "${APT_OPTS[@]}" full-upgrade
-apt-get "${APT_OPTS[@]}" install git curl ca-certificates ufw fail2ban python3-systemd unattended-upgrades htop
+apt-get "${APT_OPTS[@]}" install git curl ca-certificates ufw fail2ban python3-systemd unattended-upgrades needrestart htop
 apt-get -y -q autoremove
 
 if [[ -n "$NEW_HOSTNAME" ]]; then
@@ -100,15 +101,62 @@ sleep 1
 fail2ban-client status sshd 2>/dev/null | sed 's/^/  /' || warn "fail2ban sshd jail 상태 확인 실패"
 
 # ---------------------------------------------------------------------------
-step "5/7 자동 보안 업데이트"
+step "5/7 자동 업데이트 정책 (보안 패치는 받되, 방송을 끊는 요인은 차단)"
 # ---------------------------------------------------------------------------
+# (a) 보안 업데이트는 매일 계속 받는다
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+// LiveMax bootstrap.sh — 보안 업데이트 자동 설치 유지
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
 EOF
+
+# (b) 자동 재부팅 금지 + 송출 핵심 도구·커널은 자동 업데이트 제외
+#     50unattended-upgrades 는 직접 고치지 않는다: ucf 가 관리하는 배포판 파일이라 수정하면
+#     unattended-upgrades 자신의 업데이트가 "설정 파일 충돌"로 자동 업데이트에서 빠진다.
+#     apt 는 apt.conf.d 를 이름순으로 읽으므로 52- 파일의 값이 50- 위에 적용된다
+#     (Automatic-Reboot 는 덮어쓰고, Package-Blacklist 는 목록에 추가된다).
+#     항목은 패키지명 앞부분 정규식 매칭: "linux-image" → linux-image-6.8.0-xx-generic 등 전부.
+cat > /etc/apt/apt.conf.d/52livemax-unattended-upgrades <<'EOF'
+// LiveMax bootstrap.sh — 24/7 송출 서버 자동 업데이트 정책
+// 확인: apt-config dump | grep Unattended-Upgrade::
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Package-Blacklist {
+    // 송출 핵심 도구
+    "ffmpeg";
+    "liquidsoap";
+    // ffmpeg·Liquidsoap 이 실제로 쓰는 라이브러리 (ffmpeg 패키지 자체는 얇은 실행파일뿐)
+    "libavcodec";
+    "libavformat";
+    "libavutil";
+    "libavfilter";
+    "libavdevice";
+    "libswresample";
+    "libswscale";
+    "libpostproc";
+    // 커널 (수동 재부팅으로만 적용)
+    "linux-image";
+    "linux-generic";
+    "linux-headers";
+    "linux-modules";
+};
+EOF
+
+# (c) 업데이트 후 서비스 자동 재시작 금지 — 'l' = 재시작이 필요한 서비스를 목록으로만 보여줌
+#     needrestart.conf 도 dpkg 설정 파일이라 직접 고치지 않고, 이 파일이 끝에서 읽는 conf.d 를 쓴다.
+install -d -m 755 /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/50-livemax.conf <<'EOF'
+# LiveMax bootstrap.sh — 패키지 업데이트 후 서비스를 자동 재시작하지 않음 (목록만 표시)
+$nrconf{restart} = 'l';
+EOF
+
 systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
-echo "unattended-upgrades 활성 (자동 재부팅은 하지 않음 — 송출 중단 방지)"
+echo "자동 재부팅: $(apt-config dump | sed -n 's/^Unattended-Upgrade::Automatic-Reboot "\(.*\)";/\1/p')"
+echo "자동 업데이트 제외: $(apt-config dump | sed -n 's/^Unattended-Upgrade::Package-Blacklist:: "\(.*\)";/\1/p' | tr '\n' ' ')"
+if command -v needrestart >/dev/null; then
+  echo "needrestart 재시작 모드: $(perl -e 'our %nrconf; do "/etc/needrestart/needrestart.conf"; print $nrconf{restart}')"
+fi
+echo "커널·송출 도구 업데이트는 점검 시간에 수동으로: apt upgrade && reboot (대시보드에 '재부팅 필요' 표시)"
 
 # ---------------------------------------------------------------------------
 step "6/7 SSH 키 인증 전환"

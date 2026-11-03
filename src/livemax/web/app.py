@@ -131,7 +131,7 @@ def create_app() -> FastAPI:
         cap = data.capacity_view(server, rows, sysd)
         counts = {k: sum(1 for r in rows if r["state"] == k) for k in data.STATES}
         return {"rows": rows, "errors": errors, "sys": sysd, "cap": cap, "counts": counts,
-                "alerts": data.alerts(conn, server, rows, sysd, errors)}
+                "alerts": data.alerts(conn, server, rows, sysd, errors), "reboot": data.reboot_status()}
 
     @app.get("/")
     def monitor(request: Request):
@@ -151,6 +151,7 @@ def create_app() -> FastAPI:
                          "limit_tb": cap.limit_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb},
             "lives": [{k: v for k, v in r.items() if k != "cfg"} for r in ov["rows"]],
             "alerts": ov["alerts"][:30],
+            "reboot": ov["reboot"],
         }
 
     @app.post("/maintenance/cleanup")

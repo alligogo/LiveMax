@@ -90,6 +90,8 @@ legend { color: var(--muted); padding: 0 6px; }
 .alerts .a-warn .ic { color: var(--warn); } .alerts .a-error .ic { color: var(--down); }
 .alerts time { color: var(--muted); margin-right: 6px; font-variant-numeric: tabular-nums; }
 .flash { padding: 8px 12px; border-radius: 6px; margin: 8px 0; border: 1px solid var(--line); }
+[hidden] { display: none !important; }
+.flash.reboot { border-left: 4px solid var(--warn); }
 .flash.ok { border-color: #2ea043; } .flash.err { border-color: var(--down); } .flash.warn { border-color: var(--warn); }
 
 /* 지표 */

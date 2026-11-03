@@ -62,7 +62,7 @@
 | 파일 | 역할 |
 |---|---|
 | `DESIGN.md` | 합의된 설계 문서 (원본) |
-| `bootstrap.sh` | 갓 생성된 서버의 최초 설정: 패키지 업데이트, 타임존 UTC, ufw, fail2ban, 자동 보안 업데이트, SSH 키 인증 전환(접속 확인 후), GitHub deploy key 생성 |
+| `bootstrap.sh` | 갓 생성된 서버의 최초 설정: 패키지 업데이트, 타임존 UTC, ufw, fail2ban, 자동 업데이트 정책(보안 패치 자동 / 자동 재부팅 금지 / 송출 도구·커널 제외 / 서비스 자동 재시작 금지), SSH 키 인증 전환(접속 확인 후), GitHub deploy key 생성 |
 | `install.sh` | 빈 서버에 명령 하나로 설치. 멱등성 있음. 기존 설정·미디어·키는 덮어쓰지 않고, 실행 중인 라이브도 재시작하지 않음 |
 | `healthcheck.sh` | 송출 준비 상태 점검 (바이너리, copy 가드, 설정, 키 권한, 디스크, 서비스, harbor 로컬 바인드) |
 | `reset_password.py` | 대시보드 관리자 비밀번호를 랜덤으로 재설정 (분실 시) |
@@ -112,7 +112,7 @@
 | `app.py` | FastAPI 앱. 지역 차단 → CSRF(같은 출처) → 인증 → 비밀번호 변경 강제 미들웨어. 모니터링(`/`), `/api/status`, 수동 정리, 로그 조회 |
 | `auth.py` | argon2 해시, 5회 실패 시 IP 15분 차단, DB 세션(토큰은 해시만 저장), 초기 비밀번호 |
 | `geo.py` | 지역 차단 (기본 KR만), 임시 허용 IP, **SSH 터널은 항상 우회** |
-| `data.py` | 상태 분류(정상/경고/중단/재시작중), 경고 목록, 디스크 내역 |
+| `data.py` | 상태 분류(정상/경고/중단/재시작중), 경고 목록, 디스크 내역, 재부팅 필요 여부(`/var/run/reboot-required`) |
 | `media_routes.py` | `/media/video`, `/media/audio`: 폴더 생성·이름변경·삭제, 스트리밍 업로드(스테이징 경유), 파일 삭제(영상은 오늘 편성이 쓰는 중이면 삭제 예약) |
 | `live_routes.py` | `/live`, `/live/<id>`: 목록, 유튜브 임베드 미리보기, 설정 편집, 스트림 키 입력(마스킹 표시) |
 | `settings_routes.py` | `/settings`: 비밀번호, 지역 차단, 허용 IP, 세션 강제 로그아웃, 로그인 기록, **설정 내보내기/가져오기(키 제외)** |
@@ -208,7 +208,7 @@ ssh root@서버IP
 bash /root/bootstrap.sh --hostname live1 --pubkey "ssh-ed25519 AAAA...여기에_공개키... my-pc"
 ```
 
-스크립트가 하는 일: 패키지 업데이트, 타임존 UTC + 시간 동기화, ufw(SSH·443만), fail2ban, 자동 보안 업데이트, SSH 키 등록, GitHub deploy key 생성.
+스크립트가 하는 일: 패키지 업데이트, 타임존 UTC + 시간 동기화, ufw(SSH·443만), fail2ban, 자동 업데이트 정책, SSH 키 등록, GitHub deploy key 생성. 자동 업데이트 정책은 아래 "업데이트·재부팅 정책" 참고.
 
 중간에 **"키로 접속되는 것을 확인했나요?"** 라고 물으면, **지금 창은 그대로 두고** PC에서 터미널을 하나 더 연다.
 
@@ -482,6 +482,49 @@ ffmpeg -i song.wav -af loudnorm=I=-14:TP=-1:LRA=11 -ar 44100 -ac 2 -c:a aac -pro
 | 수동 정리 | 대시보드 유지관리의 "지금 정리 실행" 또는 `sudo systemctl start livemax-cleanup` |
 | 비밀번호 분실 | `sudo -u livemax /opt/livemax/venv/bin/python /opt/livemax/reset_password.py` |
 | 라이브 1개 중지·삭제 | `sudo systemctl disable --now live@ch05 live-audio@ch05` 후 `config/ch05.yaml` 삭제 |
+
+### 업데이트·재부팅 정책 (24/7 송출 서버)
+
+방송을 끊는 요인은 막고, 보안 패치는 계속 받는다. `bootstrap.sh`가 설정한다.
+
+| 항목 | 설정 | 파일 |
+|---|---|---|
+| 보안 업데이트 | 매일 자동 설치 | `/etc/apt/apt.conf.d/20auto-upgrades` |
+| 자동 재부팅 | **안 함** (`Automatic-Reboot "false"`) | `/etc/apt/apt.conf.d/52livemax-unattended-upgrades` |
+| 자동 업데이트 제외 | ffmpeg, liquidsoap, libav*/libsw* (ffmpeg 라이브러리), linux-image, linux-generic, linux-headers, linux-modules | 위와 같음 |
+| 업데이트 후 서비스 재시작 | **안 함** — 목록만 표시 (`$nrconf{restart} = 'l'`) | `/etc/needrestart/conf.d/50-livemax.conf` |
+
+배포판 파일(`50unattended-upgrades`, `needrestart.conf`)은 직접 고치지 않고, 나중에 읽히는 별도 파일로 덮어쓴다. 배포판 파일을 고치면 그 패키지가 업데이트될 때 "설정 파일 충돌"이 생기고, unattended-upgrades는 그런 패키지를 자동 업데이트에서 빼버린다.
+
+ffmpeg 패키지 자체는 얇은 실행파일이고 실제 처리는 `libavcodec` 등 라이브러리가 한다. 그래서 라이브러리도 함께 제외했다. 이 라이브러리들의 보안 패치는 아래 수동 점검 때 적용된다.
+
+적용 상태 확인:
+
+```bash
+apt-config dump | grep -E 'Unattended-Upgrade::(Automatic-Reboot|Package-Blacklist)'
+```
+
+**재부팅 필요 알림:** 커널 등 재부팅이 필요한 업데이트가 설치되면 `/var/run/reboot-required`가 생긴다. 그러면 대시보드 모니터링 화면 상단과 경고 목록에 "재부팅 필요"가 대상 패키지와 함께 뜬다. `healthcheck.sh`도 같은 내용을 알려준다.
+
+**수동 점검 (송출 영향이 적은 시간에):**
+
+```bash
+apt list --upgradable
+```
+
+```bash
+sudo apt update && sudo apt upgrade
+```
+
+```bash
+sudo reboot
+```
+
+재부팅하면 모든 라이브가 1~2분 끊긴다. 재사용 스트림 키와 유튜브 자동 시작이 켜져 있으면 부팅 후 같은 방송으로 돌아온다. 재부팅 없이 ffmpeg·Liquidsoap 업데이트만 반영하려면 라이브를 **하나씩, 30초 이상 간격으로** 재시작한다.
+
+```bash
+sudo systemctl restart live-audio@ch01 live@ch01
+```
 
 ### 새 서버(2번 서버) 구축
 

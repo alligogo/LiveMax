@@ -19,6 +19,12 @@
         const r = await fetch("/api/status", { credentials: "same-origin" });
         if (r.status === 401) { location.href = "/login"; return; }
         const d = await r.json();
+        const rb = document.getElementById("reboot-banner");
+        if (rb && d.reboot) {
+          rb.hidden = !d.reboot.required;
+          const pk = rb.querySelector("[data-reboot-pkgs]");
+          if (pk) pk.textContent = d.reboot.packages && d.reboot.packages.length ? "대상: " + d.reboot.packages.join(", ") : "";
+        }
         mon.querySelectorAll("[data-k]").forEach((el) => { el.textContent = fmt(get(d, el.dataset.k), el.dataset.fmt); });
         (d.lives || []).forEach((lv) => {
           const li = mon.querySelector(`[data-live="${CSS.escape(lv.id)}"]`);

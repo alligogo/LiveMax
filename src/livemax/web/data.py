@@ -21,6 +21,24 @@ STATES = {
 
 _disk_cache: dict = {"ts": 0, "data": None}
 
+# 커널 등 재부팅이 필요한 업데이트가 설치되면 Ubuntu(update-notifier-common)가 만드는 파일.
+# 자동 재부팅은 꺼져 있으므로(bootstrap.sh) 대시보드에서 알리고 사람이 점검 시간에 재부팅한다.
+REBOOT_FLAG = Path("/var/run/reboot-required")
+REBOOT_PKGS = Path("/var/run/reboot-required.pkgs")
+
+
+def reboot_status() -> dict:
+    try:
+        since = REBOOT_FLAG.stat().st_mtime
+    except OSError:
+        return {"required": False, "packages": [], "since": None}
+    try:
+        pkgs = sorted({p.strip() for p in REBOOT_PKGS.read_text(encoding="utf-8").splitlines() if p.strip()})
+    except OSError:
+        pkgs = []
+    return {"required": True, "packages": pkgs, "since": since,
+            "since_text": time.strftime("%m-%d %H:%M", time.localtime(since))}
+
 
 def classify(lv: config.LiveConfig, st: dict | None, server: dict, recent_restarts: int) -> tuple[str, str]:
     """(상태 키, 설명)"""
@@ -114,6 +132,11 @@ def alerts(conn, server: dict, rows: list[dict], sysd: dict, errors: dict[str, s
     out: list[dict] = []
     for k, v in errors.items():
         out.append({"level": "error", "ts": None, "live": None, "message": f"설정 오류 {k}: {v.strip()}"})
+    rb = reboot_status()
+    if rb["required"]:
+        pk = ", ".join(rb["packages"][:5]) + (" 외" if len(rb["packages"]) > 5 else "")
+        out.append({"level": "warn", "ts": rb["since_text"], "live": None,
+                    "message": f"재부팅 필요 — 설치된 업데이트 적용 대기{f' ({pk})' if pk else ''}"})
     pct = sysd.get("disk_pct")
     if pct is not None:
         if pct >= server["cleanup"]["disk_emergency_percent"]:
