@@ -67,6 +67,7 @@
 | `bootstrap.sh` | 갓 생성된 서버의 최초 설정: 패키지 업데이트, 타임존 UTC, ufw, fail2ban, 자동 업데이트 정책(보안 패치 자동 / 자동 재부팅 금지 / 송출 도구·커널 제외 / 서비스 자동 재시작 금지), SSH 키 인증 전환(접속 확인 후), GitHub deploy key 생성 |
 | `install.sh` | 빈 서버에 명령 하나로 설치. 멱등성 있음. 기존 설정·미디어·키는 덮어쓰지 않고, 실행 중인 라이브도 재시작하지 않음 |
 | `start-lives.sh` | 활성 라이브 중 아직 안 도는 것만 31초 간격으로 시작. 송출 중인 라이브는 건드리지 않음 |
+| `tools/windows/LiveMax-Convert.bat` | **PC용 미디어 변환기.** 영상·음악 파일이나 폴더를 끌어다 놓으면 송출 규격(영상 MP4 / 음원 M4A -14 LUFS)으로 변환해 원본 옆 `LiveMax_변환` 폴더에 같은 이름으로 저장. 배치+PowerShell 한 파일 |
 | `tools/windows/LiveMax.bat`, `livemax.ps1` | **PC용 서버 관리 메뉴.** PC 준비, 새 서버 자동 설치(비밀번호 1회 입력), 대시보드 열기(SSH 터널), 라이브 시작, 상태 점검, 전체 업데이트, SSH 접속 |
 | `docs/NEW_SERVER.md` | 새 서버 오픈 매뉴얼 (사람이 하는 일만 순서대로) |
 | `.gitattributes` | `*.sh`는 LF 고정 (CRLF가 섞이면 서버에서 실행 불가), 윈도우 도구는 변환 금지 |
@@ -458,7 +459,7 @@ sudo systemctl enable --now live-audio@ch02 live@ch02
 - 영상: H.264 High, 1920x1080, 30fps 고정, 5500k CBR, 키프레임 2초, B프레임 없음, 오디오 없음, MP4/MKV, 1분 클립
 - 음원: AAC-LC 128k CBR, 44100Hz, 스테레오, -14 LUFS, M4A
 
-인코딩은 사용자 PC에서 한다. 서버에서는 하지 않는다. 아래는 참고용 ffmpeg 예시다.
+인코딩은 사용자 PC에서 한다. 서버에서는 하지 않는다. **보통은 `tools/windows/LiveMax-Convert.bat`에 파일이나 폴더를 끌어다 놓으면 된다** ([매뉴얼 A-3](docs/NEW_SERVER.md)). 아래는 같은 일을 손으로 하는 ffmpeg 예시다.
 
 영상 클립:
 
