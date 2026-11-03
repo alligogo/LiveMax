@@ -3,8 +3,6 @@
 import time
 import warnings
 
-import pytest
-
 warnings.filterwarnings("ignore")
 ORIGIN = {"origin": "https://testserver"}
 NEW = "Correct-Horse-Battery-9"
