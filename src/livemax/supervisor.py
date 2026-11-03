@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import concat, db, ffmpeg_cmd, liquidsoap, secrets, tls_relay
-from .config import ConfigError, Live, LiveStore
+from .config import ConfigError, LiveStore
 from .logsetup import UTCFormatter, FMT
 from .paths import Paths
 from .state import read_json
