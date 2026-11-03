@@ -1,0 +1,35 @@
+# 라이브 영상 송출 (ffmpeg copy 먹싱) — 인스턴스명 = 라이브 id. 예: live@ch01.service
+# @LIVEMAX_HOME@ 은 install.sh 가 설치 경로로 치환한다.
+# 라이브 추가: config/<id>.yaml 작성 후  sudo systemctl enable --now live-audio@<id> live@<id>
+# 다른 라이브 유닛과 의존 관계가 없으므로 추가·삭제가 다른 라이브를 재시작하지 않는다.
+[Unit]
+Description=LiveMax video/mux for %i
+Wants=network-online.target live-audio@%i.service
+After=network-online.target live-audio@%i.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=livemax
+Group=livemax
+WorkingDirectory=@LIVEMAX_HOME@
+Environment=LIVEMAX_HOME=@LIVEMAX_HOME@ PYTHONPATH=@LIVEMAX_HOME@/src PYTHONUNBUFFERED=1
+ExecStart=@LIVEMAX_HOME@/venv/bin/python -m livemax.runner %i
+# 죽으면 2초 뒤 재기동. 재사용 스트림 키면 유튜브 60초 무신호 종료 전에 같은 방송으로 복귀 (DESIGN 6.2)
+Restart=always
+RestartSec=2
+# enabled: false 인 라이브(종료코드 78)는 재시작하지 않는다
+RestartPreventExitStatus=78
+KillSignal=SIGTERM
+TimeoutStopSec=15
+# 송출 프로세스는 우선순위를 약간 높인다 (CPU 경쟁 시 정리·업로드보다 먼저)
+CPUWeight=200
+IOWeight=200
+Nice=-5
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

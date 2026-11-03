@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% set kname = '영상' if kind == 'video' else '음원' %}
+{% block title %}{{ kname }} · LiveMax{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>{{ kname }} 폴더</h1>
+  <details class="spec"><summary class="small">업로드 규격 보기</summary>
+    {% if kind == 'video' %}
+    <p class="small">H.264 {{ spec.profile }} · {{ spec.width }}x{{ spec.height }} · {{ spec.fps }}fps 고정 · {{ spec.min_bitrate }} 이상 CBR ·
+      키프레임 {{ spec.keyframe_interval }}초 고정 · B프레임 없음 · 오디오 없음 · MP4/MKV · 1분 클립</p>
+    {% else %}
+    <p class="small">AAC-{{ spec.profile }} · {{ spec.bitrate }} CBR · {{ spec.sample_rate }} Hz · 스테레오 · -14 LUFS · M4A/ADTS.
+      하나라도 48kHz 가 섞이면 그 곡에서 소리가 깨집니다.</p>
+    {% endif %}
+    <p class="small muted">서버는 변환하지 않습니다. 규격이 맞지 않으면 거부되고 사유가 아래에 표시됩니다.
+      대용량은 SFTP 로 <code>_incoming/{{ kind }}/&lt;폴더&gt;/</code> 에 올려도 됩니다.</p>
+  </details>
+  {% if missing %}<p class="flash warn">▲ 편성에 쓰이지만 존재하지 않는 폴더: {{ missing|join(', ') }}</p>{% endif %}
+
+  <ul class="folders">
+  {% for f in folders %}
+    <li class="{{ 'on' if f.name == folder }}">
+      <a href="/media/{{ kind }}?folder={{ f.name|urlencode }}">📁 {{ f.name }} <span class="muted">({{ f.count }})</span></a>
+      {% if f.used_by %}<span class="tag">사용: {{ f.used_by|join(', ') }}</span>{% endif %}
+    </li>
+  {% else %}
+    <li class="muted">폴더가 없습니다.</li>
+  {% endfor %}
+  </ul>
+  <form method="post" action="/media/{{ kind }}/folders" class="row">
+    <input name="name" placeholder="새 폴더 이름" required maxlength="64">
+    <button>폴더 만들기</button>
+  </form>
+</section>
+
+{% if folder %}
+<section class="card">
+  <h2>📁 {{ folder }}</h2>
+  <div class="row wrap">
+    <form method="post" action="/media/{{ kind }}/folders/{{ folder|urlencode }}/rename" class="row">
+      <input name="new_name" placeholder="새 이름" required maxlength="64"><button>이름 변경</button>
+    </form>
+    <form method="post" action="/media/{{ kind }}/folders/{{ folder|urlencode }}/delete" onsubmit="return confirm('빈 폴더를 삭제할까요?')">
+      <button class="danger">폴더 삭제</button>
+    </form>
+  </div>
+
+  <div class="drop" id="drop" data-kind="{{ kind }}" data-folder="{{ folder }}" data-max-mb="{{ max_mb }}"
+       data-accept="{{ '.mp4,.mkv' if kind == 'video' else '.m4a,.aac' }}">
+    <p>파일을 여기로 끌어놓거나 <label class="link">선택<input type="file" multiple hidden
+       accept="{{ '.mp4,.mkv' if kind == 'video' else '.m4a,.aac' }}"></label></p>
+    <ul class="uploads"></ul>
+  </div>
+
+  <table class="tbl files">
+    <thead><tr>{% if kind == 'video' %}<th>썸네일</th>{% endif %}<th>이름</th><th class="r">길이</th><th class="r">용량</th><th>상태</th><th></th></tr></thead>
+    <tbody>
+    {% for f in files %}
+      <tr>
+        {% if kind == 'video' %}<td>{% if f.thumb %}<img class="thumb" loading="lazy" alt="" src="/thumbs/{{ folder|urlencode }}/{{ (f.name ~ '.jpg')|urlencode }}">{% endif %}</td>{% endif %}
+        <td class="name">{{ f.name }}</td>
+        <td class="r">{{ f.duration|num(1, 's') }}</td>
+        <td class="r">{{ f.size_mb|num(1, 'MB') }}</td>
+        <td>{{ '✓' if f.status == '검증 통과' else '…' }} {{ f.status }}</td>
+        <td><form method="post" action="/media/{{ kind }}/files/delete" onsubmit="return confirm('{{ f.name }} 를 삭제할까요?')">
+          <input type="hidden" name="folder" value="{{ folder }}"><input type="hidden" name="name" value="{{ f.name }}">
+          <button class="small danger">삭제</button></form></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">파일 없음</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>검증 실패 <span class="muted small">(격리 파일은 7일 후 삭제, 사유는 유지)</span></h2>
+  <ul class="alerts">
+  {% for r in rejected %}
+    <li class="a-warn"><span class="ic">▲</span> <time>{{ r.ts }}</time> <b>{{ r.folder or '-' }}/{{ r.name }}</b> — {{ r.reasons|join(' · ') }}</li>
+  {% else %}
+    <li class="muted">없음</li>
+  {% endfor %}
+  </ul>
+</section>
+{% endblock %}

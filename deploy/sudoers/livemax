@@ -1,0 +1,11 @@
+# livemax 서비스 계정이 실행할 수 있는 systemctl 명령을 LiveMax 유닛으로만 제한한다.
+# (워치독·스케줄러가 문제 라이브 하나만 재시작, 수집기가 긴급 정리 실행)
+# install.sh 가 /etc/sudoers.d/livemax 로 설치하고 visudo -c 로 검증한다.
+Cmnd_Alias LIVEMAX_UNITS = \
+    /usr/bin/systemctl restart --no-block live@*.service, \
+    /usr/bin/systemctl start --no-block live@*.service, \
+    /usr/bin/systemctl restart --no-block live-audio@*.service, \
+    /usr/bin/systemctl start --no-block live-audio@*.service, \
+    /usr/bin/systemctl start --no-block livemax-cleanup.service, \
+    /usr/bin/systemctl start --no-block livemax-cleanup-emergency.service
+livemax ALL=(root) NOPASSWD: LIVEMAX_UNITS

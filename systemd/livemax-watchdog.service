@@ -1,0 +1,19 @@
+# 워치독: speed / 출력 정지 / 유튜브 방송 상태 감시
+[Unit]
+Description=LiveMax watchdog
+After=network-online.target
+
+[Service]
+Type=simple
+User=livemax
+Group=livemax
+WorkingDirectory=@LIVEMAX_HOME@
+Environment=LIVEMAX_HOME=@LIVEMAX_HOME@ PYTHONPATH=@LIVEMAX_HOME@/src PYTHONUNBUFFERED=1
+ExecStart=@LIVEMAX_HOME@/venv/bin/python -m livemax.watchdog
+Restart=always
+RestartSec=5
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

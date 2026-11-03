@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}스트리밍 · LiveMax{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="row between"><h1>스트리밍</h1><a class="btn" href="/live/new">+ 라이브 추가</a></div>
+  {% for k, v in errors.items() %}<p class="flash err">✕ 설정 오류 {{ k }}: {{ v }}</p>{% endfor %}
+  <div class="grid">
+  {% for r in rows %}
+    <article class="lcard s-{{ r.state }}">
+      <header>
+        <span class="badge"><span class="ic">{{ r.icon }}</span> {{ r.label }}</span>
+        <a href="/live/{{ r.id }}"><b>{{ r.id }}</b> {{ r.name }}</a>
+      </header>
+      {# 미리보기 = 유튜브 임베드 (서버 CPU 0). 영상 ID 가 없으면 현재 클립의 업로드 썸네일 #}
+      {% if r.video_id %}
+        <div class="embed"><iframe loading="lazy" title="{{ r.name }} 미리보기"
+          src="https://www.youtube-nocookie.com/embed/{{ r.video_id }}?autoplay=0&mute=1"
+          allow="encrypted-media; picture-in-picture" allowfullscreen></iframe></div>
+      {% elif r.clip_folder %}
+        <img class="preview" loading="lazy" alt="현재 클립 썸네일" src="/thumbs/{{ r.clip_folder|urlencode }}/{{ (r.clip ~ '.jpg')|urlencode }}">
+      {% endif %}
+      <dl class="kv small">
+        <dt>상태</dt><dd>{{ r.state_desc }}</dd>
+        <dt>가동</dt><dd>{{ r.uptime }}</dd>
+        <dt>곡</dt><dd>{{ r.song }}{% if r.artist %} — {{ r.artist }}{% endif %}</dd>
+        <dt>영상</dt><dd>{{ r.clip }} {% if r.segment %}<span class="muted">({{ r.segment }} 구간)</span>{% endif %}</dd>
+        <dt>재시작</dt><dd>1시간 {{ r.restarts_hour }} · 누적 {{ r.restarts_total }} · 마지막 중단 {{ r.last_stop }}</dd>
+        <dt>설정</dt><dd>{{ r.bitrate_kbps }}k · {{ r.timezone }} · 재시작 {{ r.restart_at }}</dd>
+      </dl>
+    </article>
+  {% else %}
+    <p class="muted">라이브가 없습니다.</p>
+  {% endfor %}
+  </div>
+</section>
+{% endblock %}

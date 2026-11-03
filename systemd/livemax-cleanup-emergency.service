@@ -1,0 +1,15 @@
+# 긴급 정리 — 디스크 90% 초과 시 수집기가 시작한다 (보관 기간 단축)
+[Unit]
+Description=LiveMax emergency cleanup (disk > 90%%)
+
+[Service]
+Type=oneshot
+User=livemax
+Group=livemax
+WorkingDirectory=@LIVEMAX_HOME@
+Environment=LIVEMAX_HOME=@LIVEMAX_HOME@ PYTHONPATH=@LIVEMAX_HOME@/src PYTHONUNBUFFERED=1
+ExecStart=@LIVEMAX_HOME@/venv/bin/python -m livemax.cleanup --emergency
+IOSchedulingClass=idle
+Nice=19
+PrivateTmp=yes
+ProtectHome=yes

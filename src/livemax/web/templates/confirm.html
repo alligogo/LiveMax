@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}삭제 확인 · LiveMax{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>▲ 마지막 파일 삭제</h1>
+  <p><b>{{ folder }}/{{ name }}</b> 은 이 폴더의 마지막 파일입니다.
+     이 폴더는 <b>{{ used|join(', ') }}</b> 편성에서 사용 중이라, 삭제하면 해당 시간대에
+     {{ '송출할 영상이 없어 송출이 멈출 수' if kind == 'video' else '무음이 나갈 수' }} 있습니다.</p>
+  <form method="post" action="/media/{{ kind }}/files/delete" class="row">
+    <input type="hidden" name="folder" value="{{ folder }}"><input type="hidden" name="name" value="{{ name }}">
+    <input type="hidden" name="confirm" value="yes">
+    <button class="danger">그래도 삭제</button>
+    <a href="/media/{{ kind }}?folder={{ folder|urlencode }}">취소</a>
+  </form>
+</section>
+{% endblock %}

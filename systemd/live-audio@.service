@@ -1,0 +1,27 @@
+# 라이브 오디오 엔진 (Liquidsoap, copy 출력) — 예: live-audio@ch01.service
+# ffmpeg(live@) 일일 재시작과 무관하게 계속 돌아 음악 편성(중복방지 기록)이 끊기지 않는다.
+[Unit]
+Description=LiveMax audio (Liquidsoap) for %i
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=livemax
+Group=livemax
+WorkingDirectory=@LIVEMAX_HOME@
+Environment=LIVEMAX_HOME=@LIVEMAX_HOME@ PYTHONPATH=@LIVEMAX_HOME@/src PYTHONUNBUFFERED=1
+# audio.py 가 .liq 를 생성하고 TZ=<라이브 timezone> 으로 liquidsoap 을 exec 한다
+ExecStart=@LIVEMAX_HOME@/venv/bin/python -m livemax.audio %i
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=78
+TimeoutStopSec=10
+CPUWeight=200
+Nice=-5
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

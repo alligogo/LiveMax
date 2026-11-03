@@ -1,0 +1,19 @@
+# install.sh 가 server.yaml 의 dashboard.domain / acme_email 로 치환해 /etc/caddy/Caddyfile 로 설치한다.
+# Let's Encrypt 인증서 자동 발급·갱신. 방화벽은 443 만 열려 있으므로 TLS-ALPN 챌린지를 쓴다.
+{
+	email @ACME_EMAIL@
+	auto_https disable_redirects
+}
+
+@DOMAIN@:443 {
+	encode gzip
+	# X-Forwarded-For 는 Caddy 가 실제 접속 IP 로 설정한다 (대시보드의 IP 차단·지역 차단 근거)
+	reverse_proxy 127.0.0.1:@DASH_PORT@
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	request_body {
+		max_size @MAX_UPLOAD_MB@MB
+	}
+}

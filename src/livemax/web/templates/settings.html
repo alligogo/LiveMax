@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}설정 · LiveMax{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>보안</h1>
+  <p><a class="btn" href="/settings/password">비밀번호 변경</a></p>
+  <p class="small muted">현재 접속 IP: {{ my_ip }} {% if tunnel %}(SSH 터널 — 지역 차단 미적용){% endif %}</p>
+</section>
+
+<section class="card">
+  <h2>지역 차단</h2>
+  <form method="post" action="/settings/geo" class="row">
+    <label class="check"><input type="checkbox" name="enabled" {{ 'checked' if geo_on }}> 허용 국가만 접속 ({{ allowed_countries|join(', ') }})</label>
+    <button>저장</button>
+  </form>
+  {% if not geo_db %}<p class="flash warn">▲ GeoLite2-Country.mmdb 가 없어 국가 판별이 불가합니다 — 현재 차단하지 않고 허용합니다 (README 참고).</p>{% endif %}
+  <p class="small muted">지역 차단에 막혀도 SSH 터널(<code>ssh -L 8080:127.0.0.1:8080 서버</code> → http://localhost:8080)로 항상 들어올 수 있습니다.</p>
+
+  <h3>임시 허용 IP</h3>
+  <form method="post" action="/settings/allow-ip" class="row wrap">
+    <input name="ip" placeholder="IP 또는 CIDR" required>
+    <input name="note" placeholder="메모 (예: 여행)">
+    <input type="number" name="days" value="14" min="0" max="365" aria-label="일수"> 일
+    <button>허용</button>
+  </form>
+  <table class="tbl">
+    <thead><tr><th>IP</th><th>메모</th><th>만료</th><th></th></tr></thead>
+    <tbody>
+    {% for a in allow_ips %}
+      <tr><td>{{ a.ip }}</td><td>{{ a.note }}</td><td>{{ fmt(a.expires) if a.expires else '없음' }}</td>
+        <td><form method="post" action="/settings/allow-ip/delete"><input type="hidden" name="ip" value="{{ a.ip }}"><button class="small danger">삭제</button></form></td></tr>
+    {% else %}<tr><td colspan="4" class="muted">없음</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<details class="card">
+  <summary><h2>세션</h2></summary>
+  <table class="tbl">
+    <thead><tr><th>IP</th><th>최근</th><th>만료</th><th></th></tr></thead>
+    <tbody>
+    {% for s in sessions %}
+      <tr><td>{{ s.ip }}{% if s.token_hash == current %} <b>(현재)</b>{% endif %}<br><span class="muted small">{{ s.user_agent[:60] }}</span></td>
+        <td>{{ fmt(s.last_seen) }}</td><td>{{ fmt(s.expires) }}</td>
+        <td>{% if s.token_hash != current %}<form method="post" action="/settings/sessions/revoke"><input type="hidden" name="token_hash" value="{{ s.token_hash }}"><button class="small danger">로그아웃</button></form>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>
+
+<details class="card">
+  <summary><h2>최근 로그인 시도</h2></summary>
+  <table class="tbl">
+    <thead><tr><th>시각</th><th>IP</th><th>아이디</th><th>결과</th></tr></thead>
+    <tbody>{% for a in attempts %}<tr><td>{{ fmt(a.ts) }}</td><td>{{ a.ip }}</td><td>{{ a.username }}</td>
+      <td>{{ '✓ 성공' if a.success else '✕ 실패' }}</td></tr>{% else %}<tr><td colspan="4" class="muted">없음</td></tr>{% endfor %}</tbody>
+  </table>
+</details>
+
+<section class="card">
+  <h2>설정 내보내기 / 가져오기</h2>
+  <p class="small">새 서버 구축: 설치 → 설정 가져오기 → 스트림 키 입력 → 미디어 업로드. <b>스트림 키는 내보내지 않습니다.</b></p>
+  <p><a class="btn" href="/settings/export">설정 내보내기 (zip)</a></p>
+  <form method="post" action="/settings/import" enctype="multipart/form-data" class="row wrap">
+    <input type="file" name="file" accept=".zip" required>
+    <label class="check"><input type="checkbox" name="overwrite"> 같은 ID 덮어쓰기</label>
+    <button>가져오기</button>
+  </form>
+</section>
+{% endblock %}

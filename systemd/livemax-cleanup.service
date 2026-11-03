@@ -1,0 +1,15 @@
+# 자동 정리 (하루 1회, livemax-cleanup.timer). ionice -c3 + nice 19 로 송출 방해 없음
+[Unit]
+Description=LiveMax daily cleanup (derived/temporary files only)
+
+[Service]
+Type=oneshot
+User=livemax
+Group=livemax
+WorkingDirectory=@LIVEMAX_HOME@
+Environment=LIVEMAX_HOME=@LIVEMAX_HOME@ PYTHONPATH=@LIVEMAX_HOME@/src PYTHONUNBUFFERED=1
+ExecStart=@LIVEMAX_HOME@/venv/bin/python -m livemax.cleanup
+IOSchedulingClass=idle
+Nice=19
+PrivateTmp=yes
+ProtectHome=yes
