@@ -20,7 +20,7 @@ die()  { echo "${RED}[중단]${RST} $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "root 로 실행하세요:  curl -fsSL $RAW/get.sh | sudo bash"
 . /etc/os-release
 [[ "${ID:-}" == "ubuntu" || "${ID:-}" == "debian" ]] || die "Ubuntu/Debian 전용입니다 (현재: ${PRETTY_NAME:-?})"
-export DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
 APT=(-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 T0=$(date +%s)
 
