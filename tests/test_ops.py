@@ -58,7 +58,7 @@ def test_mask_and_redact(caplog):
     lg = logging.getLogger("t")
     lg.addFilter(secrets.Redactor())
     with caplog.at_level(logging.INFO):
-        lg.info("out rtmps://a.rtmp.youtube.com/live2/%s", key)
+        lg.info("out rtmps://a.rtmps.youtube.com/live2/%s", key)
     assert key not in caplog.text and "****1a2b" in caplog.text
 
 

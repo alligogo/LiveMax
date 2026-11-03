@@ -37,4 +37,4 @@ youtube:
   video_id: ""
 
 # output:
-#   url: rtmps://a.rtmp.youtube.com/live2   # 생략 시 server.yaml 의 output.default_url
+#   url: rtmps://a.rtmps.youtube.com/live2   # 생략 시 server.yaml 의 output.default_url

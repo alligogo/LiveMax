@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from . import concat, config, db, ffmpeg_cmd, logsetup, secrets, tls_relay
-from .state import write_json_atomic
+from .state import read_json, write_json_atomic
 
 EX_CONFIG = 78  # systemd RestartPreventExitStatus=78 — 비활성 라이브는 재시작하지 않음
 
@@ -194,7 +194,13 @@ class Runner:
         # 4) RTMPS TLS 중계 (라이브 전용 stunnel). 실패하면 직접 RTMPS.
         relay_port = None
         rcfg = self.server["output"].get("tls_relay", {})
-        if rcfg.get("enabled", True):
+        fail_path = self.paths.run_dir / f"{live.id}.relay_fail.json"
+        fails = read_json(fail_path, {}) or {}
+        relay_blocked = fails.get("count", 0) >= 3 and time.time() - fails.get("ts", 0) < 1800
+        if rcfg.get("enabled", True) and relay_blocked:
+            self.log.warning("TLS 중계 경유 송출이 연속 %d회 바로 실패 — 30분간 직접 RTMPS 로 송출", fails["count"])
+            db.add_event(conn, "warn", "runner", "TLS 중계 연속 실패 — 30분간 직접 RTMPS 로 송출 (tls 로그 확인)", live.id)
+        if rcfg.get("enabled", True) and not relay_blocked:
             self.relay = tls_relay.Relay(live.id, self.paths.run_dir, self.paths.log_dir)
             relay_port = self.relay.start(base, verify=bool(rcfg.get("verify", True)))
         out = tls_relay.plan(base, key, relay_port)
@@ -224,6 +230,13 @@ class Runner:
         if self.relay:
             self.relay.stop()
 
+        # 중계 경유로 시작하자마자(60초 안) 죽으면 실패로 센다. 3회 연속이면 다음 시작부터 30분간 직접 RTMPS.
+        ran = time.time() - float(self.status.get("ffmpeg_started_at") or time.time())
+        if out.mode == "rtmps-relay" and not self.stopping:
+            if ran < 60:
+                write_json_atomic(fail_path, {"count": fails.get("count", 0) + 1, "ts": time.time()})
+            else:
+                fail_path.unlink(missing_ok=True)
         msg = f"ffmpeg 종료 rc={rc}" + (" (요청에 의한 정지)" if self.stopping else "")
         (self.log.info if self.stopping else self.log.error)(msg)
         self.publish(state="stopped", exit_code=rc, stopped_at=time.time(), message=msg)

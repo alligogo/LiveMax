@@ -73,8 +73,10 @@ DEFAULT_SERVER: dict[str, Any] = {
         "stable_seconds": 15,  # 파일 크기·mtime 이 이 시간 동안 안 바뀌면 전송 완료로 본다
     },
     "output": {
-        # 유튜브 인제스트 주소 (서버 고유값 아님). 나중에 MediaMTX 를 끼우면 여기만 바꾼다.
-        "default_url": "rtmps://a.rtmp.youtube.com/live2",
+        # 유튜브 RTMPS 인제스트 주소 (서버 고유값 아님). 나중에 MediaMTX 를 끼우면 여기만 바꾼다.
+        # 주의: RTMPS 는 a.rtmps.youtube.com (rtmp"s"). a.rtmp.youtube.com 은 RTMP 용 호스트라
+        #       인증서 이름(rtmps.youtube.com)이 맞지 않아 검증하는 클라이언트(stunnel)는 거부한다.
+        "default_url": "rtmps://a.rtmps.youtube.com/live2",
         "audio_connect_timeout": 90,
         # RTMPS 암호화를 ffmpeg 대신 라이브별 stunnel 이 큰 TLS 레코드로 처리 → 송출 트래픽 약 30% 절감
         # (tls_relay.py 참고). 띄우지 못하면 직접 RTMPS 로 자동 전환.
