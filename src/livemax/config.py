@@ -315,14 +315,15 @@ def parse_live(data: dict, path: Path | None = None, server: dict | None = None)
     if norepeat < 0:
         raise ConfigError(f"{where}: audio.norepeat_count 는 0 이상")
 
-    # 크로스페이드는 오디오를 디코딩해서 섞은 뒤 다시 AAC 로 인코딩해야만 가능하다.
-    # 이는 "서버에서 인코딩하지 않는다"(DESIGN 11-2)에 정면으로 위배되므로 0 만 허용한다.
-    crossfade = float(audio.get("crossfade", 0) or 0)
-    if crossfade != 0:
-        raise ConfigError(
-            f"{where}: audio.crossfade={crossfade} — 크로스페이드는 서버 측 오디오 재인코딩을 "
-            "필요로 하므로 금지(DESIGN 11-2). 0 으로 두고, 필요하면 곡 파일 자체에 페이드를 넣어 업로드하세요."
-        )
+    # 크로스페이드(초). 기본 0 = 오디오 copy (디코딩 없음).
+    # > 0 이면 그 라이브만 Liquidsoap 이 오디오를 디코딩→섞기→AAC 재인코딩한다 (영상은 계속 copy).
+    # DESIGN 11-1/11-2 의 재인코딩 금지는 영상 대상이므로 허용한다.
+    try:
+        crossfade = float(audio.get("crossfade", 0) or 0)
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"{where}: audio.crossfade 는 초 단위 숫자여야 함") from e
+    if not (0 <= crossfade <= 10):
+        raise ConfigError(f"{where}: audio.crossfade={crossfade} 범위 오류 (0~10초)")
 
     port = int(_req(audio, "harbor_port", f"{where} audio"))
     if not (1024 < port < 65536):

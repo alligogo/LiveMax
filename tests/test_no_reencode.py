@@ -83,8 +83,28 @@ def test_liquidsoap_output_is_copy(paths, server):
     assert 'settings.harbor.bind_addrs.set(["127.0.0.1"])' in liq
 
 
-def test_crossfade_config_is_rejected(server):
+def test_crossfade_defaults_to_zero_copy(server):
+    d = live_dict()
+    del d["audio"]["crossfade"]
+    assert config.parse_live(d, None, server).crossfade == 0
+
+
+def test_crossfade_enabled_reencodes_audio_only(paths, server):
     d = live_dict()
     d["audio"]["crossfade"] = 3
-    with pytest.raises(config.ConfigError, match="크로스페이드"):
+    lv = config.parse_live(d, None, server)
+    liq = liquidsoap.render(lv, paths, server)
+    assert "crossfade(" in liq and "fade_in=3.0" in liq
+    assert '%audio(codec="aac", b="128k", samplerate=44100, channels=2)' in liq
+    assert "%audio.copy" not in liq
+    # 영상 쪽 송출 명령은 크로스페이드와 무관하게 copy 그대로
+    args = ffmpeg_cmd.build(Path("/l"), f"http://127.0.0.1:{lv.harbor_port}/ch01.aac", "rtmps://h/k")
+    assert args[args.index("-c:v") + 1] == "copy" and args[args.index("-c:a") + 1] == "copy"
+
+
+@pytest.mark.parametrize("bad", [-1, 11, "abc"])
+def test_crossfade_range(server, bad):
+    d = live_dict()
+    d["audio"]["crossfade"] = bad
+    with pytest.raises(config.ConfigError):
         config.parse_live(d, None, server)

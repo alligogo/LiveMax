@@ -98,7 +98,11 @@ async def _parse_form(request: Request, base: dict) -> tuple[dict, str]:
     audio = dict(base.get("audio") or {})
     audio["mode"] = f.get("mode") or "random_norepeat"
     audio["norepeat_count"] = int(f.get("norepeat_count") or 30)
-    audio["crossfade"] = 0
+    try:
+        cf = float(f.get("crossfade") or 0)
+        audio["crossfade"] = int(cf) if cf.is_integer() else cf  # YAML 에 3.0 대신 3 으로
+    except ValueError:
+        audio["crossfade"] = f.get("crossfade")  # parse_live 가 오류 메시지를 낸다
     audio["harbor_port"] = int(f.get("harbor_port") or audio.get("harbor_port") or 0)
     d["audio"] = audio
     d["timezone"] = (f.get("timezone") or "").strip()

@@ -15,7 +15,8 @@ video:
 audio:
   mode: random_norepeat        # random | random_norepeat | sequential | sequential_loop
   norepeat_count: 30
-  # 크로스페이드는 0 만 허용: 섞으려면 디코딩→재인코딩이 필요하다 (DESIGN 11-2 위반).
+  # 크로스페이드(초, 0~10). 기본 0 = 오디오 copy (디코딩 없음, CPU 최소).
+  # 0 보다 크면 이 라이브만 오디오를 디코딩→섞기→AAC 재인코딩한다 (영상은 계속 copy).
   crossfade: 0
   # Liquidsoap → ffmpeg 로컬 연결 포트 (127.0.0.1 에만 바인드). 라이브마다 달라야 함.
   harbor_port: 8101

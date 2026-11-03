@@ -4,10 +4,13 @@
 설치된 버전에서 직접 확인했다: playlist(check_next, mode, loop, reload_mode), output.harbor,
 switch, fallback, random, rotate, single, source.on_track, file.write, json.stringify, time.local.
 
-인코딩하지 않는다:
-  출력은 %ffmpeg(format="adts", %audio.copy) — 업로드된 AAC 프레임을 디코딩 없이 그대로 넘긴다.
-  그래서 크로스페이드·볼륨 조절·정규화 같은 오디오 처리는 쓸 수 없다 (전부 디코딩→재인코딩 필요).
-  이 때문에 모든 음원이 정확히 같은 스펙(AAC-LC 128k 44.1kHz 스테레오)이어야 한다 (DESIGN 2.2).
+오디오 출력 방식은 audio.crossfade 값으로 갈린다:
+  crossfade == 0 (기본): %ffmpeg(format="adts", %audio.copy)
+      업로드된 AAC 프레임을 디코딩 없이 그대로 넘긴다. CPU 최소.
+      대신 모든 음원이 정확히 같은 스펙(AAC-LC 128k 44.1kHz 스테레오)이어야 한다 (DESIGN 2.2).
+  crossfade > 0: crossfade() → %ffmpeg(format="adts", %audio(codec="aac", ...))
+      crossfade() 는 PCM 에서만 동작하므로(2.2.4 타입: source(audio=pcm)) 이 라이브는
+      오디오를 디코딩해 섞은 뒤 AAC 로 재인코딩한다. 영상은 어느 쪽이든 copy 그대로다.
 
 시간대 편성:
   time.local() 은 프로세스의 TZ 환경변수를 따른다. audio.py 가 TZ=<지역명>(예: America/Chicago)으로
@@ -153,11 +156,20 @@ def render(live: LiveConfig, paths: Paths, server: dict) -> str:
     w("# 재생할 곡이 없을 때 무음. silence_10s.m4a 는 서버가 아니라 저장소에 미리 인코딩되어 들어 있다.")
     w(f"silence = single(id={q(f'{live.id}_silence')}, {q(SILENCE_FILE)})")
     w(f"radio = fallback(id={q(f'{live.id}_fallback')}, track_sensitive=true, [scheduled, silence])")
+    aspec = server["spec"]["audio"]
+    if live.crossfade > 0:
+        cf = float(live.crossfade)
+        w(f"# 크로스페이드 {cf:g}초 — PCM 디코딩 → 섞기 → AAC 재인코딩 (이 라이브만 오디오 인코딩 발생)")
+        w(f"radio = crossfade(id={q(f'{live.id}_crossfade')}, duration={cf + 2:.1f}, fade_in={cf:.1f}, fade_out={cf:.1f}, radio)")
+        encoder = (f'%ffmpeg(format="adts", %audio(codec="aac", b={q(aspec["bitrate"])}, '
+                   f'samplerate={int(aspec["sample_rate"])}, channels={int(aspec["channels"])}))')
+    else:
+        encoder = '%ffmpeg(format="adts", %audio.copy)'
     w("radio = source.on_track(radio, on_new_track)")
     w("")
     w(f"# ffmpeg(live@{live.id}) 가 http://127.0.0.1:{live.harbor_port}/{live.id}.aac 로 받아 copy 먹싱한다")
     w("output.harbor(")
-    w('  %ffmpeg(format="adts", %audio.copy),')
+    w(f"  {encoder},")
     w(f"  id={q(f'{live.id}_out')},")
     w(f"  port={live.harbor_port},")
     w(f"  mount={q(f'{live.id}.aac')},")

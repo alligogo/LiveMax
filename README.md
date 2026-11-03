@@ -11,7 +11,7 @@
 | 구간 | 하는 일 | 재인코딩 여부 |
 |---|---|---|
 | 업로드 검증 | `ffprobe`로 헤더·패킷 플래그만 읽음 | 없음 (디코딩도 안 함) |
-| 오디오 (Liquidsoap) | 폴더 감시·셔플·시간대 편성 후 `%ffmpeg(format="adts", %audio.copy)`로 출력 | 없음 (AAC 프레임 그대로) |
+| 오디오 (Liquidsoap) | 폴더 감시·셔플·시간대 편성 후 `%ffmpeg(format="adts", %audio.copy)`로 출력 | 없음 (AAC 프레임 그대로). 단 `crossfade > 0`인 라이브는 오디오만 디코딩·AAC 재인코딩 |
 | 영상+먹싱 (ffmpeg) | concat 목록 + 오디오 → `-c:v copy -c:a copy` → RTMPS | 없음 |
 | 썸네일 | 업로드 시 1회, 프레임 1장, 필터 없이 원본 해상도 JPEG | 송출과 무관 |
 | 미리보기 | 유튜브 임베드 플레이어 | 서버 CPU 0 |
@@ -20,7 +20,7 @@
 
 - **`ffmpeg_cmd.assert_copy_only()`**: 송출 직전에 명령줄 전체를 검사한다. `-vf`, `-filter_complex`, `-s`, `-r`, `-b:v`, `-preset`이 하나라도 있으면 실행하지 않는다. copy가 아닌 코덱이나 `drawtext`/`overlay`/`scale` 키워드가 있어도 마찬가지다.
 - **`tests/test_no_reencode.py`**: 소스 전체를 AST로 훑는다. ffmpeg 필터 옵션 문자열이 어딘가에 있으면 테스트가 실패한다.
-- **크로스페이드 금지**: `audio.crossfade`는 0만 허용한다. 오디오를 섞으려면 디코딩 후 재인코딩이 필요하기 때문이다(11-2).
+- **크로스페이드 기본 0**: `audio.crossfade`가 0이면 오디오도 copy다. 0보다 크면 그 라이브만 Liquidsoap이 오디오를 디코딩·재인코딩한다. 영상은 어느 쪽이든 copy다.
 - **`healthcheck.sh`**: 설치된 서버에서도 송출 명령이 copy 전용인지 다시 확인한다.
 - **로그 마스킹**: 읽어 들인 스트림 키는 로그에서 자동으로 `****1a2b`처럼 가려진다.
 
@@ -72,14 +72,14 @@
 
 | 파일 | 역할 |
 |---|---|
-| `config.py` | YAML 로딩·검증. 타임존 오프셋 숫자, 크로스페이드, 포트 중복을 거부함. **재시작 시각이 30초 이내로 겹치는지 1년치(서머타임 포함) 검사** |
+| `config.py` | YAML 로딩·검증. 타임존 오프셋 숫자, 포트 중복을 거부함. **재시작 시각이 30초 이내로 겹치는지 1년치(서머타임 포함) 검사** |
 | `paths.py` | 코드와 데이터 경로 분리 (DESIGN 10.2). 자동 정리 보호 경로 정의 |
 | `probe.py` | ffprobe 규격 검증. 실패 사유를 사람이 읽는 문장으로 반환 (예: "키프레임 4.0초, 2초여야 함") |
 | `ingest.py` | `_incoming` 감시 → 전송 완료 판정 → 검증 → `rename`으로 방송 폴더에 이동, 실패 시 `_rejected` 격리 |
 | `thumbs.py` | 업로드 시 썸네일 1회 생성 |
 | `catalog.py` | 폴더·파일 목록과 길이·비트레이트 캐시 (SQLite) |
 | `concat.py` | **24시간치 concat 목록 생성.** 각 클립의 방송 시각을 타깃 시간대로 바꿔 구간 폴더에서 셔플백으로 고름 |
-| `liquidsoap.py` | 라이브 YAML → Liquidsoap 2.2 스크립트 렌더링 (재생 방식 4종, 중복방지, 시간대 switch, copy 출력) |
+| `liquidsoap.py` | 라이브 YAML → Liquidsoap 2.2 스크립트 렌더링 (재생 방식 4종, 중복방지, 시간대 switch, copy 출력 / 크로스페이드 시 AAC 재인코딩) |
 | `audio.py` | `live-audio@<id>` 진입점. `.liq` 생성 후 `TZ=<지역명>`으로 liquidsoap을 exec |
 | `ffmpeg_cmd.py` | 송출 명령 생성 + **재인코딩 차단 가드** |
 | `runner.py` | `live@<id>` 진입점. concat 생성 → harbor 대기 → ffmpeg 실행 → `-progress` 파싱 → 상태 파일 기록 |
@@ -132,7 +132,7 @@
 
 | 파일 | 검증 내용 |
 |---|---|
-| `test_no_reencode.py` | copy 가드, 금지 옵션 거부, 소스 전체 필터 문자열 스캔, Liquidsoap copy 출력 |
+| `test_no_reencode.py` | copy 가드, 금지 옵션 거부, 소스 전체 필터 문자열 스캔, Liquidsoap copy 출력, 크로스페이드 시에도 영상은 copy |
 | `test_config.py` | 오프셋 타임존 거부, 서머타임 경계, **재시작 겹침(시간대가 달라도, 서머타임 기간에만 겹쳐도 검출)**, YAML `12:30` 함정 |
 | `test_concat.py` | 정해진 현지 시각에 영상 폴더 전환, 24시간+여유 분량, 삭제 예약 제외 |
 | `test_cleanup.py` | 원본 보호, 격리·고아 썸네일·지난 목록 정리 |
@@ -300,7 +300,7 @@ venv/bin/python -m pytest -q tests
 
 DESIGN.md와 다르거나 문서에 없던 부분이다. 바꾸고 싶으면 알려주면 된다.
 
-1. **크로스페이드 비활성화 (`crossfade: 0` 강제).** DESIGN 5.1 예시에는 `crossfade: 3`이 있다. 하지만 오디오 copy 방식에서는 곡을 섞을 수 없다. 섞으려면 Liquidsoap이 디코딩 후 AAC로 재인코딩해야 하고, 이는 11-2 "서버에서 인코딩하지 않는다"에 위배된다. 필요하면 곡 파일에 페이드를 넣어서 업로드한다.
+1. **크로스페이드는 설정 항목으로 두고 기본값은 0이다 (0~10초).** 0이면 Liquidsoap이 AAC를 디코딩 없이 그대로 넘긴다(`%audio.copy`). 0보다 크면 `crossfade()`가 PCM에서만 동작하므로, 그 라이브만 오디오를 디코딩해 섞고 AAC 128k/44.1kHz로 재인코딩한다. DESIGN 11-1/11-2의 재인코딩 금지는 영상에 대한 조항이라 오디오에는 적용하지 않는다. 영상은 어느 쪽이든 copy다.
 2. **라이브 설정은 `config/`에 있고 git에서 제외된다.** DESIGN 5.1은 "커밋함", 10.2와 `.gitignore`는 "git 제외"로 서로 다르다. 저장소의 `.gitignore`를 따랐다. 커밋하는 것은 `config.example/`뿐이다. 설정 백업은 대시보드 내보내기로 한다.
 3. **`restart_at`은 라이브의 `timezone` 기준 시각이다.** 겹침 검사는 UTC 순간으로 1년치를 비교한다. 서로 다른 시간대의 라이브가 서머타임 기간에만 겹치는 경우도 잡는다.
 4. **비트레이트 최소 5000k는 업로드 검증 기준이다.** 라이브 설정값은 막지 않는다. DESIGN 13의 4500k 비교 실험을 하려면 `server.yaml`의 `spec.video.min_bitrate`를 일시적으로 낮추면 된다. copy 송출이므로 실제 송출 비트레이트는 클립 자체의 값이다. 설정값은 경고와 용량 계산에 쓰인다.

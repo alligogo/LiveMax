@@ -63,9 +63,10 @@ def test_mask_and_redact(caplog):
 
 
 @pytest.mark.skipif(not shutil.which("liquidsoap"), reason="liquidsoap 미설치")
-def test_rendered_liq_typechecks(paths, server, tmp_path):
-    """생성된 스크립트가 설치된 Liquidsoap 버전에서 실제로 타입체크를 통과하는지."""
-    lv = config.parse_live(live_dict(schedule=[
+@pytest.mark.parametrize("crossfade", [0, 3])
+def test_rendered_liq_typechecks(paths, server, tmp_path, crossfade):
+    """생성된 스크립트가 설치된 Liquidsoap 버전에서 실제로 타입체크를 통과하는지 (copy / 크로스페이드 양쪽)."""
+    lv = config.parse_live(live_dict(audio={"mode": "random_norepeat", "crossfade": crossfade, "harbor_port": 8101}, schedule=[
         {"from": "06:00", "video": ["m"], "audio": ["upbeat", "focus"]},
         {"from": "23:00", "video": ["n"], "audio": ["ambient"]},
     ]), None, server)
