@@ -1,0 +1,52 @@
+name: image
+on:
+  push:
+    branches: [main]
+    paths: ["Dockerfile", "docker/**", "src/**", "assets/**", "requirements.txt", ".github/workflows/image.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages (Liquidsoap typecheck, stunnel)
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg liquidsoap stunnel4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pyflakes src tests
+      - run: python -m pytest -q tests
+
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: LIVEMAX_VERSION=${{ github.sha }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/livemax:latest
+            ghcr.io/${{ github.repository_owner }}/livemax:${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Smoke test (container starts and serves the dashboard)
+        run: |
+          docker run -d --name lm --network host -e LIVEMAX_PUBLIC_IP=127.0.0.1 ghcr.io/${{ github.repository_owner }}/livemax:${{ github.sha }}
+          ok=0; for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/api/session && { ok=1; break; }; sleep 2; done
+          [ $ok = 1 ] || { docker logs lm; exit 1; }
+          # Caddy 설정이 유효하고 HTTPS 로 대시보드가 열리는지 (사설 IP 라 자체 인증서로 대체되는 경로)
+          for i in $(seq 1 15); do curl -kfsS https://127.0.0.1/api/session && exit 0; sleep 2; done
+          docker exec lm cat /data/logs/caddy.log; exit 1

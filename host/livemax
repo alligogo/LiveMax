@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# LiveMax 호스트 명령 — get.sh 가 /usr/local/bin/livemax 로 설치한다.
+#
+#   livemax update      최신 이미지로 교체 (데이터는 /opt/livemax/data 에 그대로)
+#   livemax status      컨테이너 상태
+#   livemax logs [-f]   관리 프로그램 로그
+#   livemax restart     컨테이너 재시작 (모든 라이브가 순서대로 다시 시작)
+#   livemax password    대시보드 관리자 비밀번호를 랜덤으로 재설정
+#   livemax url         접속 주소
+#   livemax tick        (타이머용) 웹의 업데이트 요청 처리 + 재부팅 필요 표시 동기화
+set -euo pipefail
+IMAGE="${LIVEMAX_IMAGE:-ghcr.io/alligogo/livemax:latest}"
+REPO_GIT="${LIVEMAX_REPO:-https://github.com/alligogo/LiveMax.git}"
+DATA="${LIVEMAX_DATA_DIR:-/opt/livemax/data}"
+NAME=livemax
+
+need_root() { [[ $EUID -eq 0 ]] || { echo "root 권한이 필요합니다: sudo livemax $*"; exit 1; }; }
+
+pull_image() {
+  if docker pull "$IMAGE"; then return 0; fi
+  echo "이미지를 받을 수 없어 소스에서 직접 빌드합니다 (5~10분)..."
+  docker build -t "$IMAGE" "$REPO_GIT#main"
+}
+
+run_container() {
+  mkdir -p "$DATA"
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$NAME" --restart unless-stopped --network host \
+    --log-opt max-size=20m --log-opt max-file=3 \
+    -v "$DATA:/data" \
+    ${LIVEMAX_PUBLIC_IP:+-e LIVEMAX_PUBLIC_IP=$LIVEMAX_PUBLIC_IP} \
+    "$IMAGE" >/dev/null
+}
+
+public_ip() { cat "$DATA/state/public_ip" 2>/dev/null || hostname -I | awk '{print $1}'; }
+
+cmd="${1:-status}"
+case "$cmd" in
+  update|install)
+    need_root "$cmd"
+    pull_image
+    run_container
+    echo "LiveMax 실행 중 — https://$(public_ip)"
+    ;;
+  status)
+    docker ps -a --filter "name=^${NAME}$" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    ;;
+  logs)
+    shift || true
+    docker logs --tail 200 "$@" "$NAME"
+    ;;
+  restart)
+    need_root "$cmd"; docker restart "$NAME" >/dev/null; echo "재시작했습니다"
+    ;;
+  password)
+    need_root "$cmd"
+    docker exec "$NAME" python3 -m livemax.admin reset-password
+    ;;
+  url)
+    echo "https://$(public_ip)"
+    ;;
+  tick)
+    # 1) 서버 재부팅 필요 표시를 대시보드가 볼 수 있게 복사
+    mkdir -p "$DATA/state/host"
+    if [[ -f /var/run/reboot-required ]]; then
+      cp -f /var/run/reboot-required "$DATA/state/host/reboot-required"
+      cp -f /var/run/reboot-required.pkgs "$DATA/state/host/reboot-required.pkgs" 2>/dev/null || true
+    else
+      rm -f "$DATA/state/host/reboot-required" "$DATA/state/host/reboot-required.pkgs"
+    fi
+    # 2) 웹에서 '업데이트' 를 누르면 생기는 요청 파일 처리
+    if [[ -f "$DATA/state/update.request" ]]; then
+      rm -f "$DATA/state/update.request"
+      echo "$(date -u +%FT%TZ) 웹 요청으로 업데이트" >> "$DATA/logs/update.log"
+      "$0" update >> "$DATA/logs/update.log" 2>&1 || echo "업데이트 실패" >> "$DATA/logs/update.log"
+    fi
+    ;;
+  *)
+    sed -n '2,11p' "$0"; exit 1 ;;
+esac

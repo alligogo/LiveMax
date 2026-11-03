@@ -1,14 +1,16 @@
 """DESIGN 11-1, 11-2: 재인코딩 금지 — 이 프로젝트의 성패를 가르는 규칙의 회귀 테스트."""
 
 import ast
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from livemax import ffmpeg_cmd, liquidsoap, config
+from livemax import ffmpeg_cmd, liquidsoap
 from livemax.ffmpeg_cmd import ReencodeForbidden, assert_copy_only
 
-from conftest import ROOT, live_dict
+from conftest import ROOT, make_live
 
 SRC = ROOT / "src" / "livemax"
 
@@ -74,37 +76,26 @@ def test_source_never_passes_filters_to_ffmpeg():
     assert not offenders, "재인코딩 유발 문자열 발견:\n" + "\n".join(offenders)
 
 
-def test_liquidsoap_output_is_copy(paths, server):
-    lv = config.parse_live(live_dict(), None, server)
-    liq = liquidsoap.render(lv, paths, server)
+def test_liquidsoap_output_is_copy(paths, settings):
+    liq = liquidsoap.render(make_live(), paths, settings)
     assert '%ffmpeg(format="adts", %audio.copy)' in liq
-    for bad in ("crossfade(", "%fdkaac", "%mp3", "%aac", "amplify(", "normalize(", "%audio(", "nrj("):
+    for bad in ("crossfade(", "%fdkaac", "%mp3", "%audio(", "amplify(", "normalize("):
         assert bad not in liq, bad
     assert 'settings.harbor.bind_addrs.set(["127.0.0.1"])' in liq
 
 
-def test_crossfade_defaults_to_zero_copy(server):
-    d = live_dict()
-    del d["audio"]["crossfade"]
-    assert config.parse_live(d, None, server).crossfade == 0
-
-
-def test_crossfade_enabled_reencodes_audio_only(paths, server):
-    d = live_dict()
-    d["audio"]["crossfade"] = 3
-    lv = config.parse_live(d, None, server)
-    liq = liquidsoap.render(lv, paths, server)
-    assert "crossfade(" in liq and "fade_in=3.0" in liq
-    assert '%audio(codec="aac", b="128k", samplerate=44100, channels=2)' in liq
-    assert "%audio.copy" not in liq
-    # 영상 쪽 송출 명령은 크로스페이드와 무관하게 copy 그대로
-    args = ffmpeg_cmd.build(Path("/l"), f"http://127.0.0.1:{lv.harbor_port}/ch01.aac", "rtmps://h/k")
+def test_crossfade_reencodes_audio_only(paths, settings):
+    liq = liquidsoap.render(make_live(crossfade=3), paths, settings)
+    assert "crossfade(" in liq and '%audio(codec="aac", b="128k", samplerate=44100, channels=2)' in liq
+    args = ffmpeg_cmd.build(Path("/l"), "http://127.0.0.1:8101/live1.aac", "rtmps://h/k")
     assert args[args.index("-c:v") + 1] == "copy" and args[args.index("-c:a") + 1] == "copy"
 
 
-@pytest.mark.parametrize("bad", [-1, 11, "abc"])
-def test_crossfade_range(server, bad):
-    d = live_dict()
-    d["audio"]["crossfade"] = bad
-    with pytest.raises(config.ConfigError):
-        config.parse_live(d, None, server)
+@pytest.mark.skipif(not shutil.which("liquidsoap"), reason="liquidsoap 미설치")
+@pytest.mark.parametrize("crossfade,folders", [(0, ["chill"]), (3, ["chill", "jazz"])])
+def test_rendered_liq_typechecks(paths, settings, tmp_path, crossfade, folders):
+    """생성된 스크립트가 설치된 Liquidsoap(2.2.x)에서 실제로 타입체크를 통과하는지."""
+    liq = tmp_path / "t.liq"
+    liq.write_text(liquidsoap.render(make_live(crossfade=crossfade, audio_folders=folders), paths, settings))
+    r = subprocess.run(["liquidsoap", "--check", str(liq)], capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]

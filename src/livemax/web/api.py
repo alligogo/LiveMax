@@ -31,7 +31,6 @@ from . import auth
 log = logging.getLogger("livemax.web")
 STATIC = Path(__file__).parent / "static"
 LOOPBACK = {"127.0.0.1", "::1"}
-REBOOT_FLAG = Path("/var/run/reboot-required")
 EXTS = {"video": (".mp4", ".mkv"), "audio": (".m4a", ".aac")}
 
 
@@ -50,6 +49,8 @@ def client_ip(request: Request) -> str:
 def create_app(core) -> FastAPI:  # core = daemon.App
     paths, settings, sup = core.paths, core.settings, core.supervisor
     store = sup.store
+    # 호스트의 /var/run/reboot-required 를 livemax tick(호스트 타이머)이 data/state/host 로 복사해 준다
+    REBOOT_FLAG = paths.state / "host" / "reboot-required"
     app = FastAPI(title="LiveMax", docs_url=None, redoc_url=None, openapi_url=None)
     initial = auth.ensure_initial_password()
     if initial:

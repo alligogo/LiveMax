@@ -47,3 +47,10 @@ def test_relay_process_starts_and_stops(tmp_path):
     assert port and tls_relay.is_listening(port) and r.alive()
     r.stop()
     assert not r.alive() and not (tmp_path / "t1.stunnel.conf").exists()
+
+
+def test_conf_ipv4_pinned_keeps_hostname_checks():
+    c = tls_relay.render_conf(40001, "a.rtmps.youtube.com", 443, Path("/l"), True, connect_addr="142.250.1.1")
+    assert "connect = 142.250.1.1:443" in c and "delay = yes" not in c
+    assert "sni = a.rtmps.youtube.com" in c and "checkHost = a.rtmps.youtube.com" in c
+    assert "socket = r:SO_KEEPALIVE=1" in c
