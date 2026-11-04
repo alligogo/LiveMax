@@ -301,7 +301,11 @@ function renderLives(grid, ov) {
     h("div", { class: "seg" }, viewBtn("grid", "블록 보기"), viewBtn("list", "목록 보기"))) : addBtn("m-only");
   grid.replaceChildren(bar, ...sections);
 }
-const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => openLiveEditor(null) }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
+const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => {
+  const ov = lastOverview, max = ov?.max_lives;
+  if (max && ov.lives.length >= max) { toast(`이 서버의 라이브 최대 개수(${max}개)에 도달했습니다 — 설정 > 서버에서 늘리거나 안 쓰는 라이브를 지우세요`, true); return; }
+  openLiveEditor(null);
+} }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
 
 // 미리보기 왼쪽 위 표시: 정상 LIVE(빨강) · 경고(주황) · 재시작중(하늘) · 중단(검정+빨간 테두리). 송출 안 하는 라이브는 없음
 function liveBadge(lv, running) {
@@ -369,10 +373,12 @@ function renderSide(side, ov) {
     h("div", { class: "card" }, h("div", { class: "card-head" }, "용량"),
       h("div", { class: "card-body" },
         h("div", { class: "big" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "개 더 추가 가능 (안전 기준)")),
+        ov.max_lives ? h("div", { class: "small muted", style: "text-align:center;margin:-2px 0 10px" },
+          "라이브 ", h("b", { style: "color:var(--text)" }, `${ov.lives.length} / ${ov.max_lives}`), " (최대 개수 — 설정 > 서버)") : null,
         h("div", { class: "meter" }, h("i", { class: (c.projected_tb || 0) > (c.limit_tb || 32) ? "hi" : (c.projected_tb || 0) > (c.target_tb || 28) ? "mid" : "", style: `width:${(ratio * 100).toFixed(0)}%` })),
         h("div", { class: "small muted", style: "text-align:center" }, `월 예상 ${fmt.num(c.projected_tb, 1)} TB · 목표 ${fmt.num(c.target_tb, 0)} · 한계 ${fmt.num(c.limit_tb, 0)}`),
         h("div", { class: "small faint", style: "text-align:center;margin-top:4px" },
-          `${({ traffic: "월 트래픽", bandwidth: "회선 속도", cpu: "CPU", ram: "메모리" })[c.limiting] || ""} 기준 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB · 목표 ${fmt.num(c.target_tb, 0)}TB까지`))),
+          `${({ traffic: "월 트래픽", bandwidth: "회선 속도", cpu: "CPU", ram: "메모리", max: "최대 개수 설정" })[c.limiting] || ""} 기준 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB · 목표 ${fmt.num(c.target_tb, 0)}TB까지`))),
     h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "시스템"),
       h("div", { class: "card-body" },
         h("div", { class: "group" }, "라이브"),
@@ -971,12 +977,17 @@ async function showSystem() {
 
 function serverCard(s, card) {
   const name = h("input", { class: "input", value: s.settings.server_name || "", maxlength: 30, placeholder: "예: LIVE 1", style: "max-width:260px" });
+  const maxLives = h("input", { class: "input", type: "number", min: 1, max: 100, value: s.settings.max_lives ?? 15, style: "max-width:120px" });
   return card("서버",
     h("label", { class: "field" }, h("span", {}, "서버명"), name,
       h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
+    h("label", { class: "field" }, h("span", {}, "라이브 최대 개수"), maxLives,
+      h("div", { class: "hint" }, "안전장치 — 이 서버에 이 개수보다 많은 라이브를 만들 수 없습니다 (기본 15). 서버 사양을 올리면 늘리세요.")),
     h("button", { class: "btn primary", onclick: async () => {
-      try { await api("PUT", "/api/system/settings", { server_name: name.value }); setServerName(name.value); toast("서버명을 저장했습니다"); showSystem(); }
-      catch (e) { toast(e.message, true); }
+      try {
+        await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value) });
+        setServerName(name.value); toast("저장했습니다"); showSystem();
+      } catch (e) { toast(e.message, true); }
     } }, "저장"));
 }
 

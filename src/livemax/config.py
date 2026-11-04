@@ -79,6 +79,7 @@ DEFAULTS: dict[str, Any] = {
                   "upload_mb_per_s": 10},  # 웹 업로드 속도 상한 (서버 부담 줄이기, 모든 업로드 합산)
     "harbor_port_base": 8101,
     "ui": {"lives_view": "grid"},  # 라이브 화면 보기 방식: grid(블록) | list(목록)
+    "max_lives": 15,  # 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
     "server_name": "",  # 예: LIVE 1 — 서버가 여러 대일 때 구분 (화면·알림)
 }
 

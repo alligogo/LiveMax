@@ -140,3 +140,22 @@ def test_never_started_enabled_live_fixed_on_boot(paths, settings, monkeypatch):
     monkeypatch.setenv("LIVEMAX_DATA", str(paths.root))
     daemon.App()
     assert store.get("live1").enabled is False and store.get("live2").enabled is True
+
+
+def test_max_lives_limit(client):
+    """안전장치: 라이브 총 개수가 설정한 최대 개수(기본 15)에 닿으면 더 못 만든다."""
+    _ready(client)
+    assert client.get("/api/system").json()["settings"]["max_lives"] == 15
+    assert client.put("/api/system/settings", headers=ORIGIN, json={"max_lives": 0}).status_code == 400
+    assert client.put("/api/system/settings", headers=ORIGIN, json={"max_lives": 2}).status_code == 200
+    for i in (2, 3):
+        client.post("/api/channels/ch1/keys", headers=ORIGIN, json={"label": f"키{i}", "key": f"fake-000{i}-0000-0000-abc{i}"})
+    kids = [k["id"] for k in client.get("/api/channels").json()["channels"][0]["keys"]]
+    for i in range(2):
+        r = client.post("/api/lives", headers=ORIGIN, json={"name": f"L{i}", "channel_id": "ch1", "key_id": kids[i], **LIVE})
+        assert r.status_code == 200, r.text
+    r = client.post("/api/lives", headers=ORIGIN, json={"name": "넘침", "channel_id": "ch1", "key_id": kids[2], **LIVE})
+    assert r.status_code == 400 and "최대 개수" in r.json()["error"]
+    assert len(client.get("/api/overview").json()["lives"]) == 2
+    cap = client.get("/api/overview").json()["capacity"]
+    assert cap["can_add"] == 0 and cap["limiting"] == "max"

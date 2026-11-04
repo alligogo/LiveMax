@@ -233,6 +233,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                                sysd.get("month_tx_bytes"), sysd.get("net_tx_mbps"), sysd.get("cpu_pct"),
                                sysd.get("mem_used_mb"), sysd.get("mem_total_mb"),
                                live_cpu=[lv["cpu"] for lv in planned if lv["state"] == "running" and lv.get("cpu")])
+        # 안전장치: 설정한 최대 개수까지 남은 칸보다 많이 '추가 가능'으로 보이지 않게
+        left = max(0, _max_lives() - len(lives))
+        if left < cap.can_add:
+            cap.can_add, cap.limiting = left, "max"
         alerts = []
         for lv in lives:
             if lv["status"] in ("warn", "down"):
@@ -255,6 +259,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "capacity": {"can_add": cap.can_add, "limiting": cap.limiting, "projected_tb": cap.projected_tb,
                          "limit_tb": cap.limit_tb, "target_tb": cap.target_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb,
                          "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps, "lives": len(planned)},
+            "max_lives": _max_lives(),
             "alerts": alerts[:30], "reboot_required": REBOOT_FLAG.exists(),
         }
 
@@ -386,6 +391,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     _ov_cache = {"t": 0.0, "data": None}
 
+    def _max_lives() -> int:
+        return int(settings.get("max_lives") or 15)
+
     @app.get("/api/overview")
     def overview(request: Request):
         now = time.monotonic()
@@ -432,6 +440,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     @app.post("/api/lives")
     def live_create(request: Request, b: dict = Body(default={})):
+        if len(store.all()) >= _max_lives():
+            return err(f"이 서버의 라이브 최대 개수({_max_lives()}개)에 도달했습니다 — 설정 > 서버에서 늘리거나 안 쓰는 라이브를 지우세요")
         lv = store.new(str(b.get("name", "")).strip()[:80])
         try:
             lv, apply = _live_payload(b, lv)
@@ -833,7 +843,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "reboot_required": REBOOT_FLAG.exists(),
             "reboot_packages": REBOOT_FLAG.with_suffix(".pkgs").read_text().split() if REBOOT_FLAG.with_suffix(".pkgs").exists() else [],
             "settings": {"restart_base_utc": settings["restart"]["base_utc"], "server_name": config.server_name(settings),
-                         "tls_relay": settings["output"]["tls_relay"]["enabled"]},
+                         "max_lives": _max_lives(), "tls_relay": settings["output"]["tls_relay"]["enabled"]},
             "sessions": [{"id": r["token_hash"], "ip": r["ip"], "ua": r["user_agent"], "last_seen": r["last_seen"],
                           "current": r["token_hash"] == sess["token_hash"]}
                          for r in conn.execute("SELECT * FROM sessions ORDER BY last_seen DESC").fetchall()],
@@ -942,6 +952,15 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return err("서버명에 < > \" ' ` 는 쓸 수 없습니다")
             config.save_settings_override(paths, ["server_name"], name)
             settings["server_name"] = name
+        if "max_lives" in b:
+            try:
+                n = int(b["max_lives"])
+            except (TypeError, ValueError):
+                return err("라이브 최대 개수는 숫자로 입력하세요")
+            if not 1 <= n <= 100:
+                return err("라이브 최대 개수는 1~100 사이로 입력하세요")
+            config.save_settings_override(paths, ["max_lives"], n)
+            settings["max_lives"] = n
         if b.get("lives_view") in ("grid", "list"):
             config.save_settings_override(paths, ["ui", "lives_view"], b["lives_view"])
             settings.setdefault("ui", {})["lives_view"] = b["lives_view"]
@@ -989,6 +1008,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         for n in z.namelist():
             if not (n.startswith("lives/") and n.endswith(".yaml")):
                 continue
+            if len(store.all()) >= _max_lives():
+                return {"ok": True, "added": added, "message": f"{len(added)}개를 가져오다 라이브 최대 개수({_max_lives()}개)에 도달해 멈췄습니다"}
             src = live_from_dict(yaml.safe_load(z.read(n)))
             lv = store.new(src.name)  # 새 서버 기준으로 ID·포트·슬롯 재배정
             for k in ("video_folders", "audio_folders", "audio_mode", "norepeat_count", "crossfade",
