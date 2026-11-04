@@ -456,7 +456,7 @@ class Supervisor:
         import shutil
 
         run = self.paths.run_dir
-        for suffix in (".liq", ".m3u", ".m3u.tmp", ".tmp", ".nowplaying.json", ".next.json", ".history.json", ".session.json", ".stunnel.conf",
+        for suffix in (".liq", ".m3u", ".m3u.tmp", ".tmp", ".nowplaying.json", ".next.json", ".session.json", ".stunnel.conf",
                        ".stunnel.pid"):
             (run / f"{live_id}{suffix}").unlink(missing_ok=True)
         shutil.rmtree(self.paths.concat_dir / live_id, ignore_errors=True)

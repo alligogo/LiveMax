@@ -43,11 +43,6 @@ def m3u_path(live: Live, paths: Paths) -> Path:
 DELETING: set[str] = set()
 
 
-def history_path(live: Live, paths: Paths) -> Path:
-    """최근에 고른 곡 목록 — Liquidsoap 이 다시 켜져도(설정 적용·업데이트·재부팅) 중복방지가 이어지게."""
-    return paths.run_dir / f"{live.id}.history.json"
-
-
 def next_path(live: Live, paths: Paths) -> Path:
     """Liquidsoap 이 미리 골라 둔 다음 곡 (곡 삭제 보호용)."""
     return paths.run_dir / f"{live.id}.next.json"
@@ -105,17 +100,7 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     w(f"m3u_path = {q(m3u)}")
     w(f"next_path = {q(next_path(live, paths))}")
     w(f"norepeat_n = {live.norepeat_count if norepeat else 0}")
-    w(f"history_path = {q(history_path(live, paths))}")
     w("history = ref([])")
-    w("# 지난번 기록 이어받기 (파일이 없거나 깨져 있으면 빈 기록으로 시작)")
-    w("if file.exists(history_path) then")
-    w("  try")
-    w("    let json.parse (saved : [string]) = file.contents(history_path)")
-    w("    history := saved")
-    w("  catch _ do")
-    w('    log.important("history unreadable — starting empty")')
-    w("  end")
-    w("end")
     w("rejects = ref(0)")
     w("def library_size() =")
     w('  lines = string.split(separator="\\n", file.contents(m3u_path))')
@@ -133,7 +118,6 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     w("    # 고르는 순간 기록한다 (다음 곡은 지금 곡이 재생되기 전에 미리 골라지므로 재생 시점 기록은 한 박자 늦음)")
     w("    h = list.add(uri, history())")
     w("    history := if list.length(h) > norepeat_n then list.prefix(norepeat_n, h) else h end")
-    w("    if norepeat_n > 0 then file.write(data=json.stringify(history()), history_path) end")
     w("    # 다음 곡을 기록 — 웹에서 이 곡을 지우려 하면 거부한다 (재생 직전 곡이 사라지지 않게)")
     w('    file.write(data=json.stringify({file=uri, at=time()}), next_path)')
     w("    true")
