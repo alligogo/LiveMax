@@ -15,9 +15,8 @@ import os
 import signal
 import threading
 import time
-from datetime import datetime, timezone
 
-from . import cleanup, config, db, ingest, logsetup, notify
+from . import cleanup, config, db, ingest, logsetup, notify, thumbs
 from .collector import Collector
 from .paths import get_paths
 from .supervisor import Supervisor
@@ -71,12 +70,21 @@ class App:
         return True
 
     def _cleanup_loop(self) -> None:
-        done = ""
-        while not self.stop.wait(60):
-            now = datetime.now(timezone.utc)
-            if now.strftime("%H:%M") == self.settings["cleanup"]["time_utc"] and done != now.date().isoformat():
-                done = now.date().isoformat()
-                self.cleanup_async()
+        """시작 5분 뒤부터 매시간 정리 (로그 크기·DB·임시 파일·고아 썸네일 등). 예전 원본 크기 썸네일은 시작 때 1회 축소."""
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+        if self.stop.wait(30):
+            return
+        try:
+            thumbs.shrink_existing(self.paths)
+        except Exception:  # noqa: BLE001
+            log.exception("썸네일 축소 실패")
+        wait = 300.0
+        while not self.stop.wait(wait):
+            self.cleanup_async()
+            wait = float(self.settings["cleanup"].get("interval_minutes", 60)) * 60
 
     def _notify_loop(self) -> None:
         """라이브 밖의 알림거리: LiveMax 시작, 디스크 부족, 재부팅 필요, 업로드 검증 실패."""

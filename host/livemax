@@ -11,6 +11,7 @@
 set -euo pipefail
 IMAGE="${LIVEMAX_IMAGE:-ghcr.io/alligogo/livemax:latest}"
 REPO_GIT="${LIVEMAX_REPO:-https://github.com/alligogo/LiveMax.git}"
+RAW="${LIVEMAX_RAW:-https://raw.githubusercontent.com/alligogo/LiveMax/main}"
 DATA="${LIVEMAX_DATA_DIR:-/opt/livemax/data}"
 NAME=livemax
 
@@ -20,6 +21,18 @@ pull_image() {
   if docker pull "$IMAGE"; then return 0; fi
   echo "이미지를 받을 수 없어 소스에서 직접 빌드합니다 (5~10분)..."
   docker build -t "$IMAGE" "$REPO_GIT#main"
+}
+
+# 이 호스트 명령 자체도 최신으로 (실행 중인 파일은 mv 로 교체해야 안전 — 지금 실행은 옛 내용으로 끝까지 감)
+self_update() {
+  local me tmp
+  me="$(readlink -f "$0")"
+  tmp="$(mktemp "${me}.XXXX")" || return 0
+  if curl -fsSL --max-time 20 "$RAW/host/livemax" -o "$tmp" && head -1 "$tmp" | grep -q '^#!/usr/bin/env bash' \
+     && bash -n "$tmp"; then
+    if ! cmp -s "$tmp" "$me"; then chmod 755 "$tmp"; mv -f "$tmp" "$me"; echo "호스트 명령(livemax)을 최신으로 바꿨습니다"; return 0; fi
+  fi
+  rm -f "$tmp"
 }
 
 run_container() {
@@ -38,8 +51,11 @@ cmd="${1:-status}"
 case "$cmd" in
   update|install)
     need_root "$cmd"
+    [[ "$cmd" == update ]] && self_update
     pull_image
     run_container
+    # 업데이트마다 이전 이미지(약 500MB)가 남는다 → 쓰지 않는 이미지 정리
+    docker image prune -f >/dev/null 2>&1 || true
     echo "LiveMax 실행 중 — https://$(public_ip)"
     ;;
   status)

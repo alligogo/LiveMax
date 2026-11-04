@@ -90,6 +90,11 @@ def write(live: Live, paths: Paths, entries: list[Entry], start_utc: datetime) -
     tmp_link.unlink(missing_ok=True)
     tmp_link.symlink_to(list_path.name)
     tmp_link.replace(cur)
+    # 지난 목록은 바로 지운다 (재시작마다 약 0.5MB씩 쌓이던 찌꺼기). 이전 ffmpeg 는 이미 끝난 뒤에 호출된다.
+    keep = {list_path.name, list_path.with_suffix(".json").name, cur.name}
+    for f in out_dir.iterdir():
+        if f.name not in keep and f.suffix in (".ffconcat", ".json", ".tmp"):
+            f.unlink(missing_ok=True)
     return list_path
 
 

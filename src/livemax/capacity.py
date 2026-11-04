@@ -48,7 +48,7 @@ def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | No
     audio = float(cfg["audio_kbps"])
 
     n = len(live_bitrates_kbps)
-    avg_kbps = (sum(live_bitrates_kbps) / n) if n else 5500.0
+    avg_kbps = (sum(live_bitrates_kbps) / n) if n else 5000.0
     per_live_mbps = (avg_kbps + audio) * overhead / 1000
     per_live_tb = per_live_mbps * 1e6 / 8 * total / TB
 

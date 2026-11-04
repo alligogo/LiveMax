@@ -37,7 +37,7 @@ CATEGORIES: list[tuple[str, str, str, bool]] = [
     ("security", "보안", "로그인 연속 실패로 IP 가 차단될 때", True),
     ("media", "업로드 검증 실패", "올린 파일이 규격에 안 맞아 격리될 때", False),
 ]
-DEFAULTS = {"enabled": False, "server_label": "", "dedupe_minutes": 10, "max_per_hour": 20,
+DEFAULTS = {"enabled": False, "dedupe_minutes": 10, "max_per_hour": 20,
             "categories": {k: d for k, _, _, d in CATEGORIES}}
 
 
@@ -102,7 +102,9 @@ class Notifier:
         return self.settings["notify"]
 
     def label(self) -> str:
-        return str(self.cfg.get("server_label") or "").strip() or socket.gethostname()
+        from .config import server_name
+
+        return server_name(self.settings) or socket.gethostname()
 
     def wants(self, category: str) -> bool:
         return bool(self.cfg.get("enabled")) and bool(self.cfg["categories"].get(category)) and token_file(self.paths).exists()

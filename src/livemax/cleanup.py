@@ -1,4 +1,4 @@
-"""자동 정리 + 디스크 위생 — livemax-cleanup.service (+ .timer, 하루 1회) (DESIGN 6.4)
+"""자동 정리 + 디스크 위생 — livemaxd 가 매시간 실행 (DESIGN 6.4)
 
 24/7 로 몇 달을 도는 시스템에서 디스크가 서서히 차는 것이 가장 흔한 장애 원인이다.
 사람이 기억해서 지우는 구조로 만들지 않는다.
@@ -134,13 +134,45 @@ def clean_rejected(paths: Paths, rep: Report, dry: bool, now: float, days: float
     _remove_empty_dirs(paths.rejected)
 
 
-def clean_logs(paths: Paths, rep: Report, dry: bool, now: float, days: float) -> None:
+def _trim_file(p: Path, keep: int) -> int:
+    """기록 중인 로그를 끝부분 keep 바이트만 남기고 줄인다 (같은 파일에 덮어씀).
+    쓰는 쪽(Python·Liquidsoap·stunnel·Caddy)은 모두 추가 모드라 줄인 뒤에도 끝에 이어 쓴다. 줄인 바이트 수."""
+    size = p.stat().st_size
+    if size <= keep:
+        return 0
+    with open(p, "r+b") as f:
+        f.seek(size - keep)
+        data = f.read()
+        nl = data.find(b"\n")
+        data = "[... LiveMax: 오래된 기록 정리됨 ...]\n".encode() + data[nl + 1 if nl >= 0 else 0:]
+        f.seek(0)
+        f.write(data)
+        f.truncate(len(data))
+    return size - len(data)
+
+
+def clean_logs(paths: Paths, rep: Report, dry: bool, now: float, days: float, max_mb: float = 10,
+               keep_mb: float = 2, total_mb: float = 300) -> None:
+    """컨테이너에는 logrotate 가 없다 → 직접 크기를 묶는다.
+    - 파일 하나가 max_mb 를 넘으면 마지막 keep_mb 만 남김 (매시간)
+    - logs 폴더 전체가 total_mb 를 넘으면 큰 파일부터 keep_mb/2 로 줄임
+    - 기록이 끝난 파일(*.log 가 아닌 것, 지운 라이브의 로그)은 기간이 지나면 삭제"""
     if not paths.logs.is_dir():
         return
     for p in paths.logs.iterdir():
-        # 현재 기록 중인 *.log 는 logrotate 담당. 회전된 *.log.N / *.gz 만 기간 초과 시 삭제
         if p.is_file() and not p.name.endswith(".log") and _older_than(p, days * 86400, now):
             safe_unlink(paths, p, rep, "오래된 로그", dry)
+    logs = [p for p in paths.logs.glob("*.log") if p.is_file()]
+    for p in logs:
+        if p.stat().st_size > max_mb * 1e6 and not dry:
+            rep.add("로그 줄임", _trim_file(p, int(keep_mb * 1e6)))
+    total = sum(p.stat().st_size for p in logs)
+    if total > total_mb * 1e6 and not dry:
+        for p in sorted(logs, key=lambda x: x.stat().st_size, reverse=True):
+            rep.add("로그 줄임(전체 한도)", _trim_file(p, int(keep_mb * 1e6 / 2)))
+            total = sum(x.stat().st_size for x in logs)
+            if total <= total_mb * 1e6 * 0.7:
+                break
 
 
 def clean_runtime(paths: Paths, rep: Report, dry: bool, live_ids: set[str]) -> None:
@@ -171,14 +203,35 @@ def rollup_metrics(conn, raw_days: float, now: float, dry: bool) -> int:
                FROM metrics_live WHERE ts < ? GROUP BY CAST(ts/3600 AS INTEGER), live_id""", (cutoff,))
         n = conn.execute("DELETE FROM metrics_system WHERE ts < ?", (cutoff,)).rowcount
         conn.execute("DELETE FROM metrics_live WHERE ts < ?", (cutoff,))
-        conn.execute("DELETE FROM events WHERE ts < ?", (now - 90 * 86400,))
-        conn.execute("DELETE FROM login_attempts WHERE ts < ?", (now - 90 * 86400,))
+        conn.execute("DELETE FROM events WHERE ts < ?", (now - 30 * 86400,))
+        conn.execute("DELETE FROM login_attempts WHERE ts < ?", (now - 30 * 86400,))
+        conn.execute("DELETE FROM rejections WHERE ts < ?", (now - 30 * 86400,))
+        conn.execute("DELETE FROM restarts WHERE ts < ?", (now - 30 * 86400,))
+        conn.execute("DELETE FROM pending_deletes")  # v2.1 에서 없앤 기능의 남은 행
         conn.execute("DELETE FROM sessions WHERE expires < ?", (now,))
+        conn.execute("DELETE FROM metrics_system_hourly WHERE hour_ts < ?", (now - 400 * 86400,))
+        conn.execute("DELETE FROM metrics_live_hourly WHERE hour_ts < ?", (now - 400 * 86400,))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
     return n
+
+
+def compact_db(paths: Paths, conn, max_mb: float, now: float) -> str | None:
+    """DB 가 max_mb 를 넘으면 원본 지표를 더 짧게(12시간) 남기고, 빈 공간이 많으면 VACUUM 으로 파일을 줄인다."""
+    size = paths.db.stat().st_size if paths.db.exists() else 0
+    msg = None
+    if size > max_mb * 1e6:
+        rollup_metrics(conn, 0.5, now, False)
+        msg = f"DB {size / 1e6:.0f}MB > {max_mb:.0f}MB — 원본 지표를 12시간만 남김"
+    pages = conn.execute("PRAGMA page_count").fetchone()[0]
+    free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    if pages and free / pages > 0.25 and size > 5e6:
+        conn.execute("VACUUM")
+        after = paths.db.stat().st_size
+        msg = (msg + " · " if msg else "") + f"DB 압축 {size / 1e6:.0f}→{after / 1e6:.0f}MB"
+    return msg
 
 
 def clean_uploads(paths: Paths, rep: Report, dry: bool, now: float, hours: float) -> None:
@@ -207,7 +260,8 @@ def run(paths: Paths, settings: dict, emergency: bool = False, dry: bool = False
         ("업로드 임시", lambda: clean_incoming(paths, rep, dry, now, incoming_h)),
         ("웹 업로드 조각", lambda: clean_uploads(paths, rep, dry, now, incoming_h)),
         ("격리", lambda: clean_rejected(paths, rep, dry, now, rejected_days)),
-        ("로그", lambda: clean_logs(paths, rep, dry, now, log_days)),
+        ("로그", lambda: clean_logs(paths, rep, dry, now, log_days, float(cl["log_max_mb"]), float(cl["log_keep_mb"]),
+                                   float(cl["logs_total_mb"]))),
         ("런타임", lambda: clean_runtime(paths, rep, dry, {lv.id for lv in lives})),
     ]
     for name, fn in steps:
@@ -222,11 +276,16 @@ def run(paths: Paths, settings: dict, emergency: bool = False, dry: bool = False
         n = rollup_metrics(conn, float(cl["metrics_raw_days"]), now, dry)
         if n:
             log.info("지표 축약: 원본 %d행", n)
+        if not dry:
+            m = compact_db(paths, conn, float(cl["db_max_mb"]), now)
+            if m:
+                log.info(m)
     except Exception:  # noqa: BLE001
         log.exception("지표 축약 실패")
     msg = f"정리 완료 ({mode}): {rep.summary()}"
     log.info(msg)
-    if not dry:
+    # 매시간 돌므로 이벤트(알림 목록)에는 사람이 누른 정리·긴급 정리·큰 정리만 남긴다
+    if not dry and (manual or emergency or sum(rep.bytes.values()) > 100e6):
         db.add_event(conn, "info", "cleanup", msg)
     conn.close()
     return rep

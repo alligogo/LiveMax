@@ -109,7 +109,7 @@ curl -fsSL https://raw.githubusercontent.com/alligogo/LiveMax/main/get.sh | bash
 GitHub 저장소 → Code → Download ZIP → 압축 풀기 → `tools/windows/LiveMax-Convert.bat` (바탕화면에 바로 가기 추천).
 
 - 영상·음악 파일이나 **폴더**를 끌어다 놓으면 원본 옆 `LiveMax_변환` 폴더에 같은 이름으로 생긴다.
-- 영상: H.264 1080p 30fps 5500k, 키프레임 2초, 소리 제거 / 음원: AAC 128k 44.1kHz, -14 LUFS
+- 영상: H.264 1080p 30fps 5000k, 키프레임 2초, 소리 제거 / 음원: AAC 128k 44.1kHz, -14 LUFS
 - 100개가 넘으면 폴더째 끌어다 놓는다. ffmpeg 가 필요하다 (`winget install Gyan.FFmpeg`).
 
 ## 서버에서 쓰는 명령 (가끔)

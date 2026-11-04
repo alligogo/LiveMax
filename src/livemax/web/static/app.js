@@ -66,6 +66,14 @@ async function api(method, url, body, raw) {
   return j;
 }
 
+// ------------------------------------------------------------------ 서버명 (로고 옆·창 제목)
+let SERVER_NAME = "";
+function setServerName(n) {
+  SERVER_NAME = (n || "").trim();
+  document.title = SERVER_NAME ? `LiveMax ${SERVER_NAME}` : "LiveMax";
+}
+const brandParts = () => [h("span", { class: "dot" }), h("b", {}, "LiveMax"), SERVER_NAME ? h("span", { class: "srv" }, SERVER_NAME) : null];
+
 // ------------------------------------------------------------------ 레이아웃
 let pollTimer = null;
 function stopPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
@@ -74,7 +82,7 @@ function shell(active, ...content) {
   const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/system", "설정", "system"]];
   return h("div", {},
     h("header", { class: "topbar" },
-      h("a", { class: "brand", href: "#/" }, h("span", { class: "dot" }), "LiveMax"),
+      h("a", { class: "brand", href: "#/" }, brandParts()),
       h("nav", { class: "nav" }, nav.map(([href, label, key]) => h("a", { href, class: active === key ? "on" : "" }, label))),
       h("button", { class: "iconbtn", title: "로그아웃", html: ICON.out, onclick: logout })),
     h("main", { class: "page" }, content));
@@ -98,7 +106,7 @@ function showLogin() {
     } catch (err) { msg.textContent = err.message; }
   };
   mount(h("div", { class: "login-wrap" }, h("form", { class: "login", onsubmit: submit },
-    h("div", { class: "brand" }, h("span", { class: "dot" }), "LiveMax"),
+    h("div", { class: "brand" }, brandParts()),
     h("div", { class: "card" }, h("div", { class: "card-head" }, "로그인"), h("div", { class: "card-body" },
       h("label", { class: "field" }, h("span", {}, "아이디"), user),
       h("label", { class: "field" }, h("span", {}, "비밀번호"), pw),
@@ -248,11 +256,22 @@ function renderSide(side, ov) {
         kv("현재 송신", fmt.num(s.net_tx_mbps, 1, " Mbps")),
         kv("이번 달 누적", s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"),
         kv("라이브당", `${fmt.num(c.per_live_mbps, 1)} Mbps`))),
-    h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "알림"),
+    h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "알림", h("span", { class: "spacer" }),
+        ov.alerts.some((a) => a.id) ? h("button", { class: "linkbtn", onclick: () => clearAlerts() }, "모두 지우기") : null),
       h("div", { class: "card-body" }, ov.alerts.length
         ? h("ul", { class: "alerts" }, ov.alerts.slice(0, 12).map((a) => h("li", { class: a.level }, h("span", { class: "ic" }),
-            h("span", {}, h("time", {}, fmt.time(a.ts)), a.live ? h("b", {}, liveName(a.live) + " ") : null, a.message))))
+            h("span", {}, h("time", {}, fmt.time(a.ts)), a.live ? h("b", {}, liveName(a.live) + " ") : null, a.message),
+            a.id ? h("button", { class: "x", title: "확인 — 지우기", "aria-label": "지우기", onclick: () => dismissAlert(a.id) }, "✕")
+                 : h("span", { class: "x-ph", title: "지금 상태 — 해결되면 저절로 사라집니다" }))))
         : h("div", { class: "muted small" }, "알림 없음"))));
+}
+
+async function dismissAlert(id) {
+  try { await api("DELETE", `/api/alerts/${id}`); showLives(); } catch (e) { toast(e.message, true); }
+}
+async function clearAlerts() {
+  if (!confirm("확인한 알림을 모두 지울까요? (지금 진행 중인 문제는 해결될 때까지 남습니다)")) return;
+  try { await api("DELETE", "/api/alerts"); showLives(); } catch (e) { toast(e.message, true); }
 }
 
 function liveName(id) { const l = (lastOverview?.lives || []).find((x) => x.id === id); return l ? l.name : id; }
@@ -308,6 +327,15 @@ async function openLiveEditor(lv) {
     return box;
   };
   const vbox = checks("video", cur.video_folders), abox = checks("audio", cur.audio_folders);
+  // 고른 비디오 폴더들의 해상도·fps 가 섞이면 경고 (송출은 파일 그대로라 섞이면 유튜브 화면이 깨질 수 있음)
+  const mixWarn = h("div", { class: "msg", hidden: true });
+  const checkMix = () => {
+    const sel = vbox.values();
+    const fm = new Set(media.video.folders.filter((f) => sel.includes(f.name)).flatMap((f) => f.formats || []));
+    mixWarn.hidden = fm.size <= 1;
+    mixWarn.textContent = `해상도·프레임이 섞여 있습니다 (${[...fm].join(" / ")}). 한 라이브에서는 하나로 통일하세요 — 섞이면 유튜브 화면이 깨질 수 있습니다.`;
+  };
+  vbox.addEventListener("change", checkMix); checkMix();
   let mode = cur.audio_mode;
   const modeSeg = h("div", { class: "seg" }, MODES.map(([v, l]) => {
     const b = h("button", { type: "button", class: v === mode ? "on" : "", onclick: () => { mode = v; [...modeSeg.children].forEach((x) => x.classList.toggle("on", x === b)); } }, l);
@@ -362,7 +390,7 @@ async function openLiveEditor(lv) {
   openModal(isNew ? "라이브 추가" : `라이브 설정 — ${lv.name}`, [
     h("label", { class: "field" }, h("span", {}, "이름"), name),
     h("label", { class: "field" }, h("span", {}, "스트림 키"), key, h("div", { class: "hint" }, "유튜브 스튜디오 → 라이브 스트리밍 → 스트림 키. 저장 후에는 마지막 4자리만 보입니다.")),
-    h("div", { class: "field" }, h("span", { class: "flabel" }, "비디오 폴더 (여러 개 선택 가능)"), vbox),
+    h("div", { class: "field" }, h("span", { class: "flabel" }, "비디오 폴더 (여러 개 선택 가능)"), vbox, mixWarn),
     h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "음악 폴더 (여러 개 선택 가능)"), abox),
     h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "재생 방식"), modeSeg),
     h("div", { class: "field", style: "margin-top:18px" }, h("span", { class: "flabel" }, "타이머 (자동 종료)"), timerSeg, pDur, pUntil, tipYT),
@@ -404,7 +432,7 @@ async function showMedia(kind) {
         h("form", { class: "row", onsubmit: async (e) => { e.preventDefault(); try { await api("POST", `/api/media/${kind}`, { name: newName.value }); mediaFolder[kind] = newName.value.trim(); load(); } catch (er) { toast(er.message, true); } } },
           newName, h("button", { class: "btn primary sm" }, "만들기")),
         h("p", { class: "hint" }, kind === "video"
-          ? "규격: H.264 High 1920x1080 30fps 5000k 이상, 키프레임 2초, B프레임·오디오 없음. PC의 변환기(LiveMax-Convert)로 만들면 됩니다."
+          ? "규격: H.264 High, 1080p 30fps 5000k 기본 (720p~4K, 24~60fps 도 가능 — 올린 파일 그대로 송출), 키프레임 2초, B프레임·오디오 없음. PC의 변환기(LiveMax-Convert)로 만들면 됩니다."
           : "규격: AAC-LC 128k 44.1kHz 스테레오 (-14 LUFS). PC의 변환기(LiveMax-Convert)로 만들면 됩니다.")));
     await renderFolder(kind, right, data);
   };
@@ -533,6 +561,7 @@ async function showSystem() {
   });
   mount(shell("system", h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(420px,1fr))" },
     h("div", {},
+      serverCard(s, card),
       card("업데이트",
         h("p", {}, "현재 버전: ", h("b", { class: "mono" }, (s.version || "").slice(0, 7))),
         s.update_requested ? h("p", { class: "msg" }, "업데이트 요청됨 — 1~2분 안에 처리됩니다.")
@@ -578,13 +607,23 @@ async function showSystem() {
         h("div", { style: "height:12px" }), pre)))));
 }
 
+function serverCard(s, card) {
+  const name = h("input", { class: "input", value: s.settings.server_name || "", maxlength: 30, placeholder: "예: LIVE 1", style: "max-width:260px" });
+  return card("서버",
+    h("label", { class: "field" }, h("span", {}, "서버명"), name,
+      h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
+    h("button", { class: "btn primary", onclick: async () => {
+      try { await api("PUT", "/api/system/settings", { server_name: name.value }); setServerName(name.value); toast("서버명을 저장했습니다"); showSystem(); }
+      catch (e) { toast(e.message, true); }
+    } }, "저장"));
+}
+
 function notifyCard(n, card) {
   const en = h("input", { type: "checkbox" }); en.checked = n.enabled;
   const enLab = h("label", { class: "check" + (en.checked ? " on" : ""), style: "margin-bottom:14px" }, en, h("span", { class: "nm" }, "휴대폰 알림 켜기"));
   en.addEventListener("change", () => enLab.classList.toggle("on", en.checked));
   const tok = h("input", { class: "input", type: "password", autocomplete: "off",
     placeholder: n.token_masked ? `현재 토큰 ${n.token_masked} — 바꿀 때만 입력` : "o.xxxxxxxxxxxxxxxx (Access Token)" });
-  const label = h("input", { class: "input", value: n.server_label, maxlength: 40, placeholder: n.default_label || "예: 서버1" });
   const cats = h("div", { class: "checks one" }, n.catalog.map((c) => {
     const cb = h("input", { type: "checkbox", value: c.key }); cb.checked = !!n.categories[c.key];
     const lab = h("label", { class: "check" + (cb.checked ? " on" : "") }, cb, h("span", { class: "nm" }, h("b", {}, c.label), h("span", { class: "desc" }, c.desc)));
@@ -596,7 +635,7 @@ function notifyCard(n, card) {
     msg.textContent = "";
     const categories = Object.fromEntries([...cats.querySelectorAll("input")].map((x) => [x.value, x.checked]));
     try {
-      const r = await api("PUT", "/api/system/notify", { enabled: en.checked, token: tok.value, server_label: label.value, categories });
+      const r = await api("PUT", "/api/system/notify", { enabled: en.checked, token: tok.value, categories });
       toast(r.message); showSystem();
     } catch (e) { msg.textContent = e.message; }
   };
@@ -604,7 +643,7 @@ function notifyCard(n, card) {
     enLab,
     h("label", { class: "field" }, h("span", {}, "Pushbullet Access Token"), tok,
       h("div", { class: "hint" }, "휴대폰에 Pushbullet 앱 설치·로그인 → PC에서 pushbullet.com → Settings → Access Tokens → Create Access Token 으로 만든 값을 붙여 넣으세요. 저장할 때 토큰이 맞는지 확인합니다.")),
-    h("label", { class: "field" }, h("span", {}, "알림에 붙일 서버 이름"), label, h("div", { class: "hint" }, "서버가 여러 대일 때 어느 서버인지 구분됩니다. 비우면 " + (n.default_label || "서버 이름") + ".")),
+    h("p", { class: "hint", style: "margin:-4px 0 14px" }, `알림 제목 앞에 [${n.label}] 이 붙습니다. 서버명은 왼쪽 '서버' 칸에서 바꿉니다.`),
     h("span", { class: "flabel" }, "보낼 알림"), cats,
     h("p", { class: "hint" }, "같은 내용은 10분에 한 번, 시간당 최대 20건까지만 보냅니다 (Pushbullet 무료는 월 500건)."),
     msg,
@@ -624,6 +663,7 @@ async function route() {
   closeModal();
   let sess;
   try { sess = await api("GET", "/api/session"); } catch (e) { return; }
+  setServerName(sess.server_name);
   if (!sess.authenticated) { showLogin(); return; }
   if (sess.must_change) { mount(shell("lives")); showChangePassword(true); return; }
   const r = location.hash.replace(/^#\/?/, "");

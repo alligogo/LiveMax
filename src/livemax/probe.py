@@ -124,13 +124,17 @@ def validate_video(path: Path, spec: dict) -> ProbeResult:
     if str(v.get("profile", "")) != spec["profile"]:
         r.reasons.append(f"프로파일 {v.get('profile')} — {spec['profile']} 여야 함")
     w, h = v.get("width"), v.get("height")
-    if (w, h) != (spec["width"], spec["height"]):
-        r.reasons.append(f"해상도 {w}x{h} — {spec['width']}x{spec['height']} 여야 함")
+    allowed = [tuple(x) for x in spec["resolutions"]]
+    if (w, h) not in allowed:
+        names = ", ".join(f"{a}x{b}" for a, b in allowed)
+        r.reasons.append(f"해상도 {w}x{h} — {names} 중 하나여야 함")
 
+    # 송출은 올린 파일 그대로(copy) — 해상도·fps·비트레이트는 파일을 따른다. 고정 fps 만 확인.
     rfps, afps = _fps(v.get("r_frame_rate")), _fps(v.get("avg_frame_rate"))
-    want = float(spec["fps"])
-    if rfps is None or abs(rfps - want) > 0.01 or (afps is not None and abs(afps - want) > 0.05):
-        r.reasons.append(f"프레임 {v.get('r_frame_rate')} (평균 {v.get('avg_frame_rate')}) — {spec['fps']}fps 고정이어야 함")
+    fps_ok = rfps is not None and any(abs(rfps - f) <= 0.01 for f in spec["fps"])
+    if not fps_ok or (afps is not None and rfps is not None and abs(afps - rfps) > 0.05):
+        r.reasons.append(f"프레임 {v.get('r_frame_rate')} (평균 {v.get('avg_frame_rate')}) — "
+                         f"{'/'.join(str(f) for f in spec['fps'])}fps 중 하나로 고정이어야 함")
 
     if int(v.get("has_b_frames", 0) or 0) > 0:
         r.reasons.append("B프레임 사용 중 — B프레임 없이 인코딩해야 함 (-bf 0)")

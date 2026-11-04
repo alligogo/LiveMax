@@ -38,8 +38,10 @@ class ConfigError(Exception):
 DEFAULTS: dict[str, Any] = {
     "logging": {"level": "INFO"},
     "spec": {
-        "video": {"codec": "h264", "profile": "High", "width": 1920, "height": 1080, "fps": 30,
-                  "min_bitrate": "5000k", "keyframe_interval": 2.0, "keyframe_tolerance": 0.05,
+        # 기본은 1080p 30fps 5000k. 720p~4K, 24~60fps 도 받는다 (송출은 파일 그대로 copy).
+        # 단, 한 라이브 안에서는 해상도·fps 를 통일해야 한다 (섞이면 유튜브 화면이 깨질 수 있음 — 화면에서 경고).
+        "video": {"codec": "h264", "profile": "High", "resolutions": [[1280, 720], [1920, 1080], [2560, 1440], [3840, 2160]],
+                  "fps": [24, 25, 30, 50, 60], "min_bitrate": "5000k", "keyframe_interval": 2.0, "keyframe_tolerance": 0.05,
                   "containers": ["mp4", "mkv"]},
         "audio": {"codec": "aac", "profile": "LC", "bitrate": "128k", "bitrate_tolerance": 0.10,
                   "sample_rate": 44100, "channels": 2, "containers": ["m4a", "aac"]},
@@ -62,13 +64,17 @@ DEFAULTS: dict[str, Any] = {
     "watchdog": {"speed_min": 0.97, "speed_grace_seconds": 60, "stall_seconds": 30,
                  "startup_grace_seconds": 60, "max_restarts_per_hour": 6},
     "collector": {"interval_seconds": 10, "vnstat_interval_seconds": 300},
-    "cleanup": {"time_utc": "08:41", "rejected_days": 7, "incoming_stale_hours": 24, "log_days": 14,
-                "metrics_raw_days": 30, "disk_warn_percent": 80, "disk_emergency_percent": 90},
+    # 매시간 정리. 1년을 돌려도 파생 데이터가 수백 MB 를 넘지 않게: 로그 파일당 10MB(넘으면 끝 2MB만),
+    # 로그 전체 300MB, DB 200MB, 원본 지표 3일(그 뒤 시간 단위 집계 400일), 이벤트·로그인 기록 30일
+    "cleanup": {"interval_minutes": 60, "rejected_days": 7, "incoming_stale_hours": 24, "log_days": 14,
+                "metrics_raw_days": 3, "log_max_mb": 10, "log_keep_mb": 2, "logs_total_mb": 300, "db_max_mb": 200,
+                "disk_warn_percent": 80, "disk_emergency_percent": 90},
     "capacity": {"monthly_traffic_tb": 32, "port_mbit": 200, "safety_ratio": 0.85, "audio_kbps": 128,
                  "overhead_ratio": 0.03, "cpu_percent_total": 400, "ram_mb_per_live": 300},
     "dashboard": {"username": "admin", "bind": "127.0.0.1", "port": 8080, "session_hours": 168,
                   "login_max_failures": 5, "login_block_minutes": 15, "max_upload_mb": 20000},
     "harbor_port_base": 8101,
+    "server_name": "",  # 예: LIVE 1 — 서버가 여러 대일 때 구분 (화면·알림)
 }
 
 
@@ -101,6 +107,11 @@ def save_settings_override(paths: Paths, key_path: list[str], value: Any) -> Non
 # ---------------------------------------------------------------------------
 # 공통 도우미
 # ---------------------------------------------------------------------------
+def server_name(settings: dict) -> str:
+    """서버명 (화면 제목·로고 옆·알림 제목). 예전 '알림에 붙일 서버 이름' 값이 있으면 그걸 쓴다."""
+    return str(settings.get("server_name") or settings.get("notify", {}).get("server_label") or "").strip()
+
+
 def parse_bitrate(v: Any) -> int:
     """'5500k' / '5.5M' / 5500 → kbps"""
     if isinstance(v, (int, float)):

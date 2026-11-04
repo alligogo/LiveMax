@@ -80,7 +80,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 if auth.must_change() and path not in ("/api/password", "/api/logout"):
                     return err("초기 비밀번호를 먼저 변경하세요", 428)
             resp = await call_next(request)
-            resp.headers["Cache-Control"] = "no-store"
+            if "cache-control" not in resp.headers:  # 썸네일처럼 직접 캐시를 정한 응답은 그대로 (매번 다시 받지 않게)
+                resp.headers["Cache-Control"] = "no-store"
             return resp
         finally:
             conn.close()
@@ -90,7 +91,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     def session(request: Request):
         sess = auth.get_session(request.state.conn, request.cookies.get(auth.COOKIE))
         return {"authenticated": bool(sess), "must_change": auth.must_change(), "version": core.version,
-                "username": settings["dashboard"]["username"]}
+                "username": settings["dashboard"]["username"], "server_name": config.server_name(settings)}
 
     @app.post("/api/login")
     async def login(request: Request):
@@ -176,14 +177,14 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         audio = float(settings["capacity"]["audio_kbps"])
         if lv["state"] == "running" and lv.get("bitrate_kbps") and (lv.get("out_time") or 0) > 30:
             return max(500.0, float(lv["bitrate_kbps"]) - audio)
-        if lv["video_folders"]:
+        if lv["video_folders"]:  # 아직 송출 전이면 고른 비디오 파일들의 평균
             q = ",".join("?" * len(lv["video_folders"]))
             r = conn.execute(f"SELECT SUM(bitrate_kbps*duration)/SUM(duration) AS k FROM media_files "
                              f"WHERE kind='video' AND folder IN ({q}) AND bitrate_kbps>0 AND duration>0",
                              lv["video_folders"]).fetchone()
             if r and r["k"]:
                 return float(r["k"])
-        return 5500.0
+        return 5000.0
 
     def overview_data(conn) -> dict:
         snap = sup.snapshot()
@@ -204,7 +205,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                            "message": "서버 재부팅 필요 (보안 업데이트 적용 대기) — 설정 > 시스템"})
         for e in conn.execute("SELECT * FROM events WHERE level IN ('warn','error') AND ts > ? ORDER BY ts DESC LIMIT 20",
                               (time.time() - 86400,)).fetchall():
-            alerts.append({"level": e["level"], "ts": e["ts"], "live": e["live_id"], "message": e["message"]})
+            alerts.append({"id": e["id"], "level": e["level"], "ts": e["ts"], "live": e["live_id"], "message": e["message"]})
         return {
             "server_time": time.time(), "version": core.version, "uptime_since": core.started_at,
             "lives": lives, "system": sysd,
@@ -217,6 +218,17 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     @app.get("/api/overview")
     def overview(request: Request):
         return overview_data(request.state.conn)
+
+    # 알림 목록에서 확인한 항목 지우기 (지금 상태를 나타내는 알림 — 중단·디스크·재부팅 — 은 해결되면 저절로 사라짐)
+    @app.delete("/api/alerts/{eid}")
+    def alert_dismiss(request: Request, eid: int):
+        request.state.conn.execute("DELETE FROM events WHERE id=? AND level IN ('warn','error')", (eid,))
+        return {"ok": True}
+
+    @app.delete("/api/alerts")
+    def alerts_clear(request: Request):
+        request.state.conn.execute("DELETE FROM events WHERE level IN ('warn','error')")
+        return {"ok": True}
 
     # ------------------------------------------------------------------ 라이브
     async def _live_payload(request: Request, lv: Live) -> tuple[Live, str, str]:
@@ -324,6 +336,13 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     def _kind(kind: str) -> bool:
         return kind in ("video", "audio")
 
+    def _fps_label(v) -> str:
+        try:
+            n, d = str(v).split("/")
+            return f"{float(n) / float(d):g}fps"
+        except (ValueError, ZeroDivisionError):
+            return f"{v}fps"
+
     @app.get("/api/media/{kind}")
     def media(request: Request, kind: str):
         if not _kind(kind):
@@ -333,7 +352,16 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         for f in catalog.list_folders(paths, kind):
             files = catalog.list_files(paths, kind, f)
             pend = paths.incoming / kind / f
+            fmts = set()
+            if kind == "video":  # 해상도·fps 조합 (라이브 설정에서 섞임 경고용)
+                for r in request.state.conn.execute("SELECT info FROM media_files WHERE kind='video' AND folder=?", (f,)):
+                    try:
+                        i = json.loads(r["info"] or "{}")
+                        fmts.add(f"{i.get('width')}x{i.get('height')} {_fps_label(i.get('fps'))}")
+                    except (ValueError, TypeError):
+                        pass
             folders.append({"name": f, "count": len(files), "size": sum(p.stat().st_size for p in files),
+                            "formats": sorted(fmts),
                             "used_by": usage.get(f, []),
                             "pending": len([p for p in pend.iterdir() if p.is_file()]) if pend.is_dir() else 0})
         rej = [{"ts": r["ts"], "folder": r["folder"], "name": r["name"], "reasons": json.loads(r["reasons"])}
@@ -397,6 +425,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err("폴더가 비어 있지 않습니다. 파일을 먼저 삭제하세요")
         shutil.rmtree(paths.kind_root(kind) / folder, ignore_errors=True)
         shutil.rmtree(paths.incoming / kind / folder, ignore_errors=True)
+        shutil.rmtree(paths.thumbs_dir / kind / folder, ignore_errors=True)
         return {"ok": True}
 
     @app.delete("/api/media/{kind}/{folder}/{name}")
@@ -424,7 +453,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         p = paths.thumbs_dir / "video" / folder / f"{name}.jpg"
         if not p.is_file():
             return err("not found", 404)
-        return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+        return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
 
     # ------------------------------------------------------------------ 이어 올리기 업로드
     def _upload_id(kind: str, folder: str, name: str, size: int) -> str:
@@ -503,7 +532,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "version": core.version, "uptime_since": core.started_at, "disk": disk,
             "reboot_required": REBOOT_FLAG.exists(),
             "reboot_packages": REBOOT_FLAG.with_suffix(".pkgs").read_text().split() if REBOOT_FLAG.with_suffix(".pkgs").exists() else [],
-            "settings": {"restart_base_utc": settings["restart"]["base_utc"],
+            "settings": {"restart_base_utc": settings["restart"]["base_utc"], "server_name": config.server_name(settings),
                          "tls_relay": settings["output"]["tls_relay"]["enabled"]},
             "sessions": [{"id": r["token_hash"], "ip": r["ip"], "ua": r["user_agent"], "last_seen": r["last_seen"],
                           "current": r["token_hash"] == sess["token_hash"]}
@@ -545,8 +574,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     def _notify_view() -> dict:
         cfg = notifier.cfg
         tok = notify.read_token(paths)
-        return {"enabled": bool(cfg.get("enabled")), "server_label": cfg.get("server_label") or "",
-                "default_label": notifier.label() if not cfg.get("server_label") else "",
+        return {"enabled": bool(cfg.get("enabled")), "label": notifier.label(),
                 "categories": dict(cfg["categories"]), "token_masked": secrets.mask(tok) if tok else "",
                 "last_error": notifier.last_error,
                 "catalog": [{"key": k, "label": lb, "desc": ds} for k, lb, ds, _ in notify.CATEGORIES]}
@@ -574,9 +602,6 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return err("Access Token 을 먼저 입력하세요")
             cfg["enabled"] = bool(b["enabled"])
             config.save_settings_override(paths, ["notify", "enabled"], cfg["enabled"])
-        if "server_label" in b:
-            cfg["server_label"] = str(b["server_label"] or "").strip()[:40]
-            config.save_settings_override(paths, ["notify", "server_label"], cfg["server_label"])
         if isinstance(b.get("categories"), dict):
             known = {k for k, *_ in notify.CATEGORIES}
             for k, v in b["categories"].items():
@@ -603,6 +628,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return err(str(e))
             config.save_settings_override(paths, ["restart", "base_utc"], b["restart_base_utc"])
             settings["restart"]["base_utc"] = b["restart_base_utc"]
+        if "server_name" in b:
+            name = str(b["server_name"] or "").strip()[:30]
+            if any(c in name for c in "<>\"'`"):
+                return err("서버명에 < > \" ' ` 는 쓸 수 없습니다")
+            config.save_settings_override(paths, ["server_name"], name)
+            settings["server_name"] = name
         if "tls_relay" in b:
             config.save_settings_override(paths, ["output", "tls_relay", "enabled"], bool(b["tls_relay"]))
             settings["output"]["tls_relay"]["enabled"] = bool(b["tls_relay"])
