@@ -682,6 +682,11 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err(f"허용 확장자: {', '.join(EXTS[kind])}")
         if size <= 0 or size > int(settings["dashboard"]["max_upload_mb"]) * 1024 * 1024:
             return err("파일 크기 오류")
+        # 같은 이름은 올리기 전에 바로 알려 준다 (덮어쓰지 않음 — 송출 중일 수 있으므로)
+        for d in (paths.kind_root(kind) / folder, paths.incoming / kind / folder):
+            if d.is_dir() and any(f.name.lower() == name.lower() for f in d.iterdir() if f.is_file()):
+                where = "방송 폴더" if d.parent.parent != paths.incoming else "검증 대기"
+                return err(f"'{name}' 과(와) 같은 이름의 파일이 이미 있습니다 ({where}) — 교체하려면 기존 파일을 지운 뒤 올리거나 이름을 바꾸세요")
         uid = _upload_id(kind, folder, name, size)
         meta = paths.uploads / f"{uid}.json"
         part = paths.uploads / f"{uid}.part"
@@ -738,9 +743,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         dest_dir = paths.incoming / m["kind"] / m["folder"]
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / m["name"]
-        if dest.exists():
-            dest = dest_dir / f"{Path(m['name']).stem}-{uid[:6]}{Path(m['name']).suffix}"
-        os.rename(part, dest)  # 완성된 파일만 스테이징에 나타난다 → ingest 가 검증 후 방송 폴더로
+        try:
+            os.link(part, dest)  # 같은 이름이 이미 있으면 실패 (덮어쓰지 않음)
+        except FileExistsError:
+            part.unlink(missing_ok=True); meta.unlink(missing_ok=True)
+            return err(f"'{m['name']}' 과(와) 같은 이름의 파일이 이미 검증 대기 중입니다")
+        part.unlink()  # 완성된 파일만 스테이징에 나타난다 → ingest 가 검증 후 방송 폴더로
         meta.unlink()
         return {"ok": True, "message": "업로드 완료 — 규격 검증 중"}
 

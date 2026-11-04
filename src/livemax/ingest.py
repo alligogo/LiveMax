@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -38,6 +39,48 @@ def _unique_dest(dest: Path) -> Path:
         if not cand.exists():
             return cand
     raise FileExistsError(dest)
+
+
+def _sha1(p: Path) -> str:
+    h = hashlib.sha1()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(4 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def collision(src: Path, target_dir: Path) -> list[str]:
+    """방송 폴더에 같은 이름(대소문자 무시)이나 같은 내용의 파일이 있으면 거부 사유.
+
+    규칙: 덮어쓰지도, 번호를 붙여 따로 넣지도 않는다. 그 파일이 지금 송출 중일 수 있으므로
+    교체하려면 웹에서 기존 파일을 먼저 지우고(송출중·다음 곡이면 잠김) 다시 올린다.
+    """
+    if not target_dir.is_dir():
+        return []
+    name = src.name.lower()
+    size = src.stat().st_size
+    src_hash = None
+    for f in target_dir.iterdir():
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        if f.name.lower() == name:
+            try:
+                same = f.stat().st_size == size and _sha1(f) == _sha1(src)
+            except OSError:
+                same = False
+            if same:
+                return [f"이미 있는 파일입니다 ('{f.name}' 와 이름·내용이 같음) — 다시 올릴 필요 없음"]
+            return [f"같은 이름의 다른 파일 '{f.name}' 이 이미 있습니다 — 교체하려면 웹에서 기존 파일을 지운 뒤 "
+                    f"다시 올리거나, 이름을 바꿔 올리세요 (송출 중인 파일은 덮어쓰지 않습니다)"]
+    for f in target_dir.iterdir():  # 이름은 다른데 내용이 같은 중복
+        try:
+            if f.is_file() and not f.name.startswith(".") and f.stat().st_size == size:
+                src_hash = src_hash or _sha1(src)
+                if _sha1(f) == src_hash:
+                    return [f"같은 파일이 '{f.name}' 이름으로 이미 있습니다 (중복)"]
+        except OSError:
+            continue
+    return []
 
 
 def _same_fs(a: Path, b: Path) -> bool:
@@ -74,6 +117,11 @@ def process_file(paths: Paths, server: dict, conn, kind: str, folder: str, src: 
         reject(paths, conn, kind, folder, src, reasons)
         return False, reasons
 
+    dup = collision(src, target_dir)
+    if dup:
+        reject(paths, conn, kind, folder, src, dup)
+        return False, dup
+
     t0 = time.monotonic()
     result = probe.validate(kind, src, server)
     log.debug("ffprobe %s: ok=%s dur=%s br=%s info=%s warn=%s (%.2fs)", src.name, result.ok, result.duration,
@@ -88,7 +136,11 @@ def process_file(paths: Paths, server: dict, conn, kind: str, folder: str, src: 
         log.error(reasons[0])
         return False, reasons
 
-    dest = _unique_dest(target_dir / src.name)
+    dest = target_dir / src.name
+    if dest.exists():  # 검증하는 사이 같은 이름이 생긴 경우 (거의 없음) — 그래도 덮어쓰지 않는다
+        reasons = collision(src, target_dir) or [f"같은 이름의 파일 '{src.name}' 이 이미 있습니다"]
+        reject(paths, conn, kind, folder, src, reasons)
+        return False, reasons
 
     thumb_rel = None
     if kind == "video":
@@ -97,7 +149,15 @@ def process_file(paths: Paths, server: dict, conn, kind: str, folder: str, src: 
         if thumbs.make_thumbnail(src, tp):
             thumb_rel = str(tp.relative_to(paths.thumbs_dir))
 
-    os.rename(src, dest)  # 원자적 이동 — 중간 상태가 존재하지 않는다
+    try:
+        os.link(src, dest)  # 원자적 + 이미 있으면 실패 (os.rename 은 조용히 덮어쓴다)
+    except FileExistsError:
+        if kind == "video" and thumb_rel:
+            thumbs.thumb_path(paths, folder, dest.name).unlink(missing_ok=True)
+        reasons = [f"같은 이름의 파일 '{src.name}' 이 이미 있습니다"]
+        reject(paths, conn, kind, folder, src, reasons)
+        return False, reasons
+    os.unlink(src)
     catalog.upsert(conn, kind, folder, dest, result.duration, result.bitrate_kbps, result.info, thumb_rel)
     msg = f"[{kind}/{folder}] {dest.name} 추가 ({result.duration or 0:.1f}s, {result.bitrate_kbps or 0:.0f}k)"
     if result.warnings:
@@ -151,3 +211,53 @@ def _is_stable(f: Path, seen: dict[Path, tuple[int, float, float]], now: float, 
         seen[f] = (sig[0], sig[1], now)
         return False
     return now - prev[2] >= stable and now - st.st_mtime >= stable
+
+
+# ---------------------------------------------------------------------------
+# 방송 폴더 감시 — WinSCP 등으로 _incoming 이 아닌 방송 폴더에 직접 넣거나 바꾼 파일
+# ---------------------------------------------------------------------------
+def watch_broadcast(paths: Paths, server: dict, conn, memo: dict) -> int:
+    """방송 폴더의 파일을 카탈로그와 비교한다. 원본은 절대 옮기거나 지우지 않는다 (송출 중일 수 있음).
+
+    - 카탈로그에 없는 새 파일: 규격 검사 → 맞으면 등록(썸네일 포함), 안 맞으면 경고만
+    - 크기·수정 시각이 바뀐 파일: 경고 (직접 덮어쓴 것) + 길이 다시 읽기
+    경고는 이벤트(source=media-watch)로 남아 웹 알림·휴대폰 알림으로 간다. 같은 상태는 한 번만.
+    """
+    now, n = time.time(), 0
+    for kind in KINDS:
+        for folder in catalog.list_folders(paths, kind):
+            for f in catalog.list_files(paths, kind, folder):
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                if now - st.st_mtime < 60:  # 아직 쓰는 중일 수 있음
+                    continue
+                sig = (st.st_size, int(st.st_mtime))
+                if memo.get(f) == sig:
+                    continue
+                row = conn.execute("SELECT size, mtime, info FROM media_files WHERE path=?", (str(f),)).fetchone()
+                known = row and row["size"] == st.st_size and abs((row["mtime"] or 0) - st.st_mtime) < 1
+                if known and row["info"] not in (None, "", "{}"):
+                    memo[f] = sig
+                    continue
+                result = probe.validate(kind, f, server)
+                if row and not known:
+                    db.add_event(conn, "warn", "media-watch",
+                                 f"[{kind}/{folder}] {f.name} 이(가) 방송 폴더에서 직접 바뀌었습니다 — 송출 중이면 튈 수 있어요. "
+                                 f"다음부터는 웹이나 _incoming 으로 올리세요" + ("" if result.ok else " (규격 불일치: " + "; ".join(result.reasons) + ")"))
+                elif not row:
+                    db.add_event(conn, "warn", "media-watch",
+                                 f"[{kind}/{folder}] {f.name} 을(를) 방송 폴더에서 발견 — 검사 없이 직접 넣은 파일" +
+                                 (" (규격 통과, 등록함)" if result.ok else " (규격 불일치: " + "; ".join(result.reasons) + " — 웹에서 지우세요)"))
+                thumb_rel = None
+                if result.ok and kind == "video":
+                    tp = thumbs.thumb_path(paths, folder, f.name)
+                    if thumbs.make_thumbnail(f, tp):
+                        thumb_rel = str(tp.relative_to(paths.thumbs_dir))
+                catalog.upsert(conn, kind, folder, f, result.duration, result.bitrate_kbps, result.info, thumb_rel)
+                memo[f] = sig
+                n += 1
+    for p in [p for p in memo if not p.exists()]:
+        memo.pop(p, None)
+    return n

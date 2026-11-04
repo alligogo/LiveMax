@@ -52,11 +52,19 @@ class App:
     def _ingest_loop(self) -> None:
         conn = db.connect(self.paths.db)
         seen: dict = {}
+        memo: dict = {}
+        last_watch = 0.0
         while not self.stop.wait(float(self.settings["ingest"]["poll_seconds"])):
             try:
                 ingest.scan_once(self.paths, self.settings, conn, seen)
             except Exception:  # noqa: BLE001
                 log.exception("ingest 실패")
+            if time.time() - last_watch >= 60:  # 방송 폴더에 직접 넣거나 바꾼 파일 감시 (1분마다)
+                last_watch = time.time()
+                try:
+                    ingest.watch_broadcast(self.paths, self.settings, conn, memo)
+                except Exception:  # noqa: BLE001
+                    log.exception("방송 폴더 감시 실패")
 
     def cleanup_async(self, emergency: bool = False, manual: bool = False) -> bool:
         if not self._cleanup_lock.acquire(blocking=False):
@@ -109,9 +117,12 @@ class App:
                     n.send("system", f"디스크 {pct:.0f}% 사용 중", "비디오·음악 파일을 정리하세요", dedupe_s=6 * 3600)
                 if flag.exists():
                     n.send("system", "서버 재부팅 필요", "보안 업데이트 적용 대기 — 한가한 시간에 sudo reboot", dedupe_s=7 * 86400)
-                for e in conn.execute("SELECT id, message FROM events WHERE id > ? AND source='ingest' AND level='warn' "
-                                      "ORDER BY id", (last_ev,)).fetchall():
-                    n.send("media", "업로드 파일 거부", e["message"])
+                for e in conn.execute("SELECT id, source, message FROM events WHERE id > ? AND source IN ('ingest','media-watch') "
+                                      "AND level='warn' ORDER BY id", (last_ev,)).fetchall():
+                    if e["source"] == "ingest":
+                        n.send("media", "업로드 파일 거부", e["message"])
+                    else:
+                        n.send("system", "방송 폴더 직접 변경", e["message"])
                 last_ev = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()["m"] or last_ev
             except Exception:  # noqa: BLE001
                 log.exception("알림 감시 실패")

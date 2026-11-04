@@ -7,6 +7,7 @@ concat 목록 생성 때마다 수천 개 클립을 ffprobe 하지 않도록 DB 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -18,11 +19,16 @@ VIDEO_GLOB = ("*.mp4", "*.mkv")
 AUDIO_GLOB = ("*.m4a", "*.aac")
 
 
+def natural_key(name: str) -> list:
+    """사람이 기대하는 순서: '비디오 2' < '비디오 10' (숫자는 크기로, 글자는 대소문자 무시)."""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", name) if t != ""]
+
+
 def list_folders(paths: Paths, kind: str) -> list[str]:
     root = paths.kind_root(kind)
     if not root.is_dir():
         return []
-    return sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith((".", "_")))
+    return sorted((p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith((".", "_"))), key=natural_key)
 
 
 def list_files(paths: Paths, kind: str, folder: str) -> list[Path]:
@@ -33,7 +39,7 @@ def list_files(paths: Paths, kind: str, folder: str) -> list[Path]:
     files: list[Path] = []
     for g in globs:
         files.extend(p for p in d.glob(g) if p.is_file() and not p.name.startswith("."))
-    return sorted(files)
+    return sorted(files, key=lambda p: natural_key(p.name))
 
 
 def upsert(conn: sqlite3.Connection, kind: str, folder: str, path: Path, duration: float | None,
