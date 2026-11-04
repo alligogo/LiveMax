@@ -801,6 +801,8 @@ async function showSystem() {
   const local = new Date(Date.UTC(2000, 0, 1, bh, bm));
   const base = h("input", { class: "input", type: "time", value: `${pad(local.getHours())}:${pad(local.getMinutes())}`, style: "max-width:160px" });
   const relay = h("input", { type: "checkbox" }); relay.checked = s.settings.tls_relay;
+  // 라이브 목록은 이 화면에서 직접 받는다 (라이브 화면을 거치지 않고 설정으로 바로 와도 로그 목록이 다 보이게)
+  if (!lastOverview) { try { lastOverview = await api("GET", "/api/overview"); } catch (e) { /* 관리 프로그램 로그만이라도 */ } }
   const logSel = h("select", { class: "input", style: "max-width:260px" }, h("option", { value: "livemaxd" }, "관리 프로그램 (livemaxd)"),
     (lastOverview?.lives || []).flatMap((l) => [["live", "송출"], ["audio", "음악"], ["tls", "TLS"]].map(([p, n]) => h("option", { value: `${p}-${l.id}` }, `${l.name} — ${n}`))));
   const pre = logPre("40vh");
