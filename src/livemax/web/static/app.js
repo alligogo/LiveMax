@@ -223,9 +223,9 @@ function renderLives(grid, ov) {
           ? h("img", { src: `/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}`, alt: "", loading: "lazy" })
           : !running && lv.idle_thumb  // 송출 전: 고른 비디오의 첫 클립을 반투명으로
             ? [h("img", { class: "idle", src: `/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}`, alt: "", loading: "lazy" }),
-               h("span", { class: "idle-tag" }, "송출 전")]
+               lv.desired ? null : h("span", { class: "idle-tag" }, "송출 전")]  // 송출하려는데 끊긴 라이브는 왼쪽 위 '중단' 표시로
             : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
-        running ? h("span", { class: "badge-live" }, "LIVE") : null,
+        liveBadge(lv, running),
         withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 18), h("span", {}, ch.name)) : null),
       status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null, STATUS[lv.status] || lv.status),
       title: h("span", { class: "lv-title" }, lv.name),
@@ -301,6 +301,14 @@ function renderLives(grid, ov) {
   grid.replaceChildren(bar, ...sections);
 }
 const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => openLiveEditor(null) }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
+
+// 미리보기 왼쪽 위 표시: 정상 LIVE(빨강) · 경고(주황) · 재시작중(하늘) · 중단(검정+빨간 테두리). 송출 안 하는 라이브는 없음
+function liveBadge(lv, running) {
+  if (!lv.desired) return null;
+  if (lv.status === "ok" && running) return h("span", { class: "badge-live" }, "LIVE");
+  const [cls, text] = { warn: ["warn", "경고"], restarting: ["re", "재시작중"], down: ["down", "중단"] }[lv.status] || [null, null];
+  return cls ? h("span", { class: "badge-live " + cls }, cls === "re" ? null : ico("warn"), text) : null;
+}
 
 // 일부러 한 재시작(매일 자동·설정 저장·재시작 버튼)은 끊김으로 세지 않는다 — 진짜 문제만
 const PLANNED = /^(일일 재시작|설정 적용|사용자 재시작)/;
