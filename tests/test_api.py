@@ -114,6 +114,7 @@ def test_reboot_flag_shown(client):
     flag = client.core.paths.state / "host" / "reboot-required"
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.write_text("*** System restart required ***")
+    import time as _t; _t.sleep(4.1)  # 개요는 4초 동안 캐시됨 (여러 기기가 열어도 한 번만 계산)
     ov = client.get("/api/overview").json()
     assert ov["reboot_required"] is True and any("재부팅" in a["message"] for a in ov["alerts"])
 

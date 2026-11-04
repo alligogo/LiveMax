@@ -107,11 +107,20 @@ def generate(live: Live, paths: Paths, conn: sqlite3.Connection, settings: dict)
     return p
 
 
+_META_CACHE: dict = {}
+
+
 def current_clip(meta_path: Path | None, out_time_s: float | None) -> dict | None:
     if not meta_path or out_time_s is None:
         return None
     try:
-        ents = json.loads(meta_path.read_text(encoding="utf-8"))["entries"]
+        mt = meta_path.stat().st_mtime_ns
+        hit = _META_CACHE.get(meta_path)
+        if hit and hit[0] == mt:
+            ents = hit[1]
+        else:  # 2초마다 × 라이브 수만큼 불리므로 파일이 바뀌었을 때만 다시 읽는다
+            ents = json.loads(meta_path.read_text(encoding="utf-8"))["entries"]
+            _META_CACHE[meta_path] = (mt, ents)
     except (OSError, json.JSONDecodeError, KeyError):
         return None
     lo, hi = 0, len(ents) - 1

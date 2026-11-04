@@ -154,26 +154,8 @@ def validate_video(path: Path, spec: dict) -> ProbeResult:
     except (TypeError, ValueError):
         r.reasons.append("길이를 읽을 수 없음")
 
-    # 키프레임 간격 — 2초 고정 필수. 어긋나면 유튜브 화질 등급 하락 + concat 전환 지점 깨짐.
-    try:
-        kf = keyframe_times(path)
-    except Exception as e:  # noqa: BLE001
-        r.reasons.append(f"키프레임 정보를 읽을 수 없음: {e}")
-        kf = []
-    if kf:
-        target, tol = float(spec["keyframe_interval"]), float(spec["keyframe_tolerance"])
-        start_pts = float(v.get("start_time") or 0)
-        if abs(kf[0] - start_pts) > 0.01:
-            r.reasons.append(f"첫 프레임이 키프레임이 아님 (첫 키프레임 {kf[0]:.2f}초)")
-        gaps = [b - a for a, b in zip(kf, kf[1:])]
-        bad = [g for g in gaps if abs(g - target) > tol]
-        if bad:
-            worst = max(bad, key=lambda g: abs(g - target))
-            r.reasons.append(f"키프레임 {worst:.1f}초, {target:g}초여야 함 (불규칙 간격 {len(bad)}곳)")
-        if not gaps and (r.duration or 0) > target + tol:
-            r.reasons.append(f"키프레임이 1개뿐 — {target:g}초 간격이어야 함")
-    elif not r.reasons:
-        r.reasons.append("키프레임을 찾을 수 없음")
+    # 키프레임 간격(2초) 전수 검사는 파일 전체를 훑어 CPU·디스크를 많이 써서 뺐다.
+    # 변환기(LiveMax-Convert)로 만든 파일만 올린다는 전제 — 책임은 올리는 사람 몫. 머리 정보 검사는 그대로.
 
     # 이음새 검사: 클립을 이어붙일 때(같은 클립 반복 포함) 빈틈·겹침이 생기지 않으려면
     # 시작 시각이 0 이고, 길이가 프레임 수 × 프레임 간격과 맞아야 한다 (어긋나면 전환 때 멈칫하거나 튐)

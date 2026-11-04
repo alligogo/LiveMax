@@ -1,4 +1,4 @@
-"""같은 이름은 무조건 거부(덮어쓰기·번호 붙이기 없음), 내용이 같은 중복 거부, 방송 폴더 직접 변경 감시."""
+"""같은 이름은 무조건 거부(덮어쓰기·번호 붙이기 없음), 방송 폴더 직접 변경 감시. (내용 중복 검사는 CPU 절약으로 뺌)"""
 
 import shutil
 import subprocess
@@ -22,9 +22,8 @@ def _rej(conn):
 
 
 @pytest.mark.parametrize("existing,incoming,content_same,expect", [
-    ("Song.m4a", "Song.m4a", True, "이미 있는 파일"),
-    ("Song.m4a", "song.M4A", False, "같은 이름의 다른 파일"),   # 대소문자만 달라도 같은 이름
-    ("Song.m4a", "Other.m4a", True, "중복"),
+    ("Song.m4a", "Song.m4a", True, "같은 이름의 파일"),
+    ("Song.m4a", "song.M4A", False, "같은 이름의 파일"),   # 대소문자만 달라도 같은 이름
 ])
 def test_name_collision_rejected(paths, settings, existing, incoming, content_same, expect):
     live, inc = _setup(paths)

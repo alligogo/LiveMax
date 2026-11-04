@@ -63,6 +63,10 @@ class App:
 
     # ---------------------------------------------------------------- 백그라운드 작업
     def _ingest_loop(self) -> None:
+        try:  # 업로드 검사·썸네일·폴더 감시는 송출보다 낮은 우선순위로 (리눅스는 이 스레드와 자식 프로세스에만 적용)
+            os.nice(15)
+        except OSError:
+            pass
         conn = db.connect(self.paths.db)
         seen: dict = {}
         memo: dict = {}

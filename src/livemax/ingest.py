@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -41,45 +40,20 @@ def _unique_dest(dest: Path) -> Path:
     raise FileExistsError(dest)
 
 
-def _sha1(p: Path) -> str:
-    h = hashlib.sha1()
-    with open(p, "rb") as f:
-        for chunk in iter(lambda: f.read(4 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def collision(src: Path, target_dir: Path) -> list[str]:
-    """방송 폴더에 같은 이름(대소문자 무시)이나 같은 내용의 파일이 있으면 거부 사유.
+    """방송 폴더에 같은 이름(대소문자 무시)의 파일이 있으면 거부 사유.
 
     규칙: 덮어쓰지도, 번호를 붙여 따로 넣지도 않는다. 그 파일이 지금 송출 중일 수 있으므로
     교체하려면 웹에서 기존 파일을 먼저 지우고(송출중·다음 곡이면 잠김) 다시 올린다.
+    (내용이 같은 중복 검사는 파일 전체를 읽어 CPU 를 많이 써서 뺐다 — 중복 관리는 올리는 사람 몫)
     """
     if not target_dir.is_dir():
         return []
     name = src.name.lower()
-    size = src.stat().st_size
-    src_hash = None
     for f in target_dir.iterdir():
-        if not f.is_file() or f.name.startswith("."):
-            continue
-        if f.name.lower() == name:
-            try:
-                same = f.stat().st_size == size and _sha1(f) == _sha1(src)
-            except OSError:
-                same = False
-            if same:
-                return [f"이미 있는 파일입니다 ('{f.name}' 와 이름·내용이 같음) — 다시 올릴 필요 없음"]
-            return [f"같은 이름의 다른 파일 '{f.name}' 이 이미 있습니다 — 교체하려면 웹에서 기존 파일을 지운 뒤 "
+        if f.is_file() and not f.name.startswith(".") and f.name.lower() == name:
+            return [f"같은 이름의 파일 '{f.name}' 이 이미 있습니다 — 교체하려면 웹에서 기존 파일을 지운 뒤 "
                     f"다시 올리거나, 이름을 바꿔 올리세요 (송출 중인 파일은 덮어쓰지 않습니다)"]
-    for f in target_dir.iterdir():  # 이름은 다른데 내용이 같은 중복
-        try:
-            if f.is_file() and not f.name.startswith(".") and f.stat().st_size == size:
-                src_hash = src_hash or _sha1(src)
-                if _sha1(f) == src_hash:
-                    return [f"같은 파일이 '{f.name}' 이름으로 이미 있습니다 (중복)"]
-        except OSError:
-            continue
     return []
 
 
@@ -189,6 +163,8 @@ def scan_once(paths: Paths, server: dict, conn, seen: dict[Path, tuple[int, floa
                 if not _is_stable(f, seen, now, stable):
                     continue
                 seen.pop(f, None)
+                if handled:  # 여러 개를 한꺼번에 올려도 한 개씩, 사이사이 쉬면서 (송출에 CPU 양보)
+                    time.sleep(float(server["ingest"].get("pause_seconds", 0)))
                 try:
                     process_file(paths, server, conn, kind, folder_dir.name, f)
                 except Exception:  # noqa: BLE001

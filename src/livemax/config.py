@@ -48,7 +48,7 @@ DEFAULTS: dict[str, Any] = {
                   "bitrate_tolerance": 0.10,
                   "sample_rate": 44100, "channels": 2, "containers": ["m4a", "aac"]},
     },
-    "ingest": {"poll_seconds": 3, "stable_seconds": 10},
+    "ingest": {"poll_seconds": 3, "stable_seconds": 10, "pause_seconds": 3},
     "output": {
         # 유튜브 RTMPS 인제스트. RTMPS 는 a.rtmps.youtube.com (rtmp"s") — 인증서 이름이 맞는 호스트.
         "default_url": "rtmps://a.rtmps.youtube.com/live2",
@@ -66,7 +66,7 @@ DEFAULTS: dict[str, Any] = {
     "restart": {"base_utc": "15:00", "slot_minutes": 2},
     "watchdog": {"speed_min": 0.97, "speed_grace_seconds": 60, "stall_seconds": 30,
                  "startup_grace_seconds": 60, "max_restarts_per_hour": 6},
-    "collector": {"interval_seconds": 10, "vnstat_interval_seconds": 300},
+    "collector": {"interval_seconds": 15, "vnstat_interval_seconds": 300},
     # 매시간 정리. 1년을 돌려도 파생 데이터가 수백 MB 를 넘지 않게: 로그 파일당 10MB(넘으면 끝 2MB만),
     # 로그 전체 300MB, DB 200MB, 원본 지표 3일(그 뒤 시간 단위 집계 400일), 이벤트·로그인 기록 30일
     "cleanup": {"interval_minutes": 60, "rejected_days": 7, "incoming_stale_hours": 24, "log_days": 14,
@@ -75,7 +75,8 @@ DEFAULTS: dict[str, Any] = {
     "capacity": {"monthly_traffic_tb": 32, "traffic_target_tb": 28, "port_mbit": 200, "safety_ratio": 0.85, "audio_kbps": 128,
                  "overhead_ratio": 0.03, "cpu_percent_total": 400, "ram_mb_per_live": 300},
     "dashboard": {"username": "admin", "bind": "127.0.0.1", "port": 8080, "session_hours": 168,
-                  "login_max_failures": 5, "login_block_minutes": 15, "max_upload_mb": 20000},
+                  "login_max_failures": 5, "login_block_minutes": 15, "max_upload_mb": 20000,
+                  "upload_mb_per_s": 10},  # 웹 업로드 속도 상한 (서버 부담 줄이기, 모든 업로드 합산)
     "harbor_port_base": 8101,
     "ui": {"lives_view": "grid"},  # 라이브 화면 보기 방식: grid(블록) | list(목록)
     "server_name": "",  # 예: LIVE 1 — 서버가 여러 대일 때 구분 (화면·알림)

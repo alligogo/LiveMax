@@ -181,7 +181,7 @@ async function showLives() {
   mount(shell("lives", h("div", { class: "layout" }, h("section", {}, grid), side)));
   let busy = false;
   const refresh = async () => {
-    if (busy) return;  // 앞 요청이 아직이면 쌓지 않는다
+    if (busy || document.hidden) return;  // 앞 요청이 아직이거나 화면을 안 보고 있으면(다른 탭·폰 잠금) 서버를 부르지 않는다
     busy = true;
     try { lastOverview = await api("GET", "/api/overview"); renderLives(grid, lastOverview); renderSide(side, lastOverview); }
     catch (e) { if (!lastOverview) grid.replaceChildren(h("div", { class: "card empty" }, h("div", { class: "card-body muted" }, e.message))); }
@@ -190,6 +190,7 @@ async function showLives() {
   grid.replaceChildren(h("div", { class: "muted small", style: "padding:20px" }, "불러오는 중…"));
   await refresh();
   pollTimer = setInterval(refresh, 5000);
+  document.onvisibilitychange = () => { if (!document.hidden && document.contains(grid)) refresh(); };  // 다시 보면 바로 갱신
 }
 
 // 채널 로고(없으면 첫 글자) + 이름. 주소가 있으면 새 창으로 연다
@@ -780,8 +781,8 @@ async function uploadFiles(kind, folder, fileList, listEl) {
     } catch (e) { row.classList.add("err"); txt.textContent = "실패: " + e.message; }
     finally { uploading--; }
   };
-  const workers = Array.from({ length: Math.min(3, queue.length) }, async () => { while (queue.length) await one(queue.shift()); });
-  await Promise.all(workers);
+  // 한 번에 한 파일씩 (서버 부담을 고르게 — 속도 상한은 서버가 건다)
+  while (queue.length) await one(queue.shift());
   setTimeout(() => showMedia(kind), 4000);
 }
 

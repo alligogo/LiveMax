@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import hashlib
 import io
 import json
@@ -92,6 +94,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             denied = await run_in_threadpool(_pre, request, path)
             if denied is not None:
                 return denied
+            if request.method != "GET":
+                _ov_cache["data"] = None  # 시작·정지·설정 변경 직후엔 새로 계산
             resp = await call_next(request)
             if "cache-control" not in resp.headers:  # 썸네일처럼 직접 캐시를 정한 응답은 그대로 (매번 다시 받지 않게)
                 resp.headers["Cache-Control"] = "no-store"
@@ -380,9 +384,16 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return FileResponse(p, media_type=channels.LOGO_TYPES[c.logo],
                             headers={"Cache-Control": "private, max-age=2592000", "X-Content-Type-Options": "nosniff"})
 
+    _ov_cache = {"t": 0.0, "data": None}
+
     @app.get("/api/overview")
     def overview(request: Request):
-        return overview_data(request.state.conn)
+        now = time.monotonic()
+        if _ov_cache["data"] is not None and now - _ov_cache["t"] < 4:
+            return _ov_cache["data"]
+        data = overview_data(request.state.conn)
+        _ov_cache.update(t=time.monotonic(), data=data)
+        return data
 
     # 알림 목록에서 확인한 항목 지우기 (지금 상태를 나타내는 알림 — 중단·디스크·재부팅 — 은 해결되면 저절로 사라짐)
     @app.delete("/api/alerts/{eid}")
@@ -737,6 +748,19 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             part.touch()
         return {"id": uid, "offset": part.stat().st_size if part.exists() else 0}
 
+    # 웹 업로드 속도 상한 — 여러 파일을 동시에 올려도 합쳐서 이 속도를 넘지 않게 (받는 쪽 CPU·디스크 부담을 고르게)
+    _bucket = {"t": 0.0}
+
+    async def _throttle(n: int) -> None:
+        rate = float(settings["dashboard"].get("upload_mb_per_s") or 0) * 1024 * 1024
+        if rate <= 0:
+            return
+        now = time.monotonic()
+        _bucket["t"] = max(_bucket["t"], now) + n / rate
+        delay = _bucket["t"] - now
+        if delay > 0.02:
+            await asyncio.sleep(delay)
+
     @app.put("/api/uploads/{uid}")
     async def upload_chunk(request: Request, uid: str, offset: int):
         if not uid.isalnum():
@@ -753,6 +777,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         try:
             buf = bytearray()
             async for chunk in request.stream():
+                await _throttle(len(chunk))
                 buf += chunk
                 if len(buf) >= 1 << 20:  # 1MB 씩 모아 스레드에서 쓴다 (디스크가 느려도 다른 요청은 안 막힘)
                     await run_in_threadpool(f.write, bytes(buf))
