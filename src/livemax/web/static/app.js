@@ -153,7 +153,8 @@ function showChangePassword(forced) {
 // ------------------------------------------------------------------ 모달
 function openModal(title, body, foot, opts = {}) {
   closeModal();
-  const back = h("div", { class: "modal-back", onclick: (e) => { if (e.target === back && !opts.locked) closeModal(); } },
+  // 창 밖을 눌러도 닫히지 않는다 (입력하던 내용이 날아가지 않게) — X 또는 취소 버튼으로만 닫힘
+  const back = h("div", { class: "modal-back" },
     h("div", { class: "modal", style: opts.wide ? "width:min(1000px,100%)" : "" },
       h("div", { class: "card-head" }, title, h("span", { class: "spacer" }),
         opts.locked ? null : h("button", { class: "iconbtn", style: "width:28px;height:28px;background:transparent", onclick: closeModal }, "✕")),
@@ -221,15 +222,20 @@ function renderLives(grid, ov) {
           tile(running && (lv.session_started_at || lv.started_at) ? fmt.dur(now - (lv.session_started_at || lv.started_at)) : "-", "방송 시간"),
           tile(running && lv.bitrate_kbps ? Math.round(lv.bitrate_kbps).toLocaleString() : "-", "kbit/s"),
           tile(lv.speed != null ? lv.speed.toFixed(2) + "x" : "-", "speed", speedCls)),
-        h("div", { class: "nowline" }, ico("music", "lbl"), h("span", { class: "val" }, running && lv.song_title ? `${lv.song_title}${lv.song_artist ? " — " + lv.song_artist : ""}` : "-")),
-        h("div", { class: "nowline" }, ico("video", "lbl"), h("span", { class: "val" }, running && lv.clip ? `${lv.clip_folder} / ${lv.clip}` : "-")),
+        h("div", { class: "nowline" }, ico("music", "lbl"), running && lv.song_title
+          ? h("span", { class: "val" }, h("span", { class: "fold" }, lv.song_folder || ""), h("span", { class: "sep" }, "|"),
+              h("b", {}, lv.song_title + (lv.song_artist ? " — " + lv.song_artist : "")))
+          : h("span", { class: "val" }, "-")),
+        h("div", { class: "nowline" }, ico("video", "lbl"), running && lv.clip
+          ? h("span", { class: "val" }, h("span", { class: "fold" }, lv.clip_folder || ""), h("span", { class: "sep" }, "|"), h("span", {}, lv.clip))
+          : h("span", { class: "val" }, "-")),
         timerLine(lv, now),
         lv.message ? h("div", { class: "msg" + (lv.status === "down" ? " err" : "") }, lv.message) : null,
         h("div", { class: "actions" },
           lv.enabled
-            ? h("button", { class: "btn danger", onclick: () => liveAction(lv, "stop") }, lv.status === "waiting" ? "반복 끄고 정지" : "정지")
+            ? armBtn(lv, "stop", "btn danger", lv.status === "waiting" ? "반복 끄고 정지" : "정지")
             : h("button", { class: "btn primary", onclick: () => liveAction(lv, "start") }, "시작"),
-          h("button", { class: "btn", disabled: !lv.enabled, onclick: () => liveAction(lv, "restart") }, "재시작")),
+          lv.enabled ? armBtn(lv, "restart", "btn", "재시작") : h("button", { class: "btn", disabled: true }, "재시작")),
         h("div", { class: "links" },
           reconnects(lv),
           lv.youtube_video_id ? h("a", { onclick: () => openPreview(lv) }, "유튜브 미리보기") : null,
@@ -319,6 +325,21 @@ async function clearAlerts() {
 }
 
 function liveName(id) { const l = (lastOverview?.lives || []).find((x) => x.id === id); return l ? l.name : id; }
+
+// 실수 방지: 첫 번째 누름 → 게이지 50% + "한 번 더", 두 번째 누름(4초 안) → 확인 창. 화면이 5초마다 다시 그려져도 유지
+const armed = {};
+function armBtn(lv, action, cls, label) {
+  const k = `${lv.id}:${action}`;
+  const on = armed[k] && Date.now() - armed[k] < 4000;
+  const b = h("button", { class: `${cls} arm${on ? " armed" : ""}` }, h("i", { class: "gauge" }), h("span", {}, on ? "한 번 더 누르세요" : label));
+  b.addEventListener("click", () => {
+    if (armed[k] && Date.now() - armed[k] < 4000) { delete armed[k]; liveAction(lv, action); return; }
+    armed[k] = Date.now();
+    b.classList.add("armed"); b.querySelector("span").textContent = "한 번 더 누르세요";
+    setTimeout(() => { if (armed[k] && Date.now() - armed[k] >= 3900) { delete armed[k]; b.classList.remove("armed"); b.querySelector("span").textContent = label; } }, 4000);
+  });
+  return b;
+}
 
 async function liveAction(lv, action) {
   const label = { start: "시작", stop: "정지", restart: "재시작" }[action];
@@ -680,20 +701,27 @@ function openChannelEditor(c) {
   const file = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp", hidden: true });
   const prev = h("div", { class: "logo-prev" }, c?.logo ? h("img", { src: c.logo, alt: "" }) : h("span", { class: "faint small" }, "로고 없음"));
   let logoBlob = null, removeLogo = false;
-  file.addEventListener("change", () => {
-    const f = file.files[0]; if (!f) return;
+  const takeLogo = (f) => {
+    if (!f) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(f.type)) { toast("PNG, JPG, WEBP 이미지만 됩니다", true); return; }
     if (f.size > 1000000) { toast("로고는 1MB 이하로 올려 주세요", true); return; }
     logoBlob = f; removeLogo = false;
     prev.replaceChildren(h("img", { src: URL.createObjectURL(f), alt: "" }));
-  });
+  };
+  file.addEventListener("change", () => takeLogo(file.files[0]));
+  // 로고 칸에 이미지를 끌어다 놓아도 된다
+  const logoDrop = h("div", { class: "logo-drop" }, prev,
+    h("div", { class: "small muted" }, "이미지를 여기로 끌어다 놓거나 ", h("a", { class: "link", style: "cursor:pointer", onclick: () => file.click() }, "선택")),
+    c?.logo ? h("button", { type: "button", class: "btn sm ghost", onclick: () => { removeLogo = true; logoBlob = null; prev.replaceChildren(h("span", { class: "faint small" }, "로고 없음")); } }, "로고 빼기") : null, file);
+  logoDrop.addEventListener("dragover", (e) => { e.preventDefault(); logoDrop.classList.add("over"); });
+  logoDrop.addEventListener("dragleave", () => logoDrop.classList.remove("over"));
+  logoDrop.addEventListener("drop", (e) => { e.preventDefault(); logoDrop.classList.remove("over"); takeLogo(e.dataTransfer.files[0]); });
   const msg = h("div", { class: "msg err" });
   openModal(isNew ? "채널 추가" : `채널 수정 — ${c.name}`, [
     h("label", { class: "field" }, h("span", {}, "채널명"), name),
     h("label", { class: "field" }, h("span", {}, "채널 설명"), desc),
     h("label", { class: "field" }, h("span", {}, "채널 주소"), url, h("div", { class: "hint" }, "라이브 목록·썸네일의 채널명을 누르면 이 주소가 새 창으로 열립니다.")),
-    h("div", { class: "field" }, h("span", { class: "flabel" }, "채널 로고 (정사각형 PNG/JPG/WEBP, 1MB 이하)"),
-      h("div", { class: "row" }, prev, h("button", { type: "button", class: "btn sm", onclick: () => file.click() }, "이미지 선택"),
-        c?.logo ? h("button", { type: "button", class: "btn sm ghost", onclick: () => { removeLogo = true; logoBlob = null; prev.replaceChildren(h("span", { class: "faint small" }, "로고 없음")); } }, "로고 빼기") : null, file)),
+    h("div", { class: "field" }, h("span", { class: "flabel" }, "채널 로고 (정사각형 PNG/JPG/WEBP, 1MB 이하)"), logoDrop),
     msg,
   ], [h("span", { class: "spacer" }), h("button", { class: "btn ghost", onclick: closeModal }, "취소"),
     h("button", { class: "btn primary", onclick: async () => {

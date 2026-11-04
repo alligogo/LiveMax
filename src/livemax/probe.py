@@ -175,6 +175,20 @@ def validate_video(path: Path, spec: dict) -> ProbeResult:
     elif not r.reasons:
         r.reasons.append("키프레임을 찾을 수 없음")
 
+    # 이음새 검사: 클립을 이어붙일 때(같은 클립 반복 포함) 빈틈·겹침이 생기지 않으려면
+    # 시작 시각이 0 이고, 길이가 프레임 수 × 프레임 간격과 맞아야 한다 (어긋나면 전환 때 멈칫하거나 튐)
+    st = float(v.get("start_time") or 0)
+    if abs(st) > 0.05:
+        r.reasons.append(f"비디오 시작 시각 {st:.2f}초 — 0 이어야 함 (클립 전환 때 멈칫함, 변환기로 다시 만드세요)")
+    try:
+        frames, sdur = int(v.get("nb_frames") or 0), float(v.get("duration") or 0)
+    except (TypeError, ValueError):
+        frames, sdur = 0, 0.0
+    if frames and sdur and rfps:
+        drift = abs(sdur - frames / rfps)
+        if drift > 1.5 / rfps:
+            r.reasons.append(f"길이 {sdur:.3f}초가 프레임 {frames}개({frames / rfps:.3f}초)와 다름 — 클립 전환 때 튈 수 있음")
+
     if r.duration and not (50 <= r.duration <= 70):
         r.warnings.append(f"길이 {r.duration:.1f}초 — 설계 기준은 1분 클립")
 
