@@ -189,6 +189,22 @@ GitHub 저장소 → Code → Download ZIP → 압축 풀기 → `tools/windows/
 - 영상: H.264 1080p 30fps 5000k, 키프레임 2초, 소리 제거 / 음악: AAC 128k 44.1kHz, -14 LUFS (서버는 128k~192k 를 받음)
 - 100개가 넘으면 폴더째 끌어다 놓는다. ffmpeg 가 필요하다 (`winget install Gyan.FFmpeg`).
 
+## PC 서버 관리 도구 (`tools/windows/LiveMax-SSH.bat`)
+
+SSH 명령을 외우지 않아도 되게 번호로 고르는 도구다. GitHub ZIP 의 `tools/windows/LiveMax-SSH.bat` 을 받아서:
+
+1. 메모장으로 열어 맨 위 `$Servers` 에 서버를 적고 저장 (서버가 늘면 줄을 추가)
+   ```
+   @{ Name = "LIVE 1"; Host = "13.140.201.245" }
+   @{ Name = "LIVE 2"; Host = "새서버IP" }
+   ```
+2. 더블클릭 → 서버 번호 → 할 일 번호
+   - 접속 / 웹 열기 / 상태 / 로그 / **관리자 비밀번호 재설정** / **LiveMax 다시 시작(웹이 안 열릴 때)** / 업데이트 / **서버 재부팅**
+   - R: 서버를 다시 설치해서 접속 경고가 날 때 (PC 에 저장된 서버 지문 지우기)
+3. 재시작·재부팅·비밀번호 재설정은 한 번 더 확인(y)을 받는다.
+
+> 진짜 IP 는 내 PC 의 사본에만 적는다. GitHub 에는 예시만 있다.
+
 ## 서버에서 쓰는 명령 (가끔)
 
 ```bash

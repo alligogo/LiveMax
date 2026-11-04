@@ -175,6 +175,7 @@ livemaxd 가 매시간 정리한다. 파생 데이터만 지우고 올린 원본
 | `src/livemax/cleanup.py` | 자동 정리 (원본은 절대 삭제 안 함) |
 | `src/livemax/web/api.py`, `auth.py`, `static/` | 웹 API, 로그인·세션, 화면 |
 | `tools/windows/LiveMax-Convert.bat` | PC 미디어 변환기 (끌어다 놓기) |
+| `tools/windows/LiveMax-SSH.bat` | PC 서버 관리 도구 (서버 번호 선택 → 접속·상태·로그·비밀번호 재설정·재시작·재부팅) |
 
 ## 개발
 
