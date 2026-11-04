@@ -105,7 +105,7 @@ def test_song_delete_in_live_folder(client):
     liquidsoap.write_m3u(lv, p)
 
     files = {f["name"]: f for f in client.get("/api/media/audio/재즈-색소폰").json()["files"]}
-    assert files["now.m4a"]["playing"] == ["A"] and files["next.m4a"]["next"] == ["A"] and not files["free.m4a"]["playing"]
+    assert files["now.m4a"]["playing"] == [{"live": "A", "channel": "재즈 채널"}] and files["next.m4a"]["next"][0]["live"] == "A" and not files["free.m4a"]["playing"]
     r = client.delete("/api/media/audio/재즈-색소폰/now.m4a", headers=ORIGIN)
     assert r.status_code == 400 and "재생 중" in r.json()["error"] and (folder / "now.m4a").exists()
     r = client.delete("/api/media/audio/재즈-색소폰/next.m4a", headers=ORIGIN)

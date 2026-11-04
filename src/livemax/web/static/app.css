@@ -78,8 +78,11 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; text-transform: none; letter-spacing: 0; }
 .status::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px rgba(255,255,255,.05); }
 /* 정상 = 밝은 파랑(깜빡임), 문제 = 빨강 */
-.status.ok { color: #4cc3ff; } .status.warn { color: var(--red); } .status.down { color: var(--red); }
-.status.restarting { color: var(--yellow); } .status.stopped { color: var(--faint); }
+/* 정상 = 주황 점(깜빡임), 문제 = 빨간 경고 아이콘, 재시작 중 = 하늘색 */
+.status.ok { color: #fb923c; } .status.warn { color: var(--red); } .status.down { color: var(--red); }
+.status.warn::before, .status.down::before { display: none; }
+.status .ico svg { width: 13px; height: 13px; }
+.status.restarting { color: #4cc3ff; } .status.stopped { color: var(--faint); }
 .status.ok::before { animation: pulse 2s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
 
@@ -291,7 +294,6 @@ div.field { margin-bottom: 14px; }
 .btn.arm.armed { border-color: currentColor; }
 .logo-drop { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px; border: 2px dashed #3a3a3a; border-radius: 10px; transition: all .15s; }
 .logo-drop.over { border-color: var(--green); background: rgba(34,197,94,.06); }
-.pill.on-th { position: absolute; top: 6px; left: 6px; }
 .file .th { position: relative; }
 .file.locked .del { display: none; }
 tr.locked td:first-child { color: #fff; }
@@ -325,4 +327,33 @@ tr.locked td:first-child { color: #fff; }
   .ch-rule { display: none; }
   .upd.new { display: block; }
   pre.log { font-size: 11px; }
+}
+
+/* v2.7: 키 이름, 키 선택 2~3열, 보기 전환, 목록 보기 */
+.lv-title { text-transform: none; letter-spacing: 0; font-size: 14px; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.keytag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: #2f2f2f; color: #cfcfcf;
+  font-size: 11.5px; font-weight: 600; text-transform: none; letter-spacing: 0; white-space: nowrap; flex: none; }
+.keytag svg { width: 11px; height: 11px; }
+.keys { grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr)); }
+.keys .check { align-items: flex-start; flex-wrap: wrap; }
+.keys .check .pill { flex-basis: 100%; margin-left: 27px; width: fit-content; }
+.viewbar { display: flex; align-items: center; gap: 10px; margin-bottom: -10px; }
+.viewbar .seg button { padding: 6px 9px; display: grid; place-items: center; }
+.rows { display: grid; gap: 12px; }
+.row-live { display: grid; grid-template-columns: 220px 1fr auto; gap: 16px; padding: 12px; align-items: center; }
+.row-live .rl-thumb .preview { border-radius: 8px; aspect-ratio: 16/9; }
+.row-live .rl-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.row-live .rl-main { min-width: 0; }
+.row-live .rl-main .nowline { margin-top: 8px; }
+.row-live .rl-main .links { justify-content: flex-start; margin-top: 8px; }
+.row-live .rl-side { width: 300px; }
+.row-live .rl-side .actions { margin-top: 10px; }
+.st-pills { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.on-th { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+@media (max-width: 980px) {
+  .row-live { grid-template-columns: 160px 1fr; }
+  .row-live .rl-side { grid-column: 1 / -1; width: auto; }
+}
+@media (max-width: 560px) {
+  .row-live { grid-template-columns: 1fr; }
 }

@@ -27,7 +27,7 @@ def test_store_auto_assigns_id_port_slot(paths, settings):
 def test_restart_times_are_staggered(settings):
     times = {make_live(id=f"live{i}", restart_slot=i).restart_time_utc(settings) for i in range(15)}
     assert len(times) == 15  # 같은 시각 재시작 없음 (DESIGN 11-6)
-    assert make_live(restart_slot=1).restart_time_utc(settings) == "09:02"
+    assert make_live(restart_slot=1).restart_time_utc(settings) == "15:02"  # 기본 15:00 UTC = 한국 자정
 
 
 @pytest.mark.parametrize("field,value", [("video_folders", []), ("audio_folders", []), ("name", " "),

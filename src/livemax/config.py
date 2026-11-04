@@ -62,7 +62,8 @@ DEFAULTS: dict[str, Any] = {
         "boot_start_gap_seconds": 10,   # 컨테이너 시작 시 라이브 간 시작 간격
         "restart_backoff_seconds": [1, 3, 10, 30, 60],  # 오래 잘 돌다 끊긴 경우 1초 뒤 재연결
     },
-    "restart": {"base_utc": "09:00", "slot_minutes": 2},  # 일일 재시작: 09:00 UTC(미국 새벽) + 슬롯×2분
+    # 일일 재시작: 15:00 UTC = 한국 자정 (미국 동부 오전 10시·서부 오전 7시 — 수면 음악 청취가 가장 적은 때) + 슬롯×2분
+    "restart": {"base_utc": "15:00", "slot_minutes": 2},
     "watchdog": {"speed_min": 0.97, "speed_grace_seconds": 60, "stall_seconds": 30,
                  "startup_grace_seconds": 60, "max_restarts_per_hour": 6},
     "collector": {"interval_seconds": 10, "vnstat_interval_seconds": 300},
@@ -76,6 +77,7 @@ DEFAULTS: dict[str, Any] = {
     "dashboard": {"username": "admin", "bind": "127.0.0.1", "port": 8080, "session_hours": 168,
                   "login_max_failures": 5, "login_block_minutes": 15, "max_upload_mb": 20000},
     "harbor_port_base": 8101,
+    "ui": {"lives_view": "grid"},  # 라이브 화면 보기 방식: grid(블록) | list(목록)
     "server_name": "",  # 예: LIVE 1 — 서버가 여러 대일 때 구분 (화면·알림)
 }
 

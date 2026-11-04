@@ -109,7 +109,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     def session(request: Request):
         sess = auth.get_session(request.state.conn, request.cookies.get(auth.COOKIE))
         return {"authenticated": bool(sess), "must_change": auth.must_change(), "version": core.version,
-                "username": settings["dashboard"]["username"], "server_name": config.server_name(settings)}
+                "username": settings["dashboard"]["username"], "server_name": config.server_name(settings),
+                "lives_view": settings.get("ui", {}).get("lives_view", "grid")}
 
     @app.post("/api/login")
     def login(request: Request, body: dict = Body(default={})):
@@ -184,10 +185,16 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "song_artist": np_.get("artist") or "",
             "song_folder": Path(np_["file"]).parent.name if np_.get("file") else "", "restarts_hour": s.get("restarts_hour", 0),
             "restarts": s.get("restarts", []), "next_restart": lv.next_restart(settings).timestamp(),
-            "key_masked": key_masked, "cpu": (core.collector.per_live.get(lv.id) or {}).get("cpu"),
+            "key_masked": key_masked, "key_label": _key_label(lv),
+            "cpu": (core.collector.per_live.get(lv.id) or {}).get("cpu"),
             "rss_mb": (core.collector.per_live.get(lv.id) or {}).get("rss_mb"),
             **tinfo,
         }
+
+    def _key_label(lv: Live) -> str:
+        ch = chstore.get(lv.channel_id) if lv.channel_id else None
+        k = ch.key(lv.key_id) if ch else None
+        return k["label"] if k else ""
 
     def _video_kbps(conn, lv: dict) -> float:
         """라이브 1개의 영상 비트레이트: 송출 중이면 실측(전체 - 오디오), 아니면 고른 비디오 폴더의 평균."""
@@ -513,10 +520,24 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                             "formats": sorted(fmts),
                             "used_by": usage.get(f, []),
                             "pending": len([p for p in pend.iterdir() if p.is_file()]) if pend.is_dir() else 0})
-        rej = [{"ts": r["ts"], "folder": r["folder"], "name": r["name"], "reasons": json.loads(r["reasons"])}
+        rej = [{"id": r["id"], "ts": r["ts"], "folder": r["folder"], "name": r["name"], "reasons": json.loads(r["reasons"])}
                for r in request.state.conn.execute(
-                   "SELECT * FROM rejections WHERE kind=? ORDER BY ts DESC LIMIT 50", (kind,)).fetchall()]
+                   "SELECT * FROM rejections WHERE kind=? AND ts > ? ORDER BY ts DESC LIMIT 10",
+                   (kind, time.time() - 3 * 86400)).fetchall()]
         return {"folders": folders, "rejected": rej, "spec": settings["spec"][kind]}
+
+    # 검증 실패 목록 지우기 (기록만 — 격리된 파일은 7일 뒤 자동 삭제)
+    @app.delete("/api/rejections/{kind}")
+    def rejections_clear(request: Request, kind: str):
+        if not _kind(kind):
+            return err("잘못된 종류", 404)
+        request.state.conn.execute("DELETE FROM rejections WHERE kind=?", (kind,))
+        return {"ok": True}
+
+    @app.delete("/api/rejections/{kind}/{rid}")
+    def rejection_dismiss(request: Request, kind: str, rid: int):
+        request.state.conn.execute("DELETE FROM rejections WHERE kind=? AND id=?", (kind, rid))
+        return {"ok": True}
 
     @app.get("/api/media/{kind}/{folder}")
     def media_folder(request: Request, kind: str, folder: str):
@@ -527,11 +548,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lives = [lv for lv in store.all() if folder in lv.audio_folders] if kind == "audio" else []
         for p in catalog.list_files(paths, kind, folder):
             r = conn.execute("SELECT * FROM media_files WHERE path=?", (str(p),)).fetchone()
-            states = [(lv.name, st) for lv in lives if (st := _song_state(lv, p))]
+            states = [(lv, st) for lv in lives if (st := _song_state(lv, p))]
             out.append({"name": p.name, "size": p.stat().st_size, "duration": r["duration"] if r else None,
                         "bitrate": r["bitrate_kbps"] if r else None, "thumb": bool(r and r["thumb"]),
                         "added_at": r["added_at"] if r else p.stat().st_mtime,
-                        "playing": [n for n, st in states if st == "playing"], "next": [n for n, st in states if st == "next"]})
+                        "playing": [_who(lv) for lv, st in states if st == "playing"],
+                        "next": [_who(lv) for lv, st in states if st == "next"]})
         pend_dir = paths.incoming / kind / folder
         pending = sorted(p.name for p in pend_dir.iterdir() if p.is_file()) if pend_dir.is_dir() else []
         return {"files": out, "pending": pending}
@@ -639,6 +661,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if kind == "video":
             thumbs.thumb_path(paths, folder, name).unlink(missing_ok=True)
         return {"ok": True}
+
+    def _who(lv: Live) -> dict:
+        ch = chstore.get(lv.channel_id) if lv.channel_id else None
+        return {"live": lv.name, "channel": ch.name if ch else ""}
 
     def _song_state(lv: Live, p: Path) -> str | None:
         """이 곡이 그 라이브에서 지금 재생 중('playing')인지, 다음 곡으로 골라졌는지('next')."""
@@ -875,6 +901,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return err("서버명에 < > \" ' ` 는 쓸 수 없습니다")
             config.save_settings_override(paths, ["server_name"], name)
             settings["server_name"] = name
+        if b.get("lives_view") in ("grid", "list"):
+            config.save_settings_override(paths, ["ui", "lives_view"], b["lives_view"])
+            settings.setdefault("ui", {})["lives_view"] = b["lives_view"]
         if "tls_relay" in b:
             config.save_settings_override(paths, ["output", "tls_relay", "enabled"], bool(b["tls_relay"]))
             settings["output"]["tls_relay"]["enabled"] = bool(b["tls_relay"])
