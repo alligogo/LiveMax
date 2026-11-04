@@ -765,8 +765,18 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "attempts": [dict(r) for r in conn.execute("SELECT ts, ip, username, success FROM login_attempts ORDER BY ts DESC LIMIT 30").fetchall()],
             "update_requested": (paths.state / "update.request").exists(),
             "update_last": _update_last(),
+            "update_check": _update_check(),
             "notify": _notify_view(),
         }
+
+    def _update_check() -> dict:
+        uc = getattr(core, "updates", None)
+        if not uc:
+            return {"status": "unknown"}
+        uc.refresh_async()
+        st = dict(uc.state)
+        st["latest_short"] = (st.get("latest") or "")[:7]
+        return st
 
     def _update_last() -> dict | None:
         """호스트가 남긴 logs/update.log 의 마지막 업데이트 결과 (웹 버튼으로 요청한 것)."""

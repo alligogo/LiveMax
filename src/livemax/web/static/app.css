@@ -293,3 +293,5 @@ div.field { margin-bottom: 14px; }
 .file .th { position: relative; }
 .file.locked .del { display: none; }
 tr.locked td:first-child { color: #fff; }
+.upd { margin: 0 0 10px; font-weight: 600; } .upd.ok { color: var(--green); }
+.upd.new { color: #000; background: var(--yellow); display: inline-block; padding: 6px 12px; border-radius: 6px; }

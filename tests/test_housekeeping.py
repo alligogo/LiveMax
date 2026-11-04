@@ -87,3 +87,26 @@ def test_alert_dismiss_and_server_name(client):
     assert client.put("/api/system/settings", headers=ORIGIN, json={"server_name": "LIVE 1"}).json()["ok"]
     assert client.get("/api/session").json()["server_name"] == "LIVE 1"
     assert client.get("/api/system").json()["notify"]["label"] == "LIVE 1"
+
+
+def test_update_checker(monkeypatch):
+    from livemax import updatecheck
+
+    digests = {"latest": "sha256:new", "a" * 40: "sha256:old", "b" * 40: "sha256:new"}
+    monkeypatch.setattr(updatecheck, "_token", lambda: "t")
+    monkeypatch.setattr(updatecheck, "_digest", lambda tok, ref: digests.get(ref))
+
+    class R:
+        def __init__(self, body):
+            self.body = body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return self.body
+    monkeypatch.setattr(updatecheck, "_get", lambda url, *a, **k: R(b'{"tags": ["latest", "' + b"a" * 40 + b'", "' + b"b" * 40 + b'"]}'))
+    assert updatecheck.UpdateChecker("b" * 40).check_once()["status"] == "latest"
+    st = updatecheck.UpdateChecker("a" * 40).check_once()
+    assert st["status"] == "available" and st["latest"] == "b" * 40
+    assert updatecheck.UpdateChecker("dev").check_once()["status"] == "dev"

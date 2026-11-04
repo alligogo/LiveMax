@@ -16,7 +16,7 @@ import signal
 import threading
 import time
 
-from . import channels, cleanup, config, db, ingest, logsetup, notify, thumbs
+from . import channels, cleanup, config, db, ingest, logsetup, notify, thumbs, updatecheck
 from .collector import Collector
 from .paths import get_paths
 from .supervisor import Supervisor
@@ -46,6 +46,7 @@ class App:
         self.started_at = time.time()
         self._cleanup_lock = threading.Lock()
         self.version = os.environ.get("LIVEMAX_VERSION", "dev")
+        self.updates = updatecheck.UpdateChecker(self.version)
 
     # ---------------------------------------------------------------- 백그라운드 작업
     def _ingest_loop(self) -> None:
@@ -118,7 +119,8 @@ class App:
     def start_background(self) -> None:
         for name, target in (("supervisor", self.supervisor.loop), ("ingest", self._ingest_loop),
                              ("collector", lambda: self.collector.run(self.stop)), ("cleanup", self._cleanup_loop),
-                             ("notify-watch", self._notify_loop), ("boot", self.supervisor.start_all)):
+                             ("notify-watch", self._notify_loop), ("updatecheck", lambda: self.updates.run(self.stop)),
+                             ("boot", self.supervisor.start_all)):
             threading.Thread(target=target, name=name, daemon=True).start()
         log.info("livemaxd %s 시작 (data=%s)", self.version, self.paths.root)
 

@@ -762,10 +762,15 @@ async function deleteChannel(c) {
 }
 
 // ------------------------------------------------------------------ 설정 / 시스템
+let sysRetried = false;
 async function showSystem() {
   stopPoll();
   let s;
   try { s = await api("GET", "/api/system"); } catch (e) { return; }
+  if (!s.update_check?.checked_at && !sysRetried) {  // 처음 열 때 새 버전 확인 결과가 아직 없으면 잠시 뒤 한 번 다시
+    sysRetried = true;
+    setTimeout(() => { if (location.hash.startsWith("#/system")) showSystem(); }, 5000);
+  }
   const [bh, bm] = s.settings.restart_base_utc.split(":").map(Number);
   const local = new Date(Date.UTC(2000, 0, 1, bh, bm));
   const base = h("input", { class: "input", type: "time", value: `${pad(local.getHours())}:${pad(local.getMinutes())}`, style: "max-width:160px" });
@@ -784,12 +789,18 @@ async function showSystem() {
       serverCard(s, card),
       card("업데이트",
         h("p", {}, "현재 버전: ", h("b", { class: "mono" }, (s.version || "").slice(0, 7))),
+        // 지금 GitHub 에 올라와 있는 최신 이미지와 비교한 결과 (30분마다 + 이 화면을 열 때 확인)
+        ({ latest: h("p", { class: "upd ok" }, "✓ 최신 버전입니다"),
+           available: h("p", { class: "upd new" }, "새 버전이 있습니다", s.update_check.latest_short ? h("b", { class: "mono" }, " " + s.update_check.latest_short) : null, " — 아래 버튼을 누르세요"),
+           error: h("p", { class: "small muted" }, "새 버전 확인 실패 (잠시 뒤 다시 확인합니다)"),
+         })[s.update_check?.status] || null,
+        s.update_check?.checked_at ? h("p", { class: "small faint", style: "margin-top:-6px" }, `확인 ${fmt.time(s.update_check.checked_at)}`) : null,
         s.update_requested ? h("p", { class: "msg" }, "업데이트 요청됨 — 1~2분 안에 처리됩니다.")
-          : s.update_last ? h("p", { class: "small " + (s.update_last.result === "failed" ? "msg err" : "muted") }, `마지막 확인 ${fmt.time(Date.parse(s.update_last.at) / 1000)} — `,
-            { latest: "이미 최신 버전입니다", updated: "새 버전으로 업데이트했습니다", failed: "업데이트 실패 (서버의 logs/update.log 확인)", running: "업데이트 진행 중" }[s.update_last.result]) : null,
+          : s.update_last ? h("p", { class: "small " + (s.update_last.result === "failed" ? "msg err" : "muted") }, `마지막 업데이트 실행 ${fmt.time(Date.parse(s.update_last.at) / 1000)} — `,
+            { latest: "그때 이미 최신이었음", updated: "새 버전으로 업데이트함", failed: "실패 (서버의 logs/update.log 확인)", running: "진행 중" }[s.update_last.result]) : null,
         h("button", { class: "btn primary", onclick: async () => {
           if (!confirm("새 버전으로 업데이트할까요? 모든 라이브가 잠깐 끊겼다가 차례대로 복귀합니다.")) return;
-          try { const r = await api("POST", "/api/system/update"); toast(r.message); } catch (e) { toast(e.message, true); }
+          try { const r = await api("POST", "/api/system/update"); toast(r.message); showSystem(); } catch (e) { toast(e.message, true); }
         } }, "최신 버전으로 업데이트")),
       s.reboot_required ? card("서버 재부팅 필요",
         h("p", {}, "보안 업데이트(커널 등)가 설치되어 재부팅을 기다리고 있습니다. 송출 영향이 적은 시간에 서버에서 ", h("code", {}, "sudo reboot"), " 하세요."),
