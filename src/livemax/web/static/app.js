@@ -100,8 +100,7 @@ function shell(active, ...content) {
   return h("div", {},
     h("header", { class: "topbar" },
       h("a", { class: "brand", href: "#/" }, brandParts()),
-      h("nav", { class: "nav" }, nav.map(([href, label, key]) => h("a", { href, class: active === key ? "on" : "" }, label))),
-      h("button", { class: "iconbtn", title: "로그아웃", html: ICON.out, onclick: logout })),
+      h("nav", { class: "nav" }, nav.map(([href, label, key]) => h("a", { href, class: active === key ? "on" : "" }, label)))),
     h("main", { class: "page" }, content));
 }
 
@@ -923,7 +922,11 @@ async function showSystem() {
           h("td", {}, fmt.time(a.ts)), h("td", {}, a.ip), h("td", { class: "r" }, a.success ? h("span", { class: "pill g" }, "성공") : h("span", { class: "pill y" }, "실패"))))))),
       card("로그",
         h("div", { class: "logbar" }, logSel, h("button", { class: "btn sm", onclick: async () => { const r = await api("GET", `/api/logs?name=${logSel.value}&lines=300`); pre.show(r.text); } }, "보기"), tzSeg(pre)),
-        h("div", { style: "height:12px" }), pre)))));
+        h("div", { style: "height:12px" }), pre))),
+    // 로그아웃은 거의 안 쓰므로 설정 맨 아래에. 이 서버(이 주소)의 이 기기만 로그아웃된다.
+    h("div", { class: "logout-row" },
+      h("button", { class: "btn", onclick: logout }, h("span", { class: "ico", html: ICON.out }), "이 기기에서 로그아웃"),
+      h("span", { class: "small faint" }, "이 서버에서만 로그아웃됩니다. 다른 서버의 로그인은 그대로예요."))));
 }
 
 function serverCard(s, card) {

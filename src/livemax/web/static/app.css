@@ -52,7 +52,7 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .brand .logo { width: 30px; height: 30px; object-fit: contain; flex: none; position: relative; top: 2px; }
 .brand .logo + b { margin-left: -3px; }
 .login .brand .logo { width: 40px; height: 40px; }
-.nav { display: flex; gap: 4px; flex: 1; }
+.nav { display: flex; gap: 4px; flex: 1; justify-content: flex-end; }
 .nav a { padding: 7px 14px; border-radius: 999px; color: var(--muted); font-weight: 500; white-space: nowrap; }
 .nav a:hover { color: var(--text); background: #1f1f1f; }
 .nav a.on { color: #fff; background: var(--accent); box-shadow: 0 4px 14px rgba(229,57,53,.35); }
@@ -246,8 +246,8 @@ pre.log { margin: 0; background: #0d0d0d; border-radius: 8px; padding: 12px; fon
 }
 @media (max-width: 560px) {
   .topbar { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
-  .topbar .iconbtn { margin-left: auto; }
-  .nav { order: 3; flex-basis: 100%; overflow-x: auto; }
+  .nav { order: 3; flex-basis: 100%; justify-content: space-between; overflow-x: auto; }
+  .nav a { padding: 7px 12px; }
   .page { padding: 12px; }
   .grid { grid-template-columns: 1fr; }
   .tiles b { font-size: 15px; }
@@ -361,3 +361,9 @@ tr.locked td:first-child { color: #fff; }
 .live .preview img.idle { opacity: .4; filter: grayscale(.3); }
 .live .preview .idle-tag { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 4px 12px; border-radius: 999px;
   background: rgba(0,0,0,.55); color: #e5e5e5; font-size: 12.5px; font-weight: 600; letter-spacing: .3px; }
+
+/* 설정 맨 아래 로그아웃 (v2.9) */
+.logout-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 4px; padding-top: 20px; border-top: 1px solid var(--line); }
+.logout-row .btn { display: inline-flex; align-items: center; gap: 8px; }
+.logout-row .ico { display: inline-flex; width: 16px; height: 16px; }
+.logout-row .ico svg { width: 16px; height: 16px; }
