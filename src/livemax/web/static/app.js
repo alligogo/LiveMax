@@ -254,6 +254,7 @@ function renderLives(grid, ov) {
         lv.desired ? armBtn(lv, "restart", "btn", "재시작") : h("button", { class: "btn", disabled: true }, "재시작")),
       links: h("div", { class: "links" },
         reconnects(lv),
+        lv.transport === "lm-relay" ? h("span", { class: "faint", title: "새 송출 중계기로 송출 중" }, "새 중계기") : null,
         lv.youtube_video_id ? h("a", { onclick: () => openPreview(lv) }, "유튜브 미리보기") : null,
         h("a", { onclick: () => openLog(lv) }, "로그"),
         h("span", { class: "faint" }, lv.timer_mode !== "off" ? "타이머 방송 — 일일 재시작 안 함" : `다음 자동 재시작 ${fmt.time(lv.next_restart)}`)),
@@ -546,11 +547,17 @@ async function openLiveEditor(lv) {
   const norep = h("input", { class: "input", type: "number", min: 0, max: 1000, value: cur.norepeat_count });
   const xfade = h("input", { class: "input", type: "number", min: 0, max: 10, step: 0.5, value: cur.crossfade });
   const vid = h("input", { class: "input", value: cur.youtube_video_id || "", placeholder: "선택 — youtu.be/ 뒤의 영상 ID" });
+  const fast = h("input", { type: "checkbox" }); fast.checked = !!cur.fast_relay;
+  const fastLab = h("label", { class: "check" + (fast.checked ? " on" : ""), style: "max-width:420px" }, fast,
+    h("span", { class: "nm" }, h("b", {}, "새 송출 중계기 (시험)"), h("span", { class: "desc" }, "CPU 를 줄이는 새 송출 방식. 문제가 생기면 끄면 바로 기존 방식으로 돌아갑니다.")));
+  fast.addEventListener("change", () => fastLab.classList.toggle("on", fast.checked));
   const msg = h("div", { class: "msg err" });
   const adv = h("div", { class: "adv" }, h("div", { class: "section-title", style: "margin:18px 0 12px" }, "추가 설정"),
     h("label", { class: "field" }, h("span", {}, "중복방지 곡 수"), norep),
     h("label", { class: "field" }, h("span", {}, "크로스페이드 (초)"), xfade, h("div", { class: "hint" }, "0 = 오디오 copy (CPU 최소). 0보다 크면 이 라이브만 오디오를 디코딩·재인코딩합니다.")),
-    h("label", { class: "field" }, h("span", {}, "유튜브 영상 ID"), vid, h("div", { class: "hint" }, "넣으면 카드에서 유튜브 미리보기를 열 수 있습니다.")));
+    h("label", { class: "field" }, h("span", {}, "유튜브 영상 ID"), vid, h("div", { class: "hint" }, "넣으면 카드에서 유튜브 미리보기를 열 수 있습니다.")),
+    h("div", { class: "field" }, h("span", { class: "flabel" }, "송출 방식"), fastLab,
+      h("div", { class: "hint" }, "켜거나 끄면 이 라이브의 영상만 잠깐(2~3초) 다시 연결됩니다. 연속으로 실패하면 30분간 자동으로 기존 방식으로 송출합니다.")));
 
   // 타이머
   let tmode = cur.timer_mode || "off";
@@ -577,7 +584,7 @@ async function openLiveEditor(lv) {
   showPane();
 
   const payload = (apply) => ({ name: name.value, channel_id: chId, key_id: keyId, video_folders: vbox.values(), audio_folders: abox.values(),
-    audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, apply,
+    audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, fast_relay: fast.checked, apply,
     timer_mode: tmode, timer_minutes: Number(tH.value || 0) * 60 + Number(tM.value || 0),
     timer_until: tU.value ? new Date(tU.value).getTime() / 1000 : 0, timer_repeat: tRep.checked, timer_gap_minutes: Number(tGap.value || 2) });
   const save = async (apply) => {

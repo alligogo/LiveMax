@@ -55,6 +55,7 @@ DEFAULTS: dict[str, Any] = {
         # 라이브별 stunnel 이 TLS 를 큰 레코드로 처리 → 송출 트래픽 약 25% 절감 (v1 live1 실측 8.0→5.9 Mbps)
         # ipv4: v1 live1 에서 유튜브행 IPv6 경로가 약 10분마다 끊겨 송출이 멈췄다 → IPv4 고정.
         "tls_relay": {"enabled": True, "verify": True, "ipv4": True},
+        "lm_relay": {"enabled": True},  # 라이브별 fast_relay 를 켠 라이브만. 끄면 모두 기존 방식
         "audio_connect_timeout": 60,
     },
     "concat": {"hours": 24, "margin_minutes": 45},
@@ -167,6 +168,7 @@ class Live:
     restart_slot: int = 0
     youtube_video_id: str = ""
     output_url: str = ""
+    fast_relay: bool = False  # 새 송출 중계기(lmrelay) 사용 — CPU 절약 (시험 기능, 라이브별로 켬)
     channel_id: str = ""   # 채널 (v2.4)
     key_id: str = ""       # 그 채널에 등록된 스트림 키
     created_at: float = 0.0
@@ -206,7 +208,8 @@ class Live:
             "video_folders": list(self.video_folders), "audio_folders": list(self.audio_folders),
             "audio_mode": self.audio_mode, "norepeat_count": self.norepeat_count, "crossfade": self.crossfade,
             "harbor_port": self.harbor_port, "restart_slot": self.restart_slot,
-            "youtube_video_id": self.youtube_video_id, "output_url": self.output_url, "created_at": self.created_at,
+            "youtube_video_id": self.youtube_video_id, "output_url": self.output_url, "fast_relay": bool(self.fast_relay),
+            "created_at": self.created_at,
             "channel_id": self.channel_id, "key_id": self.key_id,
             "timer_mode": self.timer_mode, "timer_minutes": int(self.timer_minutes), "timer_until": float(self.timer_until),
             "timer_repeat": bool(self.timer_repeat), "timer_gap_minutes": int(self.timer_gap_minutes),
@@ -255,6 +258,7 @@ def live_from_dict(d: dict) -> Live:
     lv.norepeat_count = int(lv.norepeat_count)
     lv.timer_minutes, lv.timer_gap_minutes = int(lv.timer_minutes), int(lv.timer_gap_minutes)
     lv.timer_until, lv.timer_repeat = float(lv.timer_until or 0), bool(lv.timer_repeat)
+    lv.fast_relay = bool(lv.fast_relay)
     return lv
 
 

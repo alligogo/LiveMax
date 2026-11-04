@@ -33,7 +33,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import channels, concat, db, ffmpeg_cmd, liquidsoap, secrets, tls_relay
+from . import channels, concat, db, ffmpeg_cmd, liquidsoap, rtmp_relay, secrets, tls_relay
 from .config import ConfigError, LiveStore
 from .logsetup import UTCFormatter, FMT
 from .paths import Paths
@@ -67,11 +67,13 @@ class LiveProc:
         self.desired = False
         self.audio: subprocess.Popen | None = None
         self.video: subprocess.Popen | None = None
-        self.relay: tls_relay.Relay | None = None
+        self.relay: tls_relay.Relay | rtmp_relay.RelayProc | None = None
         self.threads: list[threading.Thread] = []
         self.restarts: deque[tuple[float, str]] = deque(maxlen=50)
         self.relay_fails = 0
         self.relay_block_until = 0.0
+        self.lm_fails = 0
+        self.lm_block_until = 0.0
         self.low_speed_since: float | None = None
         self.pending_reason: str | None = None
         self.intentional = False  # 마지막 ffmpeg 종료가 의도한 재시작이었나 (백오프 생략)
@@ -255,12 +257,23 @@ class LiveProc:
 
             base = (live.output_url or settings["output"]["default_url"]).rstrip("/")
             rcfg = settings["output"]["tls_relay"]
-            relay_port = None
-            if rcfg.get("enabled", True) and time.time() >= self.relay_block_until:
-                self.relay = tls_relay.Relay(live.id, paths.run_dir, paths.logs)
-                relay_port = self.relay.start(base, verify=bool(rcfg.get("verify", True)),
-                                              ipv4=bool(rcfg.get("ipv4", True)))
-            out = tls_relay.plan(base, key, relay_port)
+            out = None
+            # 새 중계기(lmrelay): 라이브별로 켠 경우만. 못 띄우거나 연속 실패하면 기존 방식(stunnel)으로
+            if (live.fast_relay and settings["output"].get("lm_relay", {}).get("enabled", True)
+                    and time.time() >= self.lm_block_until):
+                lm = rtmp_relay.RelayProc(live.id, paths.logs)
+                lport = lm.start(base, key, verify=bool(rcfg.get("verify", True)), ipv4=bool(rcfg.get("ipv4", True)))
+                if lport:
+                    self.relay = lm
+                    out = tls_relay.OutputPlan(url=f"tcp://127.0.0.1:{lport}", extra_args=["-flush_packets", "0"],
+                                               mode="lm-relay")
+            if out is None:
+                relay_port = None
+                if rcfg.get("enabled", True) and time.time() >= self.relay_block_until:
+                    self.relay = tls_relay.Relay(live.id, paths.run_dir, paths.logs)
+                    relay_port = self.relay.start(base, verify=bool(rcfg.get("verify", True)),
+                                                  ipv4=bool(rcfg.get("ipv4", True)))
+                out = tls_relay.plan(base, key, relay_port)
             args = ffmpeg_cmd.build(list_path, f"http://127.0.0.1:{live.harbor_port}/{live.id}.aac", out.url,
                                     extra_out=out.extra_args)
             self.log.info("ffmpeg 시작 (%s, %s): %s", out.mode, list_path.name, ffmpeg_cmd.redacted(args, key))
@@ -284,8 +297,15 @@ class LiveProc:
                     self.relay_block_until = time.time() + 1800
                     self.relay_fails = 0
                     self.event("warn", "TLS 중계 연속 실패 — 30분간 직접 RTMPS 로 송출")
+            elif out.mode == "lm-relay" and ran < 60 and not reason and self.desired:
+                self.lm_fails += 1
+                if self.lm_fails >= 3:
+                    self.lm_block_until = time.time() + 1800
+                    self.lm_fails = 0
+                    self.event("warn", "새 중계기 연속 실패 — 30분간 기존 방식(stunnel)으로 송출")
             elif ran >= 60:
                 self.relay_fails = 0
+                self.lm_fails = 0
             if self.desired and not reason:
                 self.restarts.append((time.time(), f"송출 끊김 rc={rc}"))
                 self.event("error", f"ffmpeg 종료 rc={rc} (가동 {int(ran)}초) — 재기동")

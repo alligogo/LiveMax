@@ -422,6 +422,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lv.audio_mode = str(b.get("audio_mode", lv.audio_mode))
         lv.norepeat_count = int(b.get("norepeat_count", lv.norepeat_count))
         lv.crossfade = float(b.get("crossfade", lv.crossfade) or 0)
+        lv.fast_relay = bool(b.get("fast_relay", lv.fast_relay))
         lv.timer_mode = str(b.get("timer_mode", lv.timer_mode))
         lv.timer_minutes = int(b.get("timer_minutes", lv.timer_minutes))
         lv.timer_until = float(b.get("timer_until", lv.timer_until) or 0)
@@ -476,7 +477,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err("스트림 키를 고르세요")
         db.add_event(request.state.conn, "info", "web", "설정 변경" + (" (스트림 키 교체)" if key else ""), lv.id)
         audio_changed = any(before[k] != after[k] for k in ("audio_mode", "norepeat_count", "crossfade"))
-        video_changed = bool(key) or before["video_folders"] != after["video_folders"]
+        video_changed = (bool(key) or before["video_folders"] != after["video_folders"]
+                         or before.get("fast_relay") != after.get("fast_relay"))  # 송출 경로 변경 → 영상만 재시작
         running = sup.proc(lv.id).desired
         if running and before["audio_folders"] != after["audio_folders"]:
             liquidsoap.write_m3u(lv, paths)  # 음악 폴더 변경은 목록만 바꾸면 Liquidsoap 이 다음 곡부터 반영 (끊김 없음)
