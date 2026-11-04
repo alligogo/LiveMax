@@ -289,3 +289,7 @@ div.field { margin-bottom: 14px; }
 .btn.arm.armed { border-color: currentColor; }
 .logo-drop { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px; border: 2px dashed #3a3a3a; border-radius: 10px; transition: all .15s; }
 .logo-drop.over { border-color: var(--green); background: rgba(34,197,94,.06); }
+.pill.on-th { position: absolute; top: 6px; left: 6px; }
+.file .th { position: relative; }
+.file.locked .del { display: none; }
+tr.locked td:first-child { color: #fff; }

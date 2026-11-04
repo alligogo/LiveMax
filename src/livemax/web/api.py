@@ -26,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .. import capacity, catalog, channels, config, db, liquidsoap, notify, secrets, thumbs
 from ..config import ConfigError, Live, live_from_dict
+from ..state import read_json
 from . import auth
 
 log = logging.getLogger("livemax.web")
@@ -523,11 +524,14 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err("잘못된 폴더", 404)
         conn = request.state.conn
         out = []
+        lives = [lv for lv in store.all() if folder in lv.audio_folders] if kind == "audio" else []
         for p in catalog.list_files(paths, kind, folder):
             r = conn.execute("SELECT * FROM media_files WHERE path=?", (str(p),)).fetchone()
+            states = [(lv.name, st) for lv in lives if (st := _song_state(lv, p))]
             out.append({"name": p.name, "size": p.stat().st_size, "duration": r["duration"] if r else None,
                         "bitrate": r["bitrate_kbps"] if r else None, "thumb": bool(r and r["thumb"]),
-                        "added_at": r["added_at"] if r else p.stat().st_mtime})
+                        "added_at": r["added_at"] if r else p.stat().st_mtime,
+                        "playing": [n for n, st in states if st == "playing"], "next": [n for n, st in states if st == "next"]})
         pend_dir = paths.incoming / kind / folder
         pending = sorted(p.name for p in pend_dir.iterdir() if p.is_file()) if pend_dir.is_dir() else []
         return {"files": out, "pending": pending}
@@ -605,14 +609,56 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err("파일 없음", 404)
         conn = request.state.conn
         used = store.folder_usage(kind).get(folder)
-        if used:
+        if used and kind == "video":
+            # 비디오는 송출 중인 24시간 목록에 이미 들어가 있어 중간에 지우면 그 차례에 송출이 끊긴다
             names = ", ".join(lv.name for lv in store.all() if lv.id in used)
-            return err(f"'{names}' 라이브에서 쓰는 폴더라 지울 수 없습니다 — 라이브 설정에서 이 폴더를 빼고 지우세요")
-        p.unlink()
+            return err(f"'{names}' 라이브에서 쓰는 비디오 폴더라 지울 수 없습니다 — 라이브 설정에서 이 폴더를 빼고 지우세요")
+        if used and kind == "audio":
+            lives = [lv for lv in store.all() if lv.id in used]
+            busy = _song_busy(lives, p)
+            if busy:
+                return err(busy)
+            # 경쟁 상태 방지: ① 이 곡을 목록에서 먼저 빼고 ② Liquidsoap 이 목록을 다시 읽을 시간을 준 뒤
+            # ③ 그 사이 '다음 곡'으로 뽑히지 않았는지 다시 확인하고 ④ 지운다. 뽑혔으면 취소하고 목록 복구.
+            liquidsoap.DELETING.add(str(p))
+            try:
+                for lv in lives:
+                    liquidsoap.write_m3u(lv, paths)
+                time.sleep(1.5)
+                busy = _song_busy(lives, p)
+                if busy:
+                    return err(busy)
+                p.unlink()  # 혹시 재생 중이었더라도 리눅스는 열린 파일을 끝까지 읽게 해 준다 (소리가 끊기지 않음)
+            finally:
+                liquidsoap.DELETING.discard(str(p))
+                for lv in lives:
+                    liquidsoap.write_m3u(lv, paths)
+        else:
+            p.unlink()
         catalog.remove(conn, p)
         if kind == "video":
             thumbs.thumb_path(paths, folder, name).unlink(missing_ok=True)
         return {"ok": True}
+
+    def _song_state(lv: Live, p: Path) -> str | None:
+        """이 곡이 그 라이브에서 지금 재생 중('playing')인지, 다음 곡으로 골라졌는지('next')."""
+        if not sup.proc(lv.id).desired:
+            return None
+        cur = (read_json(paths.run_dir / f"{lv.id}.nowplaying.json") or {}).get("file")
+        nxt = (read_json(liquidsoap.next_path(lv, paths)) or {}).get("file")
+        if cur == str(p):
+            return "playing"
+        if nxt == str(p):
+            return "next"
+        return None
+
+    def _song_busy(lives: list, p: Path) -> str | None:
+        for lv in lives:
+            st = _song_state(lv, p)
+            if st:
+                what = "지금 재생 중인" if st == "playing" else "바로 다음에 나올"
+                return f"'{lv.name}' 라이브에서 {what} 곡이라 지금은 지울 수 없습니다 — 곡이 바뀐 뒤 다시 지우세요"
+        return None
 
     @app.get("/api/thumbs/{folder}/{name}")
     def thumb(folder: str, name: str):

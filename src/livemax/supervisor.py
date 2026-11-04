@@ -140,6 +140,7 @@ class LiveProc:
         self.set(state="stopped", message=reason, speed=None, progress_at=None, ffmpeg_started_at=None,
                  out_time=None, bitrate=None, clip=None, clip_folder=None, transport=None)
         (self.sup.paths.run_dir / f"{self.id}.nowplaying.json").unlink(missing_ok=True)
+        (self.sup.paths.run_dir / f"{self.id}.next.json").unlink(missing_ok=True)
         self.event("info", f"정지 ({reason})")
 
     def restart(self, reason: str, audio_too: bool = False) -> None:
@@ -455,7 +456,7 @@ class Supervisor:
         import shutil
 
         run = self.paths.run_dir
-        for suffix in (".liq", ".m3u", ".m3u.tmp", ".tmp", ".nowplaying.json", ".session.json", ".stunnel.conf",
+        for suffix in (".liq", ".m3u", ".m3u.tmp", ".tmp", ".nowplaying.json", ".next.json", ".session.json", ".stunnel.conf",
                        ".stunnel.pid"):
             (run / f"{live_id}{suffix}").unlink(missing_ok=True)
         shutil.rmtree(self.paths.concat_dir / live_id, ignore_errors=True)

@@ -84,3 +84,36 @@ def test_audio_bitrate_range(settings, kbps, ok):
     lo, hi = config.parse_bitrate(settings["spec"]["audio"]["bitrate_min"]), config.parse_bitrate(settings["spec"]["audio"]["bitrate_max"])
     tol = settings["spec"]["audio"]["bitrate_tolerance"]
     assert (lo * (1 - tol) <= kbps <= hi * (1 + tol)) is ok
+
+
+def test_song_delete_in_live_folder(client):
+    """송출 중인 음악 폴더: 지금 곡·다음 곡은 거부, 나머지는 목록에서 먼저 뺀 뒤 삭제."""
+    import json
+
+    from livemax import liquidsoap
+
+    _ready(client)
+    p = client.core.paths
+    folder = p.audio / "재즈-색소폰"
+    for n in ("now.m4a", "next.m4a", "free.m4a"):
+        (folder / n).write_bytes(b"x")
+    client.post("/api/lives", headers=ORIGIN, json={"name": "A", "channel_id": "ch1", "key_id": "k1", **LIVE})
+    lv = client.core.supervisor.store.get("live1")
+    client.core.supervisor.proc("live1").desired = True  # 송출 중으로 간주 (실제 프로세스는 띄우지 않음)
+    (p.run_dir / "live1.nowplaying.json").write_text(json.dumps({"file": str(folder / "now.m4a")}))
+    liquidsoap.next_path(lv, p).write_text(json.dumps({"file": str(folder / "next.m4a")}))
+    liquidsoap.write_m3u(lv, p)
+
+    files = {f["name"]: f for f in client.get("/api/media/audio/재즈-색소폰").json()["files"]}
+    assert files["now.m4a"]["playing"] == ["A"] and files["next.m4a"]["next"] == ["A"] and not files["free.m4a"]["playing"]
+    r = client.delete("/api/media/audio/재즈-색소폰/now.m4a", headers=ORIGIN)
+    assert r.status_code == 400 and "재생 중" in r.json()["error"] and (folder / "now.m4a").exists()
+    r = client.delete("/api/media/audio/재즈-색소폰/next.m4a", headers=ORIGIN)
+    assert r.status_code == 400 and "다음" in r.json()["error"] and (folder / "next.m4a").exists()
+    assert client.delete("/api/media/audio/재즈-색소폰/free.m4a", headers=ORIGIN).json()["ok"]
+    m3u = liquidsoap.m3u_path(lv, p).read_text()
+    assert not (folder / "free.m4a").exists() and "free.m4a" not in m3u and "now.m4a" in m3u
+    assert not liquidsoap.DELETING
+    # 비디오는 송출 중인 폴더면 여전히 삭제 불가
+    (p.video / "Sax After Six" / "c.mp4").write_bytes(b"x")
+    assert client.delete("/api/media/video/Sax After Six/c.mp4", headers=ORIGIN).status_code == 400

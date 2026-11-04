@@ -81,10 +81,10 @@ def test_delete_blocked_in_used_folder(client):
     _ready(client)
     client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "channel_id": "ch1", "key_id": "k1",
                                                   "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later"})
-    p = client.core.paths.audio / "재즈-색소폰" / "a.m4a"
+    p = client.core.paths.video / "Sax After Six" / "a.mp4"
     p.write_bytes(b"x")
-    r = client.delete("/api/media/audio/재즈-색소폰/a.m4a", headers=ORIGIN)
-    assert r.status_code == 400 and "재즈" in r.json()["error"] and p.exists()  # 예약 없이 그냥 거부
+    r = client.delete("/api/media/video/Sax After Six/a.mp4", headers=ORIGIN)
+    assert r.status_code == 400 and "재즈" in r.json()["error"] and p.exists()  # 비디오: 예약 없이 그냥 거부
     client.put("/api/lives/live1", headers=ORIGIN, json={"audio_folders": ["재즈-색소폰"], "video_folders": ["Sax After Six"]})
     client.post("/api/media/audio", json={"name": "free"}, headers=ORIGIN)
     q = client.core.paths.audio / "free" / "b.m4a"

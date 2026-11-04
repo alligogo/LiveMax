@@ -550,15 +550,32 @@ async function renderFolder(kind, root, data) {
   drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); go(e.dataTransfer.files); });
   input.addEventListener("change", () => go(input.files));
 
+  // 송출 상태: 음악은 지금 곡(송출중)·다음 곡, 비디오는 라이브가 쓰는 폴더 전체(송출 목록)와 지금 클립(송출중) → 삭제 잠금
+  const vidUsed = kind === "video" && info?.used_by?.length > 0;
+  const nowClips = new Set((lastOverview?.lives || []).filter((l) => l.state === "running" && l.clip_folder === folder).map((l) => l.clip));
+  const stateOf = (f) => {
+    if (kind === "audio") {
+      if (f.playing?.length) return ["송출중", "r", `${f.playing.join(", ")}에서 지금 나오는 곡`];
+      if (f.next?.length) return ["다음 곡", "y", `${f.next.join(", ")}에서 바로 다음에 나올 곡`];
+      return null;
+    }
+    if (nowClips.has(f.name)) return ["송출중", "r", "지금 송출 중인 클립"];
+    if (vidUsed) return ["송출 목록", "", "라이브가 쓰는 폴더 — 라이브 설정에서 폴더를 빼면 지울 수 있습니다"];
+    return null;
+  };
+  const delBtn = (f, st, cls) => h("button", { class: cls, html: ICON.trash, disabled: !!st,
+    title: st ? `${st[2]} — 지금은 지울 수 없습니다` : "삭제", onclick: () => delFile(kind, folder, f.name) });
   const files = kind === "video"
-    ? h("div", { class: "files" }, detail.files.map((f) => h("div", { class: "file" },
-        h("div", { class: "th" }, f.thumb ? h("img", { loading: "lazy", alt: "", src: `/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}` }) : ico("film")),
+    ? h("div", { class: "files" }, detail.files.map((f) => { const st = stateOf(f); return h("div", { class: "file" + (st ? " locked" : "") },
+        h("div", { class: "th" }, f.thumb ? h("img", { loading: "lazy", alt: "", src: `/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}` }) : ico("film"),
+          st ? h("span", { class: "pill on-th " + st[1], title: st[2] }, st[0]) : null),
         h("div", { class: "meta" }, h("div", { class: "nm", title: f.name }, f.name),
           h("div", { class: "faint" }, `${fmt.dur(f.duration)} · ${fmt.bytes(f.size)}`)),
-        h("button", { class: "btn sm danger del", html: ICON.trash, title: "삭제", onclick: () => delFile(kind, folder, f.name) }))))
-    : h("table", { class: "list-table" }, h("tbody", {}, detail.files.map((f) => h("tr", {},
-        h("td", {}, f.name), h("td", { class: "r" }, fmt.dur(f.duration)), h("td", { class: "r" }, fmt.bytes(f.size)),
-        h("td", { class: "r", style: "width:40px" }, h("button", { class: "btn sm danger", html: ICON.trash, title: "삭제", onclick: () => delFile(kind, folder, f.name) }))))));
+        delBtn(f, st, "btn sm danger del")); }))
+    : h("table", { class: "list-table" }, h("tbody", {}, detail.files.map((f) => { const st = stateOf(f); return h("tr", { class: st ? "locked" : "" },
+        h("td", {}, f.name, st ? h("span", { class: "pill " + st[1], style: "margin-left:8px", title: st[2] }, st[0]) : null),
+        h("td", { class: "r" }, fmt.dur(f.duration)), h("td", { class: "r" }, fmt.bytes(f.size)),
+        h("td", { class: "r", style: "width:40px" }, delBtn(f, st, "btn sm danger"))); })));
 
   const inUse = info?.used_by?.length > 0;
   root.replaceChildren(...[
@@ -570,7 +587,8 @@ async function renderFolder(kind, root, data) {
       h("div", { class: "card-body" }, drop, list,
         detail.pending.length ? h("div", { class: "small", style: "margin-top:12px" }, h("span", { class: "pill y" }, "규격 검증 중"), " ", detail.pending.join(", ")) : null,
         h("div", { class: "small muted", style: "margin-top:14px" }, `${detail.files.length}개 · ${fmt.bytes(info?.size || 0)}`,
-          inUse ? h("span", { class: "faint" }, " · 라이브에서 쓰는 폴더라 파일을 지울 수 없습니다 (추가는 가능)") : null),
+          inUse ? h("span", { class: "faint" }, kind === "video" ? " · 라이브에서 쓰는 폴더라 파일을 지울 수 없습니다 (추가는 가능)"
+            : " · 라이브에서 쓰는 폴더 — '송출중'·'다음 곡'만 빼고 지울 수 있습니다") : null),
         detail.files.length ? files : h("div", { class: "muted small", style: "margin-top:10px" }, "아직 파일이 없습니다."))),
     data.rejected.length ? h("div", { class: "card", style: "margin-top:20px" }, h("div", { class: "card-head" }, "검증 실패 (규격 불일치)"),
       h("div", { class: "card-body" }, h("ul", { class: "alerts" }, data.rejected.slice(0, 30).map((r) =>

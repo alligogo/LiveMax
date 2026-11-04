@@ -39,23 +39,33 @@ def m3u_path(live: Live, paths: Paths) -> Path:
     return paths.run_dir / f"{live.id}.m3u"
 
 
-def playlist_lines(live: Live, paths: Paths) -> str:
-    """선택한 음악 폴더들의 전체 곡 (폴더 순서 → 파일 이름 순)."""
+# 지우는 중인 곡 — 웹의 곡 삭제와 supervisor 의 주기적 목록 갱신이 겹쳐도 다시 목록에 들어가지 않게 공유
+DELETING: set[str] = set()
+
+
+def next_path(live: Live, paths: Paths) -> Path:
+    """Liquidsoap 이 미리 골라 둔 다음 곡 (곡 삭제 보호용)."""
+    return paths.run_dir / f"{live.id}.next.json"
+
+
+def playlist_lines(live: Live, paths: Paths, exclude: set[str] | None = None) -> str:
+    """선택한 음악 폴더들의 전체 곡 (폴더 순서 → 파일 이름 순). exclude: 지우려는 곡을 먼저 목록에서 뺄 때."""
     from . import catalog
 
     files: list[str] = []
     for folder in live.audio_folders:
         files.extend(str(p) for p in catalog.list_files(paths, "audio", folder))
-    return "".join(f"{f}\n" for f in files if "\n" not in f)
+    skip = set(exclude or ()) | DELETING
+    return "".join(f"{f}\n" for f in files if "\n" not in f and f not in skip)
 
 
-def write_m3u(live: Live, paths: Paths) -> bool:
+def write_m3u(live: Live, paths: Paths, exclude: set[str] | None = None) -> bool:
     """내용이 바뀌었을 때만 덮어쓴다. 바뀌었으면 True.
 
     rename 으로 교체하면 Liquidsoap 의 파일 감시가 첫 교체 뒤로 끊긴다 (2.2.4 실측) → 같은 파일에 한 번에 덮어쓴다.
     """
     p = m3u_path(live, paths)
-    text = playlist_lines(live, paths)
+    text = playlist_lines(live, paths, exclude)
     try:
         if p.read_text(encoding="utf-8") == text:
             return False
@@ -88,6 +98,7 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     w(f"live_id = {q(live.id)}")
     w(f"nowplaying_path = {q(np_path)}")
     w(f"m3u_path = {q(m3u)}")
+    w(f"next_path = {q(next_path(live, paths))}")
     w(f"norepeat_n = {live.norepeat_count if norepeat else 0}")
     w("history = ref([])")
     w("rejects = ref(0)")
@@ -107,6 +118,8 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     w("    # 고르는 순간 기록한다 (다음 곡은 지금 곡이 재생되기 전에 미리 골라지므로 재생 시점 기록은 한 박자 늦음)")
     w("    h = list.add(uri, history())")
     w("    history := if list.length(h) > norepeat_n then list.prefix(norepeat_n, h) else h end")
+    w("    # 다음 곡을 기록 — 웹에서 이 곡을 지우려 하면 거부한다 (재생 직전 곡이 사라지지 않게)")
+    w('    file.write(data=json.stringify({file=uri, at=time()}), next_path)')
     w("    true")
     w("  end")
     w("end")
@@ -119,8 +132,7 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     w("")
     args = [f'id={q(f"{live.id}_pl")}', f"mode={q(pl_mode)}", f"loop={'true' if loop else 'false'}",
             'reload_mode="watch"']
-    if norepeat:
-        args.append("check_next=not_recent")
+    args.append("check_next=not_recent")  # 중복방지가 꺼져 있어도 창이 0 이라 모두 통과, '다음 곡' 기록용
     w(f"music = playlist({', '.join(args)}, m3u_path)")
     w(f"silence = single(id={q(f'{live.id}_silence')}, {q(SILENCE_FILE)})")
     # track_sensitive=false: 음악이 준비되는 즉시 무음에서 넘어간다 (시작 때 무음 10초를 끝까지 틀지 않게)
