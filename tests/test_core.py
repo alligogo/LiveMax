@@ -156,6 +156,9 @@ def test_capacity_traffic_bound(settings):
     cap = capacity.compute(settings["capacity"], [5500] * 10, None, 58, 10, 3000, 8000,
                            now=datetime(2026, 11, 15, tzinfo=timezone.utc))
     assert 17 < cap.projected_tb < 20 and cap.limiting == "traffic"
+    # 목표 28TB 까지: 10개(약 18.9TB) + 라이브당 약 1.9TB → 4개 더
+    assert cap.target_tb == 28 and cap.limit_tb == 32
+    assert cap.can_add == int((28 - cap.projected_tb) // cap.per_live_tb)
 
 
 def test_mask_and_redact(caplog):

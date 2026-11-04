@@ -236,6 +236,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                                "live": lv["id"], "message": lv["message"] or ("speed 저하" if lv["status"] == "warn" else "중단")})
         if sysd.get("disk_pct") and sysd["disk_pct"] >= settings["cleanup"]["disk_warn_percent"]:
             alerts.append({"level": "warn", "ts": time.time(), "live": None, "message": f"디스크 {sysd['disk_pct']:.0f}% 사용 중"})
+        if cap.projected_tb > cap.limit_tb:
+            alerts.append({"level": "error", "ts": time.time(), "live": None,
+                           "message": f"이번 달 트래픽이 {cap.projected_tb:.1f}TB 로 예상돼 한계선 {cap.limit_tb:.0f}TB 를 넘습니다 — 라이브를 줄이세요"})
         if REBOOT_FLAG.exists():
             alerts.append({"level": "warn", "ts": REBOOT_FLAG.stat().st_mtime, "live": None,
                            "message": "서버 재부팅 필요 (보안 업데이트 적용 대기) — 설정 > 시스템"})
@@ -246,7 +249,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "server_time": time.time(), "version": core.version, "uptime_since": core.started_at,
             "lives": lives, "system": sysd, "channels": [_channel_brief(c) for c in chstore.all()],
             "capacity": {"can_add": cap.can_add, "limiting": cap.limiting, "projected_tb": cap.projected_tb,
-                         "limit_tb": cap.limit_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb,
+                         "limit_tb": cap.limit_tb, "target_tb": cap.target_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb,
                          "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps, "lives": len(planned)},
             "alerts": alerts[:30], "reboot_required": REBOOT_FLAG.exists(),
         }

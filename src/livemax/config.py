@@ -72,7 +72,7 @@ DEFAULTS: dict[str, Any] = {
     "cleanup": {"interval_minutes": 60, "rejected_days": 7, "incoming_stale_hours": 24, "log_days": 14,
                 "metrics_raw_days": 3, "log_max_mb": 10, "log_keep_mb": 2, "logs_total_mb": 300, "db_max_mb": 200,
                 "disk_warn_percent": 80, "disk_emergency_percent": 90},
-    "capacity": {"monthly_traffic_tb": 30, "port_mbit": 200, "safety_ratio": 0.85, "audio_kbps": 128,
+    "capacity": {"monthly_traffic_tb": 32, "traffic_target_tb": 28, "port_mbit": 200, "safety_ratio": 0.85, "audio_kbps": 128,
                  "overhead_ratio": 0.03, "cpu_percent_total": 400, "ram_mb_per_live": 300},
     "dashboard": {"username": "admin", "bind": "127.0.0.1", "port": 8080, "session_hours": 168,
                   "login_max_failures": 5, "login_block_minutes": 15, "max_upload_mb": 20000},

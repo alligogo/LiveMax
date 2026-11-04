@@ -331,10 +331,10 @@ function renderSide(side, ov) {
     h("div", { class: "card" }, h("div", { class: "card-head" }, "용량"),
       h("div", { class: "card-body" },
         h("div", { class: "big" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "개 더 추가 가능 (안전 기준)")),
-        h("div", { class: "meter" }, h("i", { class: ratio > 0.85 ? "hi" : ratio > 0.7 ? "mid" : "", style: `width:${(ratio * 100).toFixed(0)}%` })),
-        h("div", { class: "small muted", style: "text-align:center" }, `월 예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`),
+        h("div", { class: "meter" }, h("i", { class: (c.projected_tb || 0) > (c.limit_tb || 32) ? "hi" : (c.projected_tb || 0) > (c.target_tb || 28) ? "mid" : "", style: `width:${(ratio * 100).toFixed(0)}%` })),
+        h("div", { class: "small muted", style: "text-align:center" }, `월 예상 ${fmt.num(c.projected_tb, 1)} TB · 목표 ${fmt.num(c.target_tb, 0)} · 한계 ${fmt.num(c.limit_tb, 0)}`),
         h("div", { class: "small faint", style: "text-align:center;margin-top:4px" },
-          `${({ traffic: "월 트래픽", bandwidth: "회선 속도", cpu: "CPU", ram: "메모리" })[c.limiting] || ""} 기준 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB · 한도의 85%까지`))),
+          `${({ traffic: "월 트래픽", bandwidth: "회선 속도", cpu: "CPU", ram: "메모리" })[c.limiting] || ""} 기준 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB · 목표 ${fmt.num(c.target_tb, 0)}TB까지`))),
     h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "시스템"),
       h("div", { class: "card-body" },
         h("div", { class: "group" }, "라이브"),
@@ -857,7 +857,7 @@ async function showSystem() {
     if (relay.checked) return;
     const ok = confirm("⚠ TLS 중계를 끄면 안 됩니다 (권장: 켜 둠)\n\n" +
       "• 서버 송신 트래픽이 라이브마다 약 30~50% 늘어납니다 (5.2 → 약 8 Mbps).\n" +
-      "• 라이브 15개 기준 월 약 25TB → 39TB 로, 우리가 정한 월 25TB 안전선(공정사용 30TB)을 크게 넘습니다.\n" +
+      "• 라이브 15개 기준 월 약 25TB → 39TB 로, 목표 28TB·한계 32TB 를 크게 넘습니다.\n" +
       "• 저장 후 각 라이브가 다음 재시작 때부터 직접 암호화 방식으로 바뀝니다.\n\n" +
       "문제 해결용으로 잠깐 끄는 경우가 아니라면 '취소'를 누르세요.\n정말 끌까요?");
     if (!ok) relay.checked = true;

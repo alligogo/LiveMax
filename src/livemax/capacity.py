@@ -1,7 +1,7 @@
 """자동 계산 지표 (DESIGN 7.3).
 
 - 현재 추세 기준 월 예상 트래픽
-- 월 트래픽 30TB(공정사용 추정 상한) × 85% = 약 25TB 대비 사용률
+- 월 트래픽 목표 28TB 까지 "몇 개 더", 32TB(한계선)를 넘을 것 같으면 경고
 - "안전하게 몇 개 더 추가 가능" — 사용자가 가장 원하는 단일 숫자
 
 병목은 트래픽 총량 하나뿐이지만(DESIGN 2.3), 대역폭·CPU·RAM 도 함께 보고 가장 작은 값을 낸다.
@@ -21,7 +21,8 @@ TB = 1e12
 class Capacity:
     month_tx_tb: float
     projected_tb: float
-    limit_tb: float
+    limit_tb: float  # 한계선 (넘으면 경고)
+    target_tb: float  # 목표선 ("몇 개 더" 계산 기준)
     usage_ratio: float  # projected / limit
     per_live_tb: float
     per_live_mbps: float
@@ -44,6 +45,7 @@ def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | No
     elapsed, total = month_fraction(now)
     safety = float(cfg["safety_ratio"])
     limit_tb = float(cfg["monthly_traffic_tb"])
+    target_tb = float(cfg.get("traffic_target_tb") or limit_tb * safety)
     overhead = 1 + float(cfg["overhead_ratio"])
     audio = float(cfg["audio_kbps"])
 
@@ -59,7 +61,7 @@ def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | No
     projected_tb = max(nominal_tb, trend_tb)
 
     options: dict[str, int] = {}
-    options["traffic"] = int((limit_tb * safety - projected_tb) // per_live_tb) if per_live_tb else 0
+    options["traffic"] = int((target_tb - projected_tb) // per_live_tb) if per_live_tb else 0
     port = float(cfg["port_mbit"])
     cur_mbps = max(current_tx_mbps or 0.0, n * per_live_mbps)
     options["bandwidth"] = int((port * safety - cur_mbps) // per_live_mbps) if per_live_mbps else 0
@@ -81,6 +83,7 @@ def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | No
         month_tx_tb=month_tx_tb,
         projected_tb=projected_tb,
         limit_tb=limit_tb,
+        target_tb=target_tb,
         usage_ratio=projected_tb / limit_tb if limit_tb else 0,
         per_live_tb=per_live_tb,
         per_live_mbps=per_live_mbps,
