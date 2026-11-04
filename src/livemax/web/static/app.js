@@ -89,7 +89,7 @@ function setServerName(n) {
   SERVER_NAME = (n || "").trim();
   document.title = SERVER_NAME ? `LiveMax ${SERVER_NAME}` : "LiveMax";
 }
-const brandParts = () => [h("span", { class: "dot" }), h("b", {}, "LiveMax"), SERVER_NAME ? h("span", { class: "srv" }, SERVER_NAME) : null];
+const brandParts = () => [h("img", { class: "logo", src: "/assets/logo.png", alt: "" }), h("b", {}, "LiveMax"), SERVER_NAME ? h("span", { class: "srv" }, SERVER_NAME) : null];
 
 // ------------------------------------------------------------------ 레이아웃
 let pollTimer = null;
