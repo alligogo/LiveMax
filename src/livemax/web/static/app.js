@@ -354,17 +354,43 @@ function openPreview(lv) {
       style: "width:100%;height:100%;border:0;border-radius:8px", allow: "autoplay; encrypted-media", allowfullscreen: true })), null, { wide: true });
 }
 
+// 로그 파일의 시각은 서버 기준(UTC) 그대로 두고, 화면에서만 한국 시간으로 바꿔 보여 준다.
+// 줄 맨 앞 시각 형식: 2026-11-03T22:32:59.763Z (관리·송출) / 2026/11/03 22:33:00 (음악) / 2026.11.03 22:33:00 (TLS)
+let LOG_KST = (() => { try { return localStorage.getItem("lm.logKst") !== "0"; } catch (e) { return true; } })();
+const KST = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+function logText(raw) {
+  if (!LOG_KST) return raw;
+  return raw.replace(/^(\d{4})[-/.](\d{2})[-/.](\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z?/gm,
+    (m, y, mo, d, hh, mi, ss) => KST.format(new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mi, +ss))) + " KST");
+}
+function logPre(maxH) {
+  const pre = h("pre", { class: "log", style: maxH ? `max-height:${maxH}` : "" }, "");
+  pre.raw = "";
+  pre.show = (raw) => { pre.raw = raw; pre.textContent = logText(raw); pre.scrollTop = pre.scrollHeight; };
+  return pre;
+}
+function tzSeg(pre) {
+  const seg = h("div", { class: "seg tz" }, [[true, "한국 시간"], [false, "UTC (원본)"]].map(([v, l]) =>
+    h("button", { type: "button", class: LOG_KST === v ? "on" : "", onclick: (e) => {
+      LOG_KST = v; try { localStorage.setItem("lm.logKst", v ? "1" : "0"); } catch (er) { /* 무시 */ }
+      [...seg.children].forEach((b) => b.classList.toggle("on", b === e.currentTarget)); pre.show(pre.raw);
+    } }, l)));
+  return seg;
+}
+
 async function openLog(lv) {
   const sel = h("div", { class: "seg" });
-  const pre = h("pre", { class: "log" }, "불러오는 중…");
+  const pre = logPre();
+  pre.textContent = "불러오는 중…";
   const load = async (name) => {
     [...sel.children].forEach((b) => b.classList.toggle("on", b.dataset.n === name));
-    try { const r = await api("GET", `/api/logs?name=${name}&lines=300`); pre.textContent = r.text; pre.scrollTop = pre.scrollHeight; }
+    try { const r = await api("GET", `/api/logs?name=${name}&lines=300`); pre.show(r.text); }
     catch (e) { pre.textContent = e.message; }
   };
   [["live", "송출"], ["audio", "음악"], ["tls", "TLS 중계"]].forEach(([p, label]) =>
     sel.append(h("button", { "data-n": `${p}-${lv.id}`, onclick: () => load(`${p}-${lv.id}`) }, label)));
-  openModal(`로그 — ${lv.name}`, [sel, h("div", { style: "height:12px" }), pre], null, { wide: true });
+  openModal(`로그 — ${lv.name}`, [h("div", { class: "logbar" }, sel, tzSeg(pre)), h("div", { style: "height:12px" }), pre], null, { wide: true });
   load(`live-${lv.id}`);
 }
 
@@ -707,7 +733,7 @@ async function showChannels() {
   mount(shell("channels", h("div", {},
     h("div", { class: "row", style: "margin-bottom:16px" }, h("div", { class: "muted" }, "채널마다 이름·로고·주소와 스트림 키를 등록하면, 라이브를 만들 때 채널과 키를 고르기만 하면 됩니다."),
       h("span", { class: "spacer" }), h("button", { class: "btn primary", onclick: () => openChannelEditor(null) }, "+ 채널 추가")),
-    list.length ? h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(440px,1fr))" }, cards)
+    list.length ? h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(min(440px,100%),1fr))" }, cards)
       : h("div", { class: "card empty" }, h("div", { class: "card-body" }, h("b", {}, "등록된 채널이 없습니다"), h("p", { class: "muted" }, "'채널 추가'로 시작하세요."))))));
 }
 
@@ -777,14 +803,14 @@ async function showSystem() {
   const relay = h("input", { type: "checkbox" }); relay.checked = s.settings.tls_relay;
   const logSel = h("select", { class: "input", style: "max-width:260px" }, h("option", { value: "livemaxd" }, "관리 프로그램 (livemaxd)"),
     (lastOverview?.lives || []).flatMap((l) => [["live", "송출"], ["audio", "음악"], ["tls", "TLS"]].map(([p, n]) => h("option", { value: `${p}-${l.id}` }, `${l.name} — ${n}`))));
-  const pre = h("pre", { class: "log", style: "max-height:40vh" }, "");
+  const pre = logPre("40vh");
   const card = (title, ...body) => h("div", { class: "card", style: "margin-bottom:20px" }, h("div", { class: "card-head" }, title), h("div", { class: "card-body" }, body));
   const imp = h("input", { type: "file", accept: ".zip", hidden: true });
   imp.addEventListener("change", async () => {
     if (!imp.files[0]) return;
     try { const r = await api("POST", "/api/system/import", imp.files[0]); toast(r.message); } catch (e) { toast(e.message, true); }
   });
-  mount(shell("system", h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(420px,1fr))" },
+  mount(shell("system", h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr))" },
     h("div", {},
       serverCard(s, card),
       card("업데이트",
@@ -834,7 +860,7 @@ async function showSystem() {
         h("table", { class: "list-table", style: "margin-top:0" }, h("tbody", {}, s.attempts.slice(0, 10).map((a) => h("tr", {},
           h("td", {}, fmt.time(a.ts)), h("td", {}, a.ip), h("td", { class: "r" }, a.success ? h("span", { class: "pill g" }, "성공") : h("span", { class: "pill y" }, "실패"))))))),
       card("로그",
-        h("div", { class: "row" }, logSel, h("button", { class: "btn sm", onclick: async () => { const r = await api("GET", `/api/logs?name=${logSel.value}&lines=300`); pre.textContent = r.text; pre.scrollTop = pre.scrollHeight; } }, "보기")),
+        h("div", { class: "logbar" }, logSel, h("button", { class: "btn sm", onclick: async () => { const r = await api("GET", `/api/logs?name=${logSel.value}&lines=300`); pre.show(r.text); } }, "보기"), tzSeg(pre)),
         h("div", { style: "height:12px" }), pre)))));
 }
 
