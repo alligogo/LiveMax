@@ -117,3 +117,26 @@ def test_song_delete_in_live_folder(client):
     # 비디오는 송출 중인 폴더면 여전히 삭제 불가
     (p.video / "Sax After Six" / "c.mp4").write_bytes(b"x")
     assert client.delete("/api/media/video/Sax After Six/c.mp4", headers=ORIGIN).status_code == 400
+
+
+def test_new_live_waits_until_started(client):
+    """새 라이브는 저장만 — '대기중'(stopped) + 꺼짐. 부팅 때 저절로 시작되지 않는다."""
+    _ready(client)
+    client.post("/api/lives", headers=ORIGIN, json={"name": "새것", "channel_id": "ch1", "key_id": "k1", **LIVE})
+    lv = client.get("/api/overview").json()["lives"][0]
+    assert lv["enabled"] is False and lv["desired"] is False and lv["status"] == "stopped"
+    assert client.get("/api/overview").json()["capacity"]["lives"] == 0
+    assert not [a for a in client.get("/api/overview").json()["alerts"] if "중단" in a["message"]]
+
+
+def test_never_started_enabled_live_fixed_on_boot(paths, settings, monkeypatch):
+    from conftest import make_live
+    from livemax import daemon
+
+    store = config.LiveStore(paths, settings)
+    store.save(make_live(id="live1", enabled=True))                       # 시작한 적 없음 (세션 없음)
+    store.save(make_live(id="live2", enabled=True, harbor_port=8102, restart_slot=1))
+    (paths.run_dir / "live2.session.json").write_text('{"started_at": 1}')  # 송출하던 라이브
+    monkeypatch.setenv("LIVEMAX_DATA", str(paths.root))
+    daemon.App()
+    assert store.get("live1").enabled is False and store.get("live2").enabled is True

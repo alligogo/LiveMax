@@ -159,10 +159,11 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         state = s.get("state", "stopped")
         speed = s.get("speed")
         tinfo = sup.timer_info(lv)
-        if tinfo["next_start_at"] and state == "stopped":
+        desired = bool(s.get("desired"))
+        if tinfo["next_start_at"] and not desired:
             kind = "waiting"  # 타이머 반복 — 다음 방송 대기
-        elif not lv.enabled and state == "stopped":
-            kind = "stopped"
+        elif not desired:
+            kind = "stopped"  # 송출하지 않는 중 — 화면에는 '대기중' (문제 아님)
         elif state == "running":
             wd = settings["watchdog"]
             if speed is not None and speed < float(wd["speed_min"]) or (s.get("restarts_hour") or 0) >= 3:
@@ -185,11 +186,20 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "song_artist": np_.get("artist") or "",
             "song_folder": Path(np_["file"]).parent.name if np_.get("file") else "", "restarts_hour": s.get("restarts_hour", 0),
             "restarts": s.get("restarts", []), "next_restart": lv.next_restart(settings).timestamp(),
-            "key_masked": key_masked, "key_label": _key_label(lv),
+            "key_masked": key_masked, "key_label": _key_label(lv), "desired": desired,
+            "idle_thumb": None if state == "running" else _idle_thumb(lv),
             "cpu": (core.collector.per_live.get(lv.id) or {}).get("cpu"),
             "rss_mb": (core.collector.per_live.get(lv.id) or {}).get("rss_mb"),
             **tinfo,
         }
+
+    def _idle_thumb(lv: Live) -> dict | None:
+        """송출 전에도 어떤 비디오인지 알 수 있게: 고른 비디오 폴더 중 썸네일이 있는 첫 클립 (숫자 순)."""
+        for folder in lv.video_folders:
+            for p in catalog.list_files(paths, "video", folder):
+                if thumbs.thumb_path(paths, folder, p.name).exists():
+                    return {"folder": folder, "name": p.name}
+        return None
 
     def _key_label(lv: Live) -> str:
         ch = chstore.get(lv.channel_id) if lv.channel_id else None
@@ -214,9 +224,11 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         snap = sup.snapshot()
         lives = [live_view(lv, snap) for lv in store.all()]
         sysd = dict(core.collector.latest)
-        cap = capacity.compute(settings["capacity"], [_video_kbps(conn, lv) for lv in lives if lv["enabled"]],
+        planned = [lv for lv in lives if lv["enabled"]]  # 송출 중이거나 켜 둔 라이브만 (대기중은 제외)
+        cap = capacity.compute(settings["capacity"], [_video_kbps(conn, lv) for lv in planned],
                                sysd.get("month_tx_bytes"), sysd.get("net_tx_mbps"), sysd.get("cpu_pct"),
-                               sysd.get("mem_used_mb"), sysd.get("mem_total_mb"))
+                               sysd.get("mem_used_mb"), sysd.get("mem_total_mb"),
+                               live_cpu=[lv["cpu"] for lv in planned if lv["state"] == "running" and lv.get("cpu")])
         alerts = []
         for lv in lives:
             if lv["status"] in ("warn", "down"):
@@ -235,7 +247,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "lives": lives, "system": sysd, "channels": [_channel_brief(c) for c in chstore.all()],
             "capacity": {"can_add": cap.can_add, "limiting": cap.limiting, "projected_tb": cap.projected_tb,
                          "limit_tb": cap.limit_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb,
-                         "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps},
+                         "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps, "lives": len(planned)},
             "alerts": alerts[:30], "reboot_required": REBOOT_FLAG.exists(),
         }
 
@@ -411,6 +423,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             lv, apply = _live_payload(b, lv)
             if not lv.key_id:
                 return err("채널과 스트림 키를 고르세요 (키는 채널 메뉴에서 등록)")
+            lv.enabled = False  # 새 라이브는 '대기중' — 목록에서 시작을 눌러야 송출 (재부팅 때 저절로 시작되지 않게)
             store.save(lv)
         except (ConfigError, ValueError) as e:
             return err(str(e))

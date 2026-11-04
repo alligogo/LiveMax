@@ -49,7 +49,8 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 300; letter-spacing: .5px; }
 .brand b { font-weight: 800; letter-spacing: .2px; }
 .brand .srv { font-weight: 300; color: #d6d6d6; margin-left: -2px; }
-.brand .logo { width: 30px; height: 30px; object-fit: contain; flex: none; }
+.brand .logo { width: 30px; height: 30px; object-fit: contain; flex: none; position: relative; top: 2px; }
+.brand .logo + b { margin-left: -3px; }
 .login .brand .logo { width: 40px; height: 40px; }
 .nav { display: flex; gap: 4px; flex: 1; }
 .nav a { padding: 7px 14px; border-radius: 999px; color: var(--muted); font-weight: 500; white-space: nowrap; }
@@ -357,3 +358,6 @@ tr.locked td:first-child { color: #fff; }
 @media (max-width: 560px) {
   .row-live { grid-template-columns: 1fr; }
 }
+.live .preview img.idle { opacity: .4; filter: grayscale(.3); }
+.live .preview .idle-tag { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 4px 12px; border-radius: 999px;
+  background: rgba(0,0,0,.55); color: #e5e5e5; font-size: 12.5px; font-weight: 600; letter-spacing: .3px; }

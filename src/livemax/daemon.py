@@ -31,6 +31,19 @@ class App:
         self.settings = config.load_settings(self.paths)
         logsetup.setup("livemaxd", self.paths.logs, self.settings["logging"]["level"])
         db.init(self.paths.db)
+        try:  # v2.8: 시작한 적 없이 '켜짐'으로 저장된 라이브(새 라이브 저장 버그)를 대기중으로 — 부팅 때 저절로 시작되지 않게
+            flag = self.paths.state / "migrations" / "v28-never-started"
+            if not flag.exists():
+                store = config.LiveStore(self.paths, self.settings)
+                for lv in store.all():
+                    if lv.enabled and not (self.paths.run_dir / f"{lv.id}.session.json").exists():
+                        lv.enabled = False
+                        store.save(lv)
+                        log.info("%s: 시작한 적 없는 라이브를 대기중으로 바로잡음", lv.id)
+                flag.parent.mkdir(parents=True, exist_ok=True)
+                flag.write_text("done")
+        except Exception:  # noqa: BLE001
+            log.exception("v2.8 라이브 상태 정리 실패")
         try:  # v2.4: 라이브별 키 → 채널 키 (1회)
             msg = channels.migrate_legacy(self.paths, self.settings)
             if msg:

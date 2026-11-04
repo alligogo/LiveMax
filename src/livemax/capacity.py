@@ -39,7 +39,7 @@ def month_fraction(now: datetime) -> tuple[float, float]:
 
 def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | None, current_tx_mbps: float | None,
             cpu_used_pct: float | None, mem_used_mb: float | None, mem_total_mb: float | None,
-            now: datetime | None = None) -> Capacity:
+            now: datetime | None = None, live_cpu: list[float] | None = None) -> Capacity:
     now = now or datetime.now(timezone.utc)
     elapsed, total = month_fraction(now)
     safety = float(cfg["safety_ratio"])
@@ -66,7 +66,10 @@ def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | No
     if cpu_used_pct is not None and n:
         cpu_total = float(cfg["cpu_percent_total"])
         used = cpu_used_pct * cpu_total / 100  # 전체 코어 합산 %
-        per = max(used / n, 1.0)
+        # 라이브 1개 몫은 라이브 프로그램(ffmpeg+Liquidsoap)이 실제로 쓴 CPU 평균으로 잡는다.
+        # 서버 전체 CPU 를 라이브 수로 나누면 업로드 검사·썸네일 같은 일시 작업까지 라이브 몫이 되어 과대 계산된다.
+        measured = [c for c in (live_cpu or []) if c and c > 0]
+        per = max(sum(measured) / len(measured), 1.0) if measured else max(used / n, 1.0)
         options["cpu"] = int((cpu_total * safety - used) // per)
     if mem_used_mb is not None and mem_total_mb:
         per = float(cfg["ram_mb_per_live"])

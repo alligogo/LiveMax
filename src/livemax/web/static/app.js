@@ -31,7 +31,7 @@ const fmt = {
   bytes(b) { if (b == null) return "-"; const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return `${b.toFixed(i ? 1 : 0)} ${u[i]}`; },
   num(v, d = 1, unit = "") { return v == null ? "-" : `${Number(v).toFixed(d)}${unit}`; },
 };
-const STATUS = { ok: "정상", warn: "경고", down: "중단", restarting: "재시작중", stopped: "정지됨", waiting: "다음 방송 대기" };
+const STATUS = { ok: "정상", warn: "경고", down: "중단", restarting: "재시작중", stopped: "대기중", waiting: "다음 방송 대기" };
 const MODES = [["random_norepeat", "중복방지 랜덤"], ["random", "완전 랜덤"], ["sequential_loop", "순차 반복"], ["sequential", "순차 1회"]];
 const ICON = {
   edit: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
@@ -218,7 +218,10 @@ function renderLives(grid, ov) {
       preview: (withBadge) => h("div", { class: "preview" },
         running && lv.clip && lv.clip_folder
           ? h("img", { src: `/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}`, alt: "", loading: "lazy" })
-          : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
+          : !running && lv.idle_thumb  // 송출 전: 고른 비디오의 첫 클립을 반투명으로
+            ? [h("img", { class: "idle", src: `/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}`, alt: "", loading: "lazy" }),
+               h("span", { class: "idle-tag" }, "송출 전")]
+            : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
         running ? h("span", { class: "badge-live" }, "LIVE") : null,
         withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 18), h("span", {}, ch.name)) : null),
       status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null, STATUS[lv.status] || lv.status),
@@ -240,10 +243,11 @@ function renderLives(grid, ov) {
         timerLine(lv, now),
         lv.message ? h("div", { class: "msg" + (lv.status === "down" ? " err" : "") }, lv.message) : null],
       actions: h("div", { class: "actions" },
-        lv.enabled
+        // 송출 중(또는 타이머 반복 대기)일 때만 정지·재시작, 아니면 시작
+        lv.desired || lv.status === "waiting"
           ? armBtn(lv, "stop", "btn danger", lv.status === "waiting" ? "반복 끄고 정지" : "정지")
           : h("button", { class: "btn primary", onclick: () => liveAction(lv, "start") }, "시작"),
-        lv.enabled ? armBtn(lv, "restart", "btn", "재시작") : h("button", { class: "btn", disabled: true }, "재시작")),
+        lv.desired ? armBtn(lv, "restart", "btn", "재시작") : h("button", { class: "btn", disabled: true }, "재시작")),
       links: h("div", { class: "links" },
         reconnects(lv),
         lv.youtube_video_id ? h("a", { onclick: () => openPreview(lv) }, "유튜브 미리보기") : null,
@@ -327,7 +331,9 @@ function renderSide(side, ov) {
       h("div", { class: "card-body" },
         h("div", { class: "big" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "개 더 추가 가능 (안전 기준)")),
         h("div", { class: "meter" }, h("i", { class: ratio > 0.85 ? "hi" : ratio > 0.7 ? "mid" : "", style: `width:${(ratio * 100).toFixed(0)}%` })),
-        h("div", { class: "small muted", style: "text-align:center" }, `월 예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`))),
+        h("div", { class: "small muted", style: "text-align:center" }, `월 예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`),
+        h("div", { class: "small faint", style: "text-align:center;margin-top:4px" },
+          `${({ traffic: "월 트래픽", bandwidth: "회선 속도", cpu: "CPU", ram: "메모리" })[c.limiting] || ""} 기준 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB · 한도의 85%까지`))),
     h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "시스템"),
       h("div", { class: "card-body" },
         h("div", { class: "group" }, "라이브"),
