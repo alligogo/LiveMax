@@ -299,7 +299,9 @@ const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => op
 // 이번 방송(세션) 동안 자동 재연결·재시작 횟수 — 가동 시간 대신 "몇 번 끊겼다 붙었나"를 보여준다
 function reconnects(lv) {
   if (!lv.session_started_at) return null;
-  const list = (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at);
+  // 일부러 한 재시작(매일 자동·설정 저장·재시작 버튼)은 끊김으로 세지 않는다 — 진짜 문제만
+  const planned = /^(일일 재시작|설정 적용|사용자 재시작)/;
+  const list = (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at && !planned.test(r.reason || ""));
   if (!list.length) return h("span", { class: "faint" }, "끊김 없음");
   const last = list[list.length - 1];
   return h("span", { class: "warnline", title: list.map((r) => `${fmt.time(r.ts)} ${r.reason}`).join("\n") },
