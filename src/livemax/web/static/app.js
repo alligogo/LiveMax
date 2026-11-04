@@ -45,6 +45,10 @@ const ICON = {
   warn: '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/></svg>',
   grid: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   list: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="5" height="4" rx="1"/><rect x="3" y="10" width="5" height="4" rx="1"/><rect x="3" y="16" width="5" height="4" rx="1"/><path d="M11 6h10M11 12h10M11 18h10"/></svg>',
+  sun: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2" fill="currentColor" fill-opacity=".25"/><path d="M12 2v2.5M12 19.5V22M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2 12h2.5M19.5 12H22M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>',
+  cloud: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.2 4.4 4.4 0 0 0 7 18z" fill="currentColor" fill-opacity=".2"/></svg>',
+  storm: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 15.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 6.7 4.4 4.4 0 0 0 7 15.5z" fill="currentColor" fill-opacity=".2"/><path d="m12.5 13-2.5 4h3.5l-2.5 4"/></svg>',
+  idle: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></svg>',
   film: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/></svg>',
 };
 const ico = (name, cls) => h("span", { class: "ico " + (cls || ""), html: ICON[name] });
@@ -290,18 +294,43 @@ function renderLives(grid, ov) {
       LIVES_VIEW = v; renderLives(grid, ov);
       try { await api("PUT", "/api/system/settings", { lives_view: v }); } catch (e) { /* 표시만 바뀌고 저장은 다음에 */ }
     } });
-  const bar = ov.lives.length ? h("div", { class: "viewbar" }, h("span", { class: "muted small" }, `라이브 ${ov.lives.length}개`), h("span", { class: "spacer" }),
-    h("div", { class: "seg" }, viewBtn("grid", "블록 보기"), viewBtn("list", "목록 보기"))) : null;
-  grid.replaceChildren(addBtn("m-only"), bar, ...sections);
+  // 맨 위 한 줄: [미니 관제 | 보기 전환]. 좁은 화면에서는 관제 → 라이브 추가 → (라이브 N개 · 보기 전환) 순서로 쌓인다
+  const bar = ov.lives.length ? h("div", { class: "viewbar" }, pulseBox(ov), addBtn("m-only"),
+    h("span", { class: "vb-count muted small" }, `라이브 ${ov.lives.length}개`), h("span", { class: "spacer" }),
+    h("div", { class: "seg" }, viewBtn("grid", "블록 보기"), viewBtn("list", "목록 보기"))) : addBtn("m-only");
+  grid.replaceChildren(bar, ...sections);
 }
 const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => openLiveEditor(null) }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
+
+// 일부러 한 재시작(매일 자동·설정 저장·재시작 버튼)은 끊김으로 세지 않는다 — 진짜 문제만
+const PLANNED = /^(일일 재시작|설정 적용|사용자 재시작)/;
+const drops = (lv) => (lv.session_started_at ? (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at && !PLANNED.test(r.reason || "")) : []);
+
+// 라이브 화면 맨 위 미니 관제: 가동률(송출하려는 라이브 중 정상 비율)과 상태 수. 맑음(파랑)/주의(보라)/심각(빨강)
+function pulseBox(ov) {
+  const active = ov.lives.filter((l) => l.desired);
+  const n = { ok: 0, warn: 0, down: 0 };
+  active.forEach((l) => { if (l.status === "ok") n.ok++; else if (l.status === "down") n.down++; else n.warn++; });  // 재시작중도 '경고'로
+  const idle = ov.lives.length - active.length;
+  const dropCnt = active.reduce((a, l) => a + drops(l).length, 0);
+  const level = !active.length ? "idle" : n.down ? "bad" : n.warn ? "warn" : "good";
+  const pct = active.length ? Math.floor((n.ok / active.length) * 100) : null;
+  const icon = { good: "sun", warn: "cloud", bad: "storm", idle: "idle" }[level];
+  const cpu = ov.system?.cpu_pct;
+  const stat = (k, v, cls) => h("span", { class: "ps " + (cls || "") }, k, " ", h("b", {}, v));
+  return h("div", { class: "pulse " + level, role: "status" },
+    h("span", { class: "p-ico", html: ICON[icon] }),
+    h("div", { class: "p-title" }, pct == null ? "준비중" : ["가동률 ", h("b", {}, `${pct}%`)]),
+    cpu != null ? h("span", { class: "p-cpu" + (cpu >= 85 ? " hot" : ""), title: "서버 전체 CPU 사용량" }, "CPU ", h("b", {}, `${Math.round(cpu)}%`)) : null,
+    h("div", { class: "p-stats" },
+      stat("라이브", active.length), stat("정상", n.ok), stat("경고", n.warn, n.warn ? "hot" : ""), stat("중단", n.down, n.down ? "hot" : ""),
+      stat("끊김", dropCnt, dropCnt ? "hot" : ""), idle ? stat("대기", idle, "dim") : null));
+}
 
 // 이번 방송(세션) 동안 자동 재연결·재시작 횟수 — 가동 시간 대신 "몇 번 끊겼다 붙었나"를 보여준다
 function reconnects(lv) {
   if (!lv.session_started_at) return null;
-  // 일부러 한 재시작(매일 자동·설정 저장·재시작 버튼)은 끊김으로 세지 않는다 — 진짜 문제만
-  const planned = /^(일일 재시작|설정 적용|사용자 재시작)/;
-  const list = (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at && !planned.test(r.reason || ""));
+  const list = drops(lv);
   if (!list.length) return h("span", { class: "faint" }, "끊김 없음");
   const last = list[list.length - 1];
   return h("span", { class: "warnline", title: list.map((r) => `${fmt.time(r.ts)} ${r.reason}`).join("\n") },
