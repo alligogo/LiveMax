@@ -101,9 +101,9 @@ class UpdateChecker:
                 return
 
     def refresh_async(self) -> None:
-        """설정 화면을 열었을 때 10분 넘은 결과면 뒤에서 다시 확인."""
+        """설정 화면을 열었을 때 1분 넘은 결과면 뒤에서 다시 확인."""
         ts = self.state.get("checked_at") or 0
-        if time.time() - ts < 600 or not self._lock.acquire(blocking=False):
+        if time.time() - ts < 60 or not self._lock.acquire(blocking=False):
             return
 
         def go():
