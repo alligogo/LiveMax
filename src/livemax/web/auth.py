@@ -148,7 +148,14 @@ def get_session(conn: sqlite3.Connection, token: str | None) -> sqlite3.Row | No
         conn.execute("DELETE FROM sessions WHERE token_hash=?", (row["token_hash"],))
         return None
     if now - row["last_seen"] > 60:
-        conn.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", (now, row["token_hash"]))
+        # '최근 접속' 표시용일 뿐이라 DB 가 잠겨 있으면 기다리지 않고 건너뛴다
+        try:
+            conn.execute("PRAGMA busy_timeout=200")
+            conn.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", (now, row["token_hash"]))
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.execute("PRAGMA busy_timeout=10000")
     return row
 
 

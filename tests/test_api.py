@@ -35,11 +35,15 @@ def _ready(client):
     client.post("/api/password", json={"current": client.initial_pw, "new": NEW}, headers=ORIGIN)
     for kind, name in (("video", "Sax After Six"), ("audio", "재즈-색소폰")):
         assert client.post(f"/api/media/{kind}", json={"name": name}, headers=ORIGIN).json()["ok"]
+    # 채널 + 스트림 키 (키는 채널에서만 등록)
+    assert client.post("/api/channels", json={"name": "재즈 채널"}, headers=ORIGIN).json()["id"] == "ch1"
+    assert client.post("/api/channels/ch1/keys", json={"label": "메인", "key": "fake-0000-0000-0000-9z9z"},
+                       headers=ORIGIN).json()["id"] == "k1"
 
 
 def test_create_live_masks_key(client):
     _ready(client)
-    r = client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "stream_key": "fake-0000-0000-0000-9z9z",
+    r = client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "channel_id": "ch1", "key_id": "k1",
                                                        "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later"})
     assert r.json() == {"ok": True, "id": "live1"}
     ov = client.get("/api/overview").text
@@ -51,7 +55,7 @@ def test_create_live_masks_key(client):
 
 def test_create_live_requires_folders_and_key(client):
     _ready(client)
-    r = client.post("/api/lives", headers=ORIGIN, json={"name": "x", "stream_key": "k", "video_folders": [], "audio_folders": ["재즈-색소폰"]})
+    r = client.post("/api/lives", headers=ORIGIN, json={"name": "x", "channel_id": "ch1", "key_id": "k1", "video_folders": [], "audio_folders": ["재즈-색소폰"]})
     assert r.status_code == 400 and "비디오 폴더" in r.json()["error"]
     r = client.post("/api/lives", headers=ORIGIN, json={"name": "x", "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"]})
     assert r.status_code == 400 and "스트림 키" in r.json()["error"]
@@ -75,7 +79,7 @@ def test_resumable_upload(client):
 
 def test_delete_blocked_in_used_folder(client):
     _ready(client)
-    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "stream_key": "fake-0000-0000-0000-9z9z",
+    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "channel_id": "ch1", "key_id": "k1",
                                                   "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later"})
     p = client.core.paths.audio / "재즈-색소폰" / "a.m4a"
     p.write_bytes(b"x")
@@ -90,7 +94,7 @@ def test_delete_blocked_in_used_folder(client):
 
 def test_timer_fields_roundtrip(client):
     _ready(client)
-    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "stream_key": "fake-0000-0000-0000-9z9z",
+    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "channel_id": "ch1", "key_id": "k1",
                                                   "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later",
                                                   "timer_mode": "duration", "timer_minutes": 710, "timer_repeat": True,
                                                   "timer_gap_minutes": 3})
@@ -131,7 +135,7 @@ def test_update_result_shown(client):
 
 def test_stopped_live_shows_no_stale_stats(client):
     _ready(client)
-    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "stream_key": "fake-0000-0000-0000-9z9z",
+    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "channel_id": "ch1", "key_id": "k1",
                                                   "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later"})
     p = client.core.supervisor.proc("live1")
     p.set(state="running", bitrate=5186.0, clip="1.mp4", clip_folder="Sax After Six", out_time=100.0)

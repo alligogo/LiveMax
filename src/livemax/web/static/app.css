@@ -246,3 +246,31 @@ pre.log { margin: 0; background: #0d0d0d; border-radius: 8px; padding: 12px; fon
   .tiles b { font-size: 15px; }
   .modal-body { padding: 14px; }
 }
+
+/* ---------------- 채널 (v2.4) ---------------- */
+.groups { display: grid; gap: 26px; }
+.ch-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; min-width: 0; }
+.ch-name { display: inline-flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; color: #fff; white-space: nowrap; text-transform: none; letter-spacing: 0; }
+a.ch-name:hover span { text-decoration: underline; }
+.ch-rule { flex: 1; height: 1px; background: linear-gradient(90deg, #3a3a3a, transparent); min-width: 30px; }
+.ch-desc { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
+.ch-logo { border-radius: 50%; object-fit: cover; flex: none; background: #2a2a2a; }
+.ch-logo.ph { display: inline-grid; place-items: center; background: #15803d; color: #fff; font-weight: 700; }
+.live .preview .ch-badge { position: absolute; right: 10px; bottom: 10px; display: inline-flex; align-items: center; gap: 7px;
+  max-width: calc(100% - 20px); padding: 4px 10px 4px 5px; border-radius: 999px; background: rgba(0,0,0,.62);
+  backdrop-filter: blur(4px); color: #fff; font-size: 12.5px; font-weight: 600; }
+.live .preview .ch-badge span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live .preview a.ch-badge:hover { background: rgba(0,0,0,.8); }
+.keys { display: grid; gap: 8px; }
+.check.taken { opacity: .55; cursor: not-allowed; }
+.pill.r { background: rgba(239,68,68,.18); color: #ff8a8a; }
+.logo-prev { width: 56px; height: 56px; border-radius: 50%; background: #1b1b1b; display: grid; place-items: center; overflow: hidden; }
+.logo-prev img { width: 100%; height: 100%; object-fit: cover; }
+a.link { color: #7cc4ff; word-break: break-all; } a.link:hover { text-decoration: underline; }
+.danger-box { border: 1px solid rgba(239,68,68,.5); background: rgba(239,68,68,.08); border-radius: 8px; padding: 14px 16px; }
+.danger-box b { color: #ff9b9b; } .danger-box ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+.btn.danger.solid { background: var(--red); color: #fff; } .btn.danger.solid:disabled { background: transparent; color: #ff8a8a; }
+#net-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 200; background: #b45309; color: #fff; text-align: center;
+  font-size: 13px; padding: 6px 12px; }
+@media (max-width: 560px) { .ch-desc { display: none; } .ch-card .row input { min-width: 100% !important; } }
+div.field { margin-bottom: 14px; }

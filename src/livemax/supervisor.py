@@ -33,7 +33,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import concat, db, ffmpeg_cmd, liquidsoap, secrets, tls_relay
+from . import channels, concat, db, ffmpeg_cmd, liquidsoap, secrets, tls_relay
 from .config import ConfigError, LiveStore
 from .logsetup import UTCFormatter, FMT
 from .paths import Paths
@@ -238,7 +238,7 @@ class LiveProc:
                 self.set(state="error", message=str(e))
                 self.event("error", str(e))
                 return False
-            kp = paths.stream_key(live.id)
+            kp = channels.live_key_path(paths, live)
             if not kp.exists() or not kp.read_text().strip():
                 self.set(state="error", message="스트림 키 없음")
                 return False
@@ -405,8 +405,8 @@ class Supervisor:
 
     # ---------------------------------------------------------------- 공개 API
     def _check_startable(self, lv) -> None:
-        if not self.paths.stream_key(lv.id).exists():
-            raise ConfigError("스트림 키를 먼저 입력하세요")
+        if not channels.live_key_path(self.paths, lv).exists():
+            raise ConfigError("스트림 키를 먼저 고르세요 (채널 메뉴에서 등록)")
         if lv.timer_mode == "until" and float(lv.timer_until) <= time.time() + 60:
             raise ConfigError("타이머 종료 시각이 이미 지났습니다 — 라이브 설정에서 바꾸세요")
 
@@ -487,7 +487,7 @@ class Supervisor:
         gap = float(self.settings["supervisor"]["boot_start_gap_seconds"])
         first = True
         for lv in self.store.all():
-            if not lv.enabled or not self.paths.stream_key(lv.id).exists():
+            if not lv.enabled or not channels.live_key_path(self.paths, lv).exists():
                 continue
             ses, now = self.session(lv.id), time.time()
             if ses.get("next_start_at"):

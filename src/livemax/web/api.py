@@ -19,11 +19,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
-from fastapi import FastAPI, Request
+from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
-from .. import capacity, catalog, config, db, liquidsoap, notify, secrets, thumbs
+from .. import capacity, catalog, channels, config, db, liquidsoap, notify, secrets, thumbs
 from ..config import ConfigError, Live, live_from_dict
 from . import auth
 
@@ -48,6 +49,7 @@ def client_ip(request: Request) -> str:
 def create_app(core) -> FastAPI:  # core = daemon.App
     paths, settings, sup = core.paths, core.settings, core.supervisor
     store = sup.store
+    chstore = channels.ChannelStore(paths)
     notifier = getattr(core, "notifier", None) or notify.Notifier(paths, settings)
     # 호스트의 /var/run/reboot-required 를 livemax tick(호스트 타이머)이 data/state/host 로 복사해 준다
     REBOOT_FLAG = paths.state / "host" / "reboot-required"
@@ -57,6 +59,26 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         log.warning("관리자 초기 비밀번호를 생성했습니다: %s", auth.initial_file())
 
     # ------------------------------------------------------------------ 미들웨어
+    # 요청 처리 루프(이벤트 루프)는 DB·디스크를 절대 직접 기다리지 않는다.
+    # v2.3 까지는 여기서 DB 를 바로 열고 세션을 갱신했는데, 정리·지표 저장이 DB 를 잠깐 잠그면 그동안
+    # 화면 파일(app.js)까지 모든 요청이 멈췄다 (실측: 쓰기 잠금 6초 → 모든 응답 5초+).
+    def _pre(request: Request, path: str):
+        conn = db.connect(paths.db)
+        request.state.conn = conn
+        request.state.ip = client_ip(request)
+        if request.method not in ("GET", "HEAD"):
+            origin = request.headers.get("origin") or request.headers.get("referer") or ""
+            if urlparse(origin).netloc != request.headers.get("host", ""):
+                return err("잘못된 요청 출처", 403)
+        if path not in ("/api/session", "/api/login"):
+            sess = auth.get_session(conn, request.cookies.get(auth.COOKIE))
+            if not sess:
+                return err("로그인이 필요합니다", 401)
+            request.state.session = sess
+            if auth.must_change() and path not in ("/api/password", "/api/logout"):
+                return err("초기 비밀번호를 먼저 변경하세요", 428)
+        return None
+
     @app.middleware("http")
     async def guard(request: Request, call_next):
         path = request.url.path
@@ -64,27 +86,22 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             resp = await call_next(request)
             resp.headers["X-Frame-Options"] = "DENY"
             return resp
-        conn = db.connect(paths.db)
-        request.state.conn = conn
-        request.state.ip = client_ip(request)
+        t0 = time.monotonic()
         try:
-            if request.method not in ("GET", "HEAD"):
-                origin = request.headers.get("origin") or request.headers.get("referer") or ""
-                if urlparse(origin).netloc != request.headers.get("host", ""):
-                    return err("잘못된 요청 출처", 403)
-            if path not in ("/api/session", "/api/login"):
-                sess = auth.get_session(conn, request.cookies.get(auth.COOKIE))
-                if not sess:
-                    return err("로그인이 필요합니다", 401)
-                request.state.session = sess
-                if auth.must_change() and path not in ("/api/password", "/api/logout"):
-                    return err("초기 비밀번호를 먼저 변경하세요", 428)
+            denied = await run_in_threadpool(_pre, request, path)
+            if denied is not None:
+                return denied
             resp = await call_next(request)
             if "cache-control" not in resp.headers:  # 썸네일처럼 직접 캐시를 정한 응답은 그대로 (매번 다시 받지 않게)
                 resp.headers["Cache-Control"] = "no-store"
             return resp
         finally:
-            conn.close()
+            conn = getattr(request.state, "conn", None)
+            if conn is not None:
+                await run_in_threadpool(conn.close)
+            took = time.monotonic() - t0
+            if took > 3 and not path.startswith("/api/uploads"):
+                log.warning("느린 요청 %.1fs %s %s", took, request.method, path)
 
     # ------------------------------------------------------------------ 로그인
     @app.get("/api/session")
@@ -94,8 +111,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 "username": settings["dashboard"]["username"], "server_name": config.server_name(settings)}
 
     @app.post("/api/login")
-    async def login(request: Request):
-        body = await request.json()
+    def login(request: Request, body: dict = Body(default={})):
         conn, ip, d = request.state.conn, request.state.ip, settings["dashboard"]
         remain = auth.blocked_seconds(conn, ip, int(d["login_max_failures"]), int(d["login_block_minutes"]))
         if remain:
@@ -122,8 +138,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return resp
 
     @app.post("/api/password")
-    async def password(request: Request):
-        b = await request.json()
+    def password(request: Request, b: dict = Body(default={})):
         cur, new = str(b.get("current", "")), str(b.get("new", ""))
         if not auth.verify_password(cur):
             return err("현재 비밀번호가 틀립니다")
@@ -157,7 +172,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         else:
             kind = "down"
         np_ = s.get("nowplaying") or {}
-        key_path = paths.stream_key(lv.id)
+        key_path = channels.live_key_path(paths, lv)
         key_masked = secrets.mask(key_path.read_text().strip()) if key_path.exists() else ""
         return {
             **lv.to_dict(), "status": kind, "state": state, "message": s.get("message", ""),
@@ -208,12 +223,138 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             alerts.append({"id": e["id"], "level": e["level"], "ts": e["ts"], "live": e["live_id"], "message": e["message"]})
         return {
             "server_time": time.time(), "version": core.version, "uptime_since": core.started_at,
-            "lives": lives, "system": sysd,
+            "lives": lives, "system": sysd, "channels": [_channel_brief(c) for c in chstore.all()],
             "capacity": {"can_add": cap.can_add, "limiting": cap.limiting, "projected_tb": cap.projected_tb,
                          "limit_tb": cap.limit_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb,
                          "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps},
             "alerts": alerts[:30], "reboot_required": REBOOT_FLAG.exists(),
         }
+
+    def _channel_brief(c) -> dict:
+        return {"id": c.id, "name": c.name, "description": c.description, "url": c.url,
+                "logo": f"/api/channels/{c.id}/logo?v={c.logo_ver}" if c.logo else ""}
+
+    # ------------------------------------------------------------------ 채널
+    def _channel_full(c, lives, snap) -> dict:
+        users = channels.key_users(lives)
+        keys = []
+        for k in c.keys:
+            lv = users.get((c.id, k["id"]))
+            live_now = bool(lv and snap.get(lv.id, {}).get("desired"))
+            keys.append({"id": k["id"], "label": k["label"], "masked": chstore.masked(c.id, k["id"]),
+                         "used_by": lv.id if lv else None, "used_by_name": lv.name if lv else None,
+                         "status": "live" if live_now else ("registered" if lv else "free")})
+        return {**_channel_brief(c), "keys": keys, "lives": [lv.id for lv in lives if lv.channel_id == c.id]}
+
+    @app.get("/api/channels")
+    def channels_list():
+        lives, snap = store.all(), sup.snapshot()
+        return {"channels": [_channel_full(c, lives, snap) for c in chstore.all()]}
+
+    def _channel_fields(c, b: dict):
+        c.name = str(b.get("name", c.name) or "").strip()[:40]
+        c.description = str(b.get("description", c.description) or "").strip()[:120]
+        c.url = str(b.get("url", c.url) or "").strip()[:300]
+
+    @app.post("/api/channels")
+    def channel_create(request: Request, b: dict = Body(default={})):
+        c = chstore.new(str(b.get("name", "")))
+        try:
+            _channel_fields(c, b)
+            chstore.save(c)
+        except ConfigError as e:
+            return err(str(e))
+        db.add_event(request.state.conn, "info", "web", f"채널 추가: {c.name}")
+        return {"ok": True, "id": c.id}
+
+    @app.put("/api/channels/{cid}")
+    def channel_update(cid: str, b: dict = Body(default={})):
+        c = chstore.get(cid)
+        if not c:
+            return err("채널 없음", 404)
+        try:
+            _channel_fields(c, b)
+            chstore.save(c)
+        except ConfigError as e:
+            return err(str(e))
+        return {"ok": True}
+
+    @app.delete("/api/channels/{cid}")
+    def channel_delete(request: Request, cid: str):
+        c = chstore.get(cid)
+        if not c:
+            return err("채널 없음", 404)
+        used = [lv.name for lv in store.all() if lv.channel_id == cid]
+        if used:
+            return err(f"이 채널의 라이브({', '.join(used)})를 먼저 지우거나 다른 채널로 옮기세요")
+        chstore.delete(cid)
+        db.add_event(request.state.conn, "info", "web", f"채널 삭제: {c.name} (스트림 키 {len(c.keys)}개 함께 삭제)")
+        return {"ok": True}
+
+    @app.post("/api/channels/{cid}/keys")
+    def channel_key_add(request: Request, cid: str, b: dict = Body(default={})):
+        c = chstore.get(cid)
+        if not c:
+            return err("채널 없음", 404)
+        try:
+            kid = chstore.add_key(c, str(b.get("label", "")), str(b.get("key", "")))
+        except ConfigError as e:
+            return err(str(e))
+        db.add_event(request.state.conn, "info", "web", f"채널 '{c.name}' 스트림 키 추가: {b.get('label', '')}")
+        return {"ok": True, "id": kid}
+
+    @app.delete("/api/channels/{cid}/keys/{kid}")
+    def channel_key_delete(request: Request, cid: str, kid: str):
+        c = chstore.get(cid)
+        if not c or not c.key(kid):
+            return err("키 없음", 404)
+        lv = channels.key_users(store.all()).get((cid, kid))
+        if lv:
+            return err(f"'{lv.name}' 라이브가 쓰는 키라 지울 수 없습니다 — 라이브에서 다른 키로 바꾸거나 라이브를 지우세요")
+        chstore.remove_key(c, kid)
+        db.add_event(request.state.conn, "info", "web", f"채널 '{c.name}' 스트림 키 삭제")
+        return {"ok": True}
+
+    @app.post("/api/channels/{cid}/logo")
+    async def channel_logo_upload(cid: str, request: Request):
+        data = await request.body()
+        return await run_in_threadpool(_save_logo, cid, data)
+
+    def _save_logo(cid: str, data: bytes):
+        c = chstore.get(cid)
+        if not c:
+            return err("채널 없음", 404)
+        if len(data) > channels.LOGO_MAX:
+            return err("로고는 1MB 이하로 올려 주세요")
+        t = channels.logo_type(data)
+        if not t:
+            return err("로고는 PNG, JPG, WEBP 이미지만 됩니다")
+        p = chstore.logo_path(cid)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(p)
+        c.logo, c.logo_ver = t, c.logo_ver + 1
+        chstore.save(c)
+        return {"ok": True}
+
+    @app.delete("/api/channels/{cid}/logo")
+    def channel_logo_delete(cid: str):
+        c = chstore.get(cid)
+        if not c:
+            return err("채널 없음", 404)
+        chstore.logo_path(cid).unlink(missing_ok=True)
+        c.logo, c.logo_ver = "", c.logo_ver + 1
+        chstore.save(c)
+        return {"ok": True}
+
+    @app.get("/api/channels/{cid}/logo")
+    def channel_logo(cid: str):
+        c = chstore.get(cid)
+        p = chstore.logo_path(cid) if c else None
+        if not c or not c.logo or not p.exists():
+            return err("not found", 404)
+        return FileResponse(p, media_type=channels.LOGO_TYPES[c.logo],
+                            headers={"Cache-Control": "private, max-age=2592000", "X-Content-Type-Options": "nosniff"})
 
     @app.get("/api/overview")
     def overview(request: Request):
@@ -231,8 +372,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return {"ok": True}
 
     # ------------------------------------------------------------------ 라이브
-    async def _live_payload(request: Request, lv: Live) -> tuple[Live, str, str]:
-        b = await request.json()
+    def _live_payload(b: dict, lv: Live) -> tuple[Live, str, str]:
         lv.name = str(b.get("name", lv.name)).strip()[:80]
         lv.video_folders = [str(x) for x in b.get("video_folders", lv.video_folders)]
         lv.audio_folders = [str(x) for x in b.get("audio_folders", lv.audio_folders)]
@@ -245,20 +385,26 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lv.timer_repeat = bool(b.get("timer_repeat", lv.timer_repeat))
         lv.timer_gap_minutes = int(b.get("timer_gap_minutes", lv.timer_gap_minutes))
         lv.youtube_video_id = str(b.get("youtube_video_id", lv.youtube_video_id) or "").strip()
-        return lv, str(b.get("stream_key", "") or "").strip(), str(b.get("apply", "now"))
+        if "channel_id" in b or "key_id" in b:
+            cid, kid = str(b.get("channel_id") or ""), str(b.get("key_id") or "")
+            ch = chstore.get(cid) if cid else None
+            if cid and not ch:
+                raise ConfigError("채널이 없습니다")
+            if kid and not (ch and ch.key(kid) and chstore.key_path(cid, kid).exists()):
+                raise ConfigError("그 채널에 등록된 스트림 키가 아닙니다")
+            lv.channel_id, lv.key_id = cid, kid
+        return lv, str(b.get("apply", "now"))
 
     @app.post("/api/lives")
-    async def live_create(request: Request):
-        b = await request.json()
+    def live_create(request: Request, b: dict = Body(default={})):
         lv = store.new(str(b.get("name", "")).strip()[:80])
         try:
-            lv, key, apply = await _live_payload(request, lv)
-            if not key:
-                return err("스트림 키를 입력하세요")
+            lv, apply = _live_payload(b, lv)
+            if not lv.key_id:
+                return err("채널과 스트림 키를 고르세요 (키는 채널 메뉴에서 등록)")
             store.save(lv)
         except (ConfigError, ValueError) as e:
             return err(str(e))
-        secrets.write_secret(paths.stream_key(lv.id), key)
         db.add_event(request.state.conn, "info", "web", f"라이브 생성: {lv.name}", lv.id)
         if apply == "now":
             try:
@@ -268,20 +414,21 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return {"ok": True, "id": lv.id}
 
     @app.put("/api/lives/{live_id}")
-    async def live_update(request: Request, live_id: str):
+    def live_update(request: Request, live_id: str, b: dict = Body(default={})):
         lv = store.get(live_id)
         if not lv:
             return err("라이브 없음", 404)
         before = lv.to_dict()
         try:
-            lv, key, apply = await _live_payload(request, lv)
+            lv, apply = _live_payload(b, lv)
             store.save(lv)
         except (ConfigError, ValueError) as e:
             return err(str(e))
-        if key:
-            secrets.write_secret(paths.stream_key(lv.id), key)
-        db.add_event(request.state.conn, "info", "web", "설정 변경" + (" (스트림 키 교체)" if key else ""), lv.id)
         after = lv.to_dict()
+        key = (before["channel_id"], before["key_id"]) != (after["channel_id"], after["key_id"])
+        if key and not after["key_id"]:
+            return err("스트림 키를 고르세요")
+        db.add_event(request.state.conn, "info", "web", "설정 변경" + (" (스트림 키 교체)" if key else ""), lv.id)
         audio_changed = any(before[k] != after[k] for k in ("audio_mode", "norepeat_count", "crossfade"))
         video_changed = bool(key) or before["video_folders"] != after["video_folders"]
         running = sup.proc(lv.id).desired
@@ -385,8 +532,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return {"files": out, "pending": pending}
 
     @app.post("/api/media/{kind}")
-    async def folder_create(request: Request, kind: str):
-        name = str((await request.json()).get("name", "")).strip()
+    def folder_create(request: Request, kind: str, b: dict = Body(default={})):
+        name = str(b.get("name", "")).strip()
         if not _kind(kind) or not config.valid_folder_name(name):
             return err("폴더 이름은 문자/숫자로 시작하고 문자·숫자·공백·._-() 만 쓸 수 있습니다")
         (paths.kind_root(kind) / name).mkdir(parents=True, exist_ok=True)
@@ -394,8 +541,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return {"ok": True}
 
     @app.put("/api/media/{kind}/{folder}")
-    async def folder_rename(request: Request, kind: str, folder: str):
-        new = str((await request.json()).get("name", "")).strip()
+    def folder_rename(request: Request, kind: str, folder: str, b: dict = Body(default={})):
+        new = str(b.get("name", "")).strip()
         if not _kind(kind) or not config.valid_folder_name(folder) or not config.valid_folder_name(new):
             return err("폴더 이름 오류")
         used = store.folder_usage(kind).get(folder)
@@ -415,18 +562,38 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return {"ok": True}
 
     @app.delete("/api/media/{kind}/{folder}")
-    def folder_delete(kind: str, folder: str):
+    def folder_delete(request: Request, kind: str, folder: str, confirm: str = ""):
+        """폴더와 안의 파일을 모두 영구 삭제 (휴지통 없음). 실수 방지로 폴더 이름을 그대로 다시 받아야 한다."""
         if not _kind(kind) or not config.valid_folder_name(folder):
             return err("폴더 이름 오류")
         used = store.folder_usage(kind).get(folder)
         if used:
-            return err(f"{', '.join(used)} 에서 사용 중이라 삭제할 수 없습니다")
-        if catalog.list_files(paths, kind, folder):
-            return err("폴더가 비어 있지 않습니다. 파일을 먼저 삭제하세요")
-        shutil.rmtree(paths.kind_root(kind) / folder, ignore_errors=True)
-        shutil.rmtree(paths.incoming / kind / folder, ignore_errors=True)
-        shutil.rmtree(paths.thumbs_dir / kind / folder, ignore_errors=True)
-        return {"ok": True}
+            names = ", ".join(lv.name for lv in store.all() if lv.id in used)
+            return err(f"'{names}' 라이브에서 쓰는 폴더라 지울 수 없습니다 — 라이브 설정에서 이 폴더를 먼저 빼세요")
+        if confirm != folder:
+            return err("확인용 폴더 이름이 일치하지 않습니다")
+        root = paths.kind_root(kind) / folder
+        files = [p for p in root.rglob("*") if p.is_file()] if root.is_dir() else []
+        size = sum(p.stat().st_size for p in files)
+        # 원본 · 업로드 대기 · 썸네일 · 격리 · 카탈로그 기록까지 남김없이
+        for d in (root, paths.incoming / kind / folder, paths.thumbs_dir / kind / folder, paths.rejected / kind / folder):
+            shutil.rmtree(d, ignore_errors=True)
+        for meta in paths.uploads.glob("*.json"):  # 이 폴더로 올리다 끊긴 조각
+            try:
+                m = json.loads(meta.read_text())
+            except (OSError, ValueError):
+                continue
+            if m.get("kind") == kind and m.get("folder") == folder:
+                meta.with_suffix(".part").unlink(missing_ok=True)
+                meta.unlink(missing_ok=True)
+        conn = request.state.conn
+        conn.execute("DELETE FROM media_files WHERE kind=? AND folder=?", (kind, folder))
+        conn.execute("DELETE FROM rejections WHERE kind=? AND folder=?", (kind, folder))
+        if root.exists():
+            return err("일부 파일을 지우지 못했습니다 — 다시 시도하세요", 500)
+        msg = f"{'비디오' if kind == 'video' else '음악'} 폴더 '{folder}' 삭제 — 파일 {len(files)}개, {size / 1e6:.0f}MB"
+        db.add_event(conn, "info", "web", msg)
+        return {"ok": True, "message": msg}
 
     @app.delete("/api/media/{kind}/{folder}/{name}")
     def file_delete(request: Request, kind: str, folder: str, name: str):
@@ -460,8 +627,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return hashlib.sha1(f"{kind}/{folder}/{name}/{size}".encode()).hexdigest()[:24]
 
     @app.post("/api/uploads")
-    async def upload_begin(request: Request):
-        b = await request.json()
+    def upload_begin(request: Request, b: dict = Body(default={})):
         kind, folder, name, size = str(b.get("kind")), str(b.get("folder")), Path(str(b.get("name", ""))).name, int(b.get("size", 0))
         if not _kind(kind) or not config.valid_folder_name(folder) or not (paths.kind_root(kind) / folder).is_dir():
             return err("폴더 없음")
@@ -489,11 +655,20 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if offset != cur:
             return JSONResponse({"ok": False, "offset": cur}, status_code=409)
         size = json.loads(meta.read_text())["size"]
-        with open(part, "ab") as f:
+        f = await run_in_threadpool(open, part, "ab")
+        try:
+            buf = bytearray()
             async for chunk in request.stream():
-                f.write(chunk)
-                if f.tell() > size:
-                    break
+                buf += chunk
+                if len(buf) >= 1 << 20:  # 1MB 씩 모아 스레드에서 쓴다 (디스크가 느려도 다른 요청은 안 막힘)
+                    await run_in_threadpool(f.write, bytes(buf))
+                    buf.clear()
+                    if f.tell() > size:
+                        break
+            if buf:
+                await run_in_threadpool(f.write, bytes(buf))
+        finally:
+            await run_in_threadpool(f.close)
         new = part.stat().st_size
         if new > size:
             part.unlink(); meta.unlink()
@@ -508,6 +683,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if not meta.exists() or not part.exists():
             return err("업로드 정보 없음", 404)
         m = json.loads(meta.read_text())
+        if not (paths.kind_root(m["kind"]) / m["folder"]).is_dir():
+            part.unlink(missing_ok=True); meta.unlink(missing_ok=True)
+            return err("폴더가 삭제되었습니다", 404)
         if part.stat().st_size != m["size"]:
             return err("아직 다 올라가지 않았습니다")
         dest_dir = paths.incoming / m["kind"] / m["folder"]
@@ -580,8 +758,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 "catalog": [{"key": k, "label": lb, "desc": ds} for k, lb, ds, _ in notify.CATEGORIES]}
 
     @app.put("/api/system/notify")
-    async def notify_settings(request: Request):
-        b = await request.json()
+    def notify_settings(request: Request, b: dict = Body(default={})):
         tok = str(b.get("token") or "").strip()
         if tok:
             if len(tok) > 200 or not tok.isascii() or " " in tok:
@@ -619,8 +796,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err(str(e))
 
     @app.put("/api/system/settings")
-    async def system_settings(request: Request):
-        b = await request.json()
+    def system_settings(request: Request, b: dict = Body(default={})):
         if "restart_base_utc" in b:
             try:
                 config.hhmm_to_minutes(b["restart_base_utc"])
@@ -667,7 +843,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     @app.post("/api/system/import")
     async def import_(request: Request):
-        raw = await request.body()
+        return await run_in_threadpool(_import_zip, await request.body())
+
+    def _import_zip(raw: bytes):
         try:
             z = zipfile.ZipFile(io.BytesIO(raw))
         except zipfile.BadZipFile:

@@ -16,7 +16,7 @@ import signal
 import threading
 import time
 
-from . import cleanup, config, db, ingest, logsetup, notify, thumbs
+from . import channels, cleanup, config, db, ingest, logsetup, notify, thumbs
 from .collector import Collector
 from .paths import get_paths
 from .supervisor import Supervisor
@@ -31,6 +31,13 @@ class App:
         self.settings = config.load_settings(self.paths)
         logsetup.setup("livemaxd", self.paths.logs, self.settings["logging"]["level"])
         db.init(self.paths.db)
+        try:  # v2.4: 라이브별 키 → 채널 키 (1회)
+            msg = channels.migrate_legacy(self.paths, self.settings)
+            if msg:
+                with db.session(self.paths.db) as c:
+                    db.add_event(c, "info", "channels", msg)
+        except Exception:  # noqa: BLE001
+            log.exception("채널 이전 실패 — 기존 키로 계속 송출")
         self.stop = threading.Event()
         self.supervisor = Supervisor(self.paths, self.settings)
         self.notifier = notify.Notifier(self.paths, self.settings)

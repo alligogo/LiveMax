@@ -1,0 +1,86 @@
+"""v2.4 채널: 키는 채널에서만 등록·마스킹, 한 키는 한 라이브만, 로고 검증, 기존 키 자동 이전, 폴더 통째 삭제."""
+
+import pytest
+
+from conftest import make_live
+from test_api import ORIGIN, _ready
+from livemax import channels, config, secrets
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 100
+LIVE = {"video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later"}
+
+
+def test_keys_masked_and_single_use(client):
+    _ready(client)
+    c = client
+    assert c.post("/api/channels/ch1/keys", json={"label": "중복", "key": "fake-0000-0000-0000-9z9z"}, headers=ORIGIN).status_code == 400
+    assert c.post("/api/channels/ch1/keys", json={"label": "서브", "key": "fake-1111-1111-1111-7y7y"}, headers=ORIGIN).json()["id"] == "k2"
+    assert c.post("/api/lives", headers=ORIGIN, json={"name": "A", "channel_id": "ch1", "key_id": "k1", **LIVE}).json()["ok"]
+    r = c.post("/api/lives", headers=ORIGIN, json={"name": "B", "channel_id": "ch1", "key_id": "k1", **LIVE})
+    assert r.status_code == 400 and "'A'" in r.json()["error"]  # 같은 키는 다른 라이브에서 못 씀
+    body = c.get("/api/channels").text
+    assert "fake-0000" not in body and "fake-1111" not in body and "****9z9z" in body
+    keys = c.get("/api/channels").json()["channels"][0]["keys"]
+    assert [(k["id"], k["status"], k["used_by_name"]) for k in keys] == [("k1", "registered", "A"), ("k2", "free", None)]
+    assert c.delete("/api/channels/ch1/keys/k1", headers=ORIGIN).status_code == 400  # 쓰는 키는 삭제 불가
+    assert c.delete("/api/channels/ch1", headers=ORIGIN).status_code == 400          # 라이브가 있는 채널은 삭제 불가
+    assert c.delete("/api/channels/ch1/keys/k2", headers=ORIGIN).json()["ok"]
+    assert not channels.ChannelStore(c.core.paths).key_path("ch1", "k2").exists()
+    # 다른 채널의 키 ID 를 섞어 쓸 수 없음
+    c.post("/api/channels", json={"name": "둘째"}, headers=ORIGIN)
+    assert c.post("/api/lives", headers=ORIGIN, json={"name": "C", "channel_id": "ch2", "key_id": "k1", **LIVE}).status_code == 400
+
+
+def test_channel_fields_and_logo(client):
+    _ready(client)
+    c = client
+    assert c.put("/api/channels/ch1", json={"url": "javascript:alert(1)"}, headers=ORIGIN).status_code == 400
+    assert c.put("/api/channels/ch1", json={"url": "https://www.youtube.com/@jazz", "description": "재즈"}, headers=ORIGIN).json()["ok"]
+    assert c.post("/api/channels/ch1/logo", content=b"<svg onload=alert(1)>", headers=ORIGIN).status_code == 400
+    assert c.post("/api/channels/ch1/logo", content=PNG, headers=ORIGIN).json()["ok"]
+    ch = c.get("/api/overview").json()["channels"][0]
+    assert ch["url"] == "https://www.youtube.com/@jazz" and ch["logo"].startswith("/api/channels/ch1/logo?v=")
+    r = c.get(ch["logo"])
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content == PNG
+
+
+def test_migrate_legacy_keys(paths, settings):
+    ls = config.LiveStore(paths, settings)
+    for i, key in ((1, "fake-aaaa-aaaa-aaaa-0001"), (2, "fake-bbbb-bbbb-bbbb-0002")):
+        ls.save(make_live(id=f"live{i}", name=f"라이브{i}", harbor_port=8100 + i, restart_slot=i))
+        secrets.write_secret(paths.stream_key(f"live{i}"), key)
+    assert "2개" in channels.migrate_legacy(paths, settings)
+    cs = channels.ChannelStore(paths)
+    ch = cs.all()[0]
+    assert ch.name == "내 채널" and [k["label"] for k in ch.keys] == ["라이브1", "라이브2"]
+    lv2 = ls.get("live2")
+    assert (lv2.channel_id, lv2.key_id) == ("ch1", "k2") and not paths.stream_key("live2").exists()
+    assert secrets.read_secret(channels.live_key_path(paths, lv2)) == "fake-bbbb-bbbb-bbbb-0002"
+    assert channels.migrate_legacy(paths, settings) is None  # 1번만
+
+
+def test_folder_delete_removes_everything(client):
+    _ready(client)
+    p = client.core.paths
+    (p.audio / "재즈-색소폰" / "a.m4a").write_bytes(b"x" * 10)
+    (p.incoming / "audio" / "재즈-색소폰").mkdir(parents=True, exist_ok=True)
+    (p.incoming / "audio" / "재즈-색소폰" / "b.m4a").write_bytes(b"x")
+    assert client.delete("/api/media/audio/재즈-색소폰", headers=ORIGIN).status_code == 400            # 확인 이름 없음
+    assert client.delete("/api/media/audio/재즈-색소폰?confirm=틀림", headers=ORIGIN).status_code == 400
+    r = client.delete("/api/media/audio/재즈-색소폰?confirm=재즈-색소폰", headers=ORIGIN)
+    assert r.json()["ok"] and "1개" in r.json()["message"]
+    assert not (p.audio / "재즈-색소폰").exists() and not (p.incoming / "audio" / "재즈-색소폰").exists()
+
+
+def test_folder_in_use_cannot_be_deleted(client):
+    _ready(client)
+    client.post("/api/lives", headers=ORIGIN, json={"name": "A", "channel_id": "ch1", "key_id": "k1", **LIVE})
+    r = client.delete("/api/media/video/Sax After Six?confirm=Sax After Six", headers=ORIGIN)
+    assert r.status_code == 400 and "'A'" in r.json()["error"]
+
+
+@pytest.mark.parametrize("kbps,ok", [(128, True), (160, True), (192, True), (256, False)])
+def test_audio_bitrate_range(settings, kbps, ok):
+    lo, hi = config.parse_bitrate(settings["spec"]["audio"]["bitrate_min"]), config.parse_bitrate(settings["spec"]["audio"]["bitrate_max"])
+    tol = settings["spec"]["audio"]["bitrate_tolerance"]
+    assert (lo * (1 - tol) <= kbps <= hi * (1 + tol)) is ok

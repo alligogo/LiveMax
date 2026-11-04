@@ -43,7 +43,9 @@ DEFAULTS: dict[str, Any] = {
         "video": {"codec": "h264", "profile": "High", "resolutions": [[1280, 720], [1920, 1080], [2560, 1440], [3840, 2160]],
                   "fps": [24, 25, 30, 50, 60], "min_bitrate": "5000k", "keyframe_interval": 2.0, "keyframe_tolerance": 0.05,
                   "containers": ["mp4", "mkv"]},
-        "audio": {"codec": "aac", "profile": "LC", "bitrate": "128k", "bitrate_tolerance": 0.10,
+        # bitrate 는 크로스페이드를 켠 라이브가 다시 압축할 때 쓰는 값. 업로드는 128k~192k 를 받는다 (송출은 파일 그대로)
+        "audio": {"codec": "aac", "profile": "LC", "bitrate": "128k", "bitrate_min": "128k", "bitrate_max": "192k",
+                  "bitrate_tolerance": 0.10,
                   "sample_rate": 44100, "channels": 2, "containers": ["m4a", "aac"]},
     },
     "ingest": {"poll_seconds": 3, "stable_seconds": 10},
@@ -161,6 +163,8 @@ class Live:
     restart_slot: int = 0
     youtube_video_id: str = ""
     output_url: str = ""
+    channel_id: str = ""   # 채널 (v2.4)
+    key_id: str = ""       # 그 채널에 등록된 스트림 키
     created_at: float = 0.0
     # 타이머: off | duration(방송 시간 뒤 종료) | until(지정 시각에 종료)
     #   유튜브 '자동 중지'를 켜 두면 송출이 끝날 때 방송이 끝나고 다시보기 영상으로 남는다 (12시간 이하만 보관)
@@ -199,6 +203,7 @@ class Live:
             "audio_mode": self.audio_mode, "norepeat_count": self.norepeat_count, "crossfade": self.crossfade,
             "harbor_port": self.harbor_port, "restart_slot": self.restart_slot,
             "youtube_video_id": self.youtube_video_id, "output_url": self.output_url, "created_at": self.created_at,
+            "channel_id": self.channel_id, "key_id": self.key_id,
             "timer_mode": self.timer_mode, "timer_minutes": int(self.timer_minutes), "timer_until": float(self.timer_until),
             "timer_repeat": bool(self.timer_repeat), "timer_gap_minutes": int(self.timer_gap_minutes),
         }
@@ -231,6 +236,8 @@ class Live:
             raise ConfigError("종료 날짜·시각을 입력하세요")
         if not (1 <= int(self.timer_gap_minutes) <= 120):
             raise ConfigError("다시 시작 간격은 1~120분")
+        if bool(self.channel_id) != bool(self.key_id):
+            raise ConfigError("채널과 스트림 키를 함께 고르세요")
         if self.youtube_video_id and not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", self.youtube_video_id):
             raise ConfigError("유튜브 영상 ID 형식 오류")
 
@@ -295,6 +302,8 @@ class LiveStore:
                 raise ConfigError("오디오 포트 중복")
             if other.restart_slot == lv.restart_slot:
                 raise ConfigError("재시작 슬롯 중복")
+            if lv.key_id and (other.channel_id, other.key_id) == (lv.channel_id, lv.key_id):
+                raise ConfigError(f"이 스트림 키는 '{other.name}' 라이브에 이미 등록되어 있습니다")
         _atomic_write(self._file(lv.id), yaml.safe_dump(lv.to_dict(), allow_unicode=True, sort_keys=False))
 
     def delete(self, live_id: str) -> None:

@@ -185,24 +185,42 @@ def clean_runtime(paths: Paths, rep: Report, dry: bool, live_ids: set[str]) -> N
 
 
 def rollup_metrics(conn, raw_days: float, now: float, dry: bool) -> int:
-    """원본 30일 초과분을 시간 단위로 집계한 뒤 원본 삭제."""
+    """원본 지표 중 raw_days 보다 오래된 것을 시간 단위로 집계한 뒤 원본 삭제.
+
+    하루치씩 나눠 짧은 트랜잭션으로 처리한다 — 한 번에 수십만 행을 지우면 그동안 DB 쓰기가 막힌다."""
     cutoff = now - raw_days * 86400
     if dry:
         return conn.execute("SELECT COUNT(*) FROM metrics_system WHERE ts < ?", (cutoff,)).fetchone()[0]
-    conn.execute("BEGIN")
+    oldest = conn.execute("SELECT MIN(ts) FROM (SELECT MIN(ts) AS ts FROM metrics_system "
+                          "UNION ALL SELECT MIN(ts) FROM metrics_live)").fetchone()[0]
+    n = 0
+    start = (int(oldest) // 3600) * 3600 if oldest else cutoff
+    while start < cutoff:
+        end = min(start + 86400, (int(cutoff) // 3600) * 3600) if start + 3600 <= cutoff else cutoff
+        if end <= start:
+            break
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO metrics_system_hourly
+                   SELECT CAST(ts/3600 AS INTEGER)*3600, AVG(cpu_pct), MAX(cpu_pct), AVG(steal_pct), MAX(steal_pct),
+                          AVG(mem_used_mb), MAX(disk_used_gb), AVG(net_tx_mbps), MAX(net_tx_mbps), MAX(month_tx_gb),
+                          MAX(lives_running), COUNT(*)
+                   FROM metrics_system WHERE ts >= ? AND ts < ? GROUP BY CAST(ts/3600 AS INTEGER)""", (start, end))
+            conn.execute(
+                """INSERT OR REPLACE INTO metrics_live_hourly
+                   SELECT CAST(ts/3600 AS INTEGER)*3600, live_id, AVG(speed), MIN(speed), AVG(cpu_pct), MAX(rss_mb), COUNT(*)
+                   FROM metrics_live WHERE ts >= ? AND ts < ? GROUP BY CAST(ts/3600 AS INTEGER), live_id""", (start, end))
+            n += conn.execute("DELETE FROM metrics_system WHERE ts >= ? AND ts < ?", (start, end)).rowcount
+            conn.execute("DELETE FROM metrics_live WHERE ts >= ? AND ts < ?", (start, end))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        start = end
+        time.sleep(0.05)  # 다른 쓰기(지표·이벤트)가 끼어들 틈
+    conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.execute(
-            """INSERT OR REPLACE INTO metrics_system_hourly
-               SELECT CAST(ts/3600 AS INTEGER)*3600, AVG(cpu_pct), MAX(cpu_pct), AVG(steal_pct), MAX(steal_pct),
-                      AVG(mem_used_mb), MAX(disk_used_gb), AVG(net_tx_mbps), MAX(net_tx_mbps), MAX(month_tx_gb),
-                      MAX(lives_running), COUNT(*)
-               FROM metrics_system WHERE ts < ? GROUP BY CAST(ts/3600 AS INTEGER)""", (cutoff,))
-        conn.execute(
-            """INSERT OR REPLACE INTO metrics_live_hourly
-               SELECT CAST(ts/3600 AS INTEGER)*3600, live_id, AVG(speed), MIN(speed), AVG(cpu_pct), MAX(rss_mb), COUNT(*)
-               FROM metrics_live WHERE ts < ? GROUP BY CAST(ts/3600 AS INTEGER), live_id""", (cutoff,))
-        n = conn.execute("DELETE FROM metrics_system WHERE ts < ?", (cutoff,)).rowcount
-        conn.execute("DELETE FROM metrics_live WHERE ts < ?", (cutoff,))
         conn.execute("DELETE FROM events WHERE ts < ?", (now - 30 * 86400,))
         conn.execute("DELETE FROM login_attempts WHERE ts < ?", (now - 30 * 86400,))
         conn.execute("DELETE FROM rejections WHERE ts < ?", (now - 30 * 86400,))
@@ -227,7 +245,8 @@ def compact_db(paths: Paths, conn, max_mb: float, now: float) -> str | None:
         msg = f"DB {size / 1e6:.0f}MB > {max_mb:.0f}MB — 원본 지표를 12시간만 남김"
     pages = conn.execute("PRAGMA page_count").fetchone()[0]
     free = conn.execute("PRAGMA freelist_count").fetchone()[0]
-    if pages and free / pages > 0.25 and size > 5e6:
+    # VACUUM 은 도는 동안 DB 쓰기를 막는다 → 빈 공간이 절반을 넘을 때만 (보통 처음 업데이트 직후 1번)
+    if pages and free / pages > 0.5 and size > 20e6:
         conn.execute("VACUUM")
         after = paths.db.stat().st_size
         msg = (msg + " · " if msg else "") + f"DB 압축 {size / 1e6:.0f}→{after / 1e6:.0f}MB"

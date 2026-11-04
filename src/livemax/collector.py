@@ -55,6 +55,7 @@ class Collector:
                 # 라이브별 CPU·RAM
                 snap = self.sup.snapshot()
                 running = 0
+                live_rows = []
                 for lid, s in snap.items():
                     if s.get("state") == "running":
                         running += 1
@@ -63,19 +64,22 @@ class Collector:
                         "cpu": sum(self._cpu(x, dt, 0) for x in pids),
                         "rss_mb": sum(sysmetrics.proc_rss_mb(x) or 0 for x in pids) or None,
                     }
-                    conn.execute("INSERT INTO metrics_live(ts, live_id, state, speed, cpu_pct, rss_mb, out_time_s)"
-                                 " VALUES (?,?,?,?,?,?,?)",
-                                 (now, lid, s.get("state"), s.get("speed"), self.per_live[lid]["cpu"],
-                                  self.per_live[lid]["rss_mb"], s.get("out_time")))
+                    live_rows.append((now, lid, s.get("state"), s.get("speed"), self.per_live[lid]["cpu"],
+                                      self.per_live[lid]["rss_mb"], s.get("out_time")))
                 self.latest = {"ts": now, "cpu_pct": cpu, "steal_pct": steal, "iowait_pct": iowait,
                                "mem_used_mb": mem_used, "mem_total_mb": mem_total, "disk_used_gb": d_used,
                                "disk_total_gb": d_total, "disk_pct": d_pct, "net_tx_mbps": tx, "net_rx_mbps": rx,
                                "month_tx_bytes": month_tx, "lives_running": running, "iface": iface}
+                # 한 번의 짧은 트랜잭션으로 (라이브 15개면 예전엔 쓰기 16번)
+                conn.execute("BEGIN")
+                conn.executemany("INSERT INTO metrics_live(ts, live_id, state, speed, cpu_pct, rss_mb, out_time_s)"
+                                 " VALUES (?,?,?,?,?,?,?)", live_rows)
                 conn.execute(
                     "INSERT INTO metrics_system(ts, cpu_pct, steal_pct, iowait_pct, mem_used_mb, mem_total_mb, disk_used_gb,"
                     " disk_total_gb, net_tx_mbps, net_rx_mbps, month_tx_gb, lives_running) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (now, cpu, steal, iowait, mem_used, mem_total, d_used, d_total, tx, rx,
                      month_tx / 1e9 if month_tx is not None else None, running))
+                conn.execute("COMMIT")
                 if d_pct >= float(self.settings["cleanup"]["disk_emergency_percent"]) and now - last_emerg > 3600:
                     last_emerg = now
                     db.add_event(conn, "error", "collector", f"디스크 {d_pct:.1f}% — 긴급 정리 실행")
@@ -83,6 +87,8 @@ class Collector:
                         self.on_emergency()
             except Exception:  # noqa: BLE001
                 log.exception("수집 실패")
+                if conn.in_transaction:  # 열린 트랜잭션이 잠금을 쥔 채 남지 않게
+                    conn.execute("ROLLBACK")
 
     def _cpu(self, pid, dt, default):
         if not sysmetrics.pid_alive(pid):

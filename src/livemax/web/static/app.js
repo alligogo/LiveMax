@@ -51,11 +51,24 @@ function toast(msg, isErr) {
   setTimeout(() => t.remove(), isErr ? 7000 : 3500);
 }
 
-async function api(method, url, body, raw) {
-  const opt = { method, headers: {}, credentials: "same-origin" };
+// 서버가 잠깐 늦거나 끊겨도 화면이 하얗게 비지 않게: 요청마다 시간 제한 + 위쪽 안내 띠
+function netBanner(on) {
+  let b = document.getElementById("net-banner");
+  if (!on) { if (b) b.remove(); return; }
+  if (!b) { b = h("div", { id: "net-banner" }, "서버 응답이 늦습니다 — 자동으로 다시 시도 중…"); document.body.append(b); }
+}
+
+async function api(method, url, body, raw, timeoutMs) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs || (body instanceof Blob ? 600000 : 20000));
+  const opt = { method, headers: {}, credentials: "same-origin", signal: ctl.signal };
   if (body instanceof Blob || body instanceof ArrayBuffer) { opt.body = body; }
   else if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
-  const r = await fetch(url, opt);
+  let r;
+  try { r = await fetch(url, opt); }
+  catch (e) { netBanner(true); throw new Error(e.name === "AbortError" ? "서버 응답 시간 초과 — 잠시 뒤 다시 시도하세요" : "서버에 연결할 수 없습니다"); }
+  finally { clearTimeout(timer); }
+  netBanner(r.status >= 502 && r.status <= 504);
   if (raw) return r;
   let j = {};
   try { j = await r.json(); } catch (e) { /* 비어 있는 응답 */ }
@@ -79,7 +92,7 @@ let pollTimer = null;
 function stopPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
 
 function shell(active, ...content) {
-  const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/system", "설정", "system"]];
+  const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/channels", "채널", "channels"], ["#/system", "설정", "system"]];
   return h("div", {},
     h("header", { class: "topbar" },
       h("a", { class: "brand", href: "#/" }, brandParts()),
@@ -155,26 +168,46 @@ let lastOverview = null;
 
 async function showLives() {
   stopPoll();
-  const grid = h("div", { class: "grid" });
+  const grid = h("div", { class: "groups" });
   const side = h("aside", { class: "side" });
   mount(shell("lives", h("div", { class: "layout" }, h("section", {}, grid), side)));
+  let busy = false;
   const refresh = async () => {
-    try { lastOverview = await api("GET", "/api/overview"); } catch (e) { return; }
-    renderLives(grid, lastOverview); renderSide(side, lastOverview);
+    if (busy) return;  // 앞 요청이 아직이면 쌓지 않는다
+    busy = true;
+    try { lastOverview = await api("GET", "/api/overview"); renderLives(grid, lastOverview); renderSide(side, lastOverview); }
+    catch (e) { if (!lastOverview) grid.replaceChildren(h("div", { class: "card empty" }, h("div", { class: "card-body muted" }, e.message))); }
+    finally { busy = false; }
   };
+  grid.replaceChildren(h("div", { class: "muted small", style: "padding:20px" }, "불러오는 중…"));
   await refresh();
   pollTimer = setInterval(refresh, 5000);
 }
 
+// 채널 로고(없으면 첫 글자) + 이름. 주소가 있으면 새 창으로 연다
+const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : null);
+function chLogo(ch, size) {
+  return ch.logo ? h("img", { class: "ch-logo", src: ch.logo, alt: "", style: `width:${size}px;height:${size}px` })
+    : h("span", { class: "ch-logo ph", style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.45)}px` }, (ch.name || "?").slice(0, 1));
+}
+function chLink(ch, cls, ...kids) {
+  const u = safeUrl(ch.url);
+  return u ? h("a", { class: cls, href: u, target: "_blank", rel: "noopener noreferrer", title: `${ch.name} 채널 열기 (새 창)` }, kids)
+    : h("span", { class: cls }, kids);
+}
+
 function renderLives(grid, ov) {
   const now = ov.server_time;
-  const cards = ov.lives.map((lv) => {
+  const chById = Object.fromEntries((ov.channels || []).map((c) => [c.id, c]));
+  const card = (lv) => {
     const running = lv.state === "running";
+    const ch = chById[lv.channel_id];
     const preview = h("div", { class: "preview" },
       running && lv.clip && lv.clip_folder
         ? h("img", { src: `/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}`, alt: "", loading: "lazy" })
         : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
-      running ? h("span", { class: "badge-live" }, "LIVE") : null);
+      running ? h("span", { class: "badge-live" }, "LIVE") : null,
+      ch ? chLink(ch, "ch-badge", chLogo(ch, 18), h("span", {}, ch.name)) : null);
     const tile = (val, label, cls) => h("div", { class: "tile " + (cls || "") }, h("b", {}, val), h("span", {}, label));
     const speedCls = lv.speed == null ? "" : lv.speed >= 0.97 ? "good" : "bad";
     return h("article", { class: "card live" },
@@ -202,10 +235,21 @@ function renderLives(grid, ov) {
           lv.youtube_video_id ? h("a", { onclick: () => openPreview(lv) }, "유튜브 미리보기") : null,
           h("a", { onclick: () => openLog(lv) }, "로그"),
           h("span", { class: "faint" }, lv.timer_mode !== "off" ? "타이머 방송 — 일일 재시작 안 함" : `다음 자동 재시작 ${fmt.time(lv.next_restart)}`))));
-  });
-  if (!cards.length) cards.push(h("div", { class: "card empty" }, h("div", { class: "card-body" },
-    h("b", {}, "아직 라이브가 없습니다"), h("p", { class: "muted" }, "비디오·음악 폴더에 파일을 올린 뒤 오른쪽의 '라이브 추가'를 누르세요."))));
-  grid.replaceChildren(addBtn("m-only"), ...cards);
+  };
+  // 채널별로 묶어서: 채널 머리줄(로고·이름 ──── 설명) 아래에 그 채널의 라이브들
+  const groups = (ov.channels || []).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id) }))
+    .filter((g) => g.lives.length);
+  const orphan = ov.lives.filter((l) => !chById[l.channel_id]);
+  if (orphan.length) groups.push({ ch: null, lives: orphan });
+  const sections = groups.map((g) => h("section", { class: "ch-group" },
+    h("div", { class: "ch-head" },
+      g.ch ? chLink(g.ch, "ch-name", chLogo(g.ch, 26), h("span", {}, g.ch.name)) : h("span", { class: "ch-name muted" }, "채널 미지정"),
+      h("span", { class: "ch-rule" }),
+      g.ch && g.ch.description ? h("span", { class: "ch-desc" }, g.ch.description) : null),
+    h("div", { class: "grid" }, g.lives.map(card))));
+  if (!sections.length) sections.push(h("div", { class: "card empty" }, h("div", { class: "card-body" },
+    h("b", {}, "아직 라이브가 없습니다"), h("p", { class: "muted" }, "① 채널 메뉴에서 채널과 스트림 키 등록 → ② 비디오·음악 올리기 → ③ '라이브 추가'"))));
+  grid.replaceChildren(addBtn("m-only"), ...sections);
 }
 const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => openLiveEditor(null) }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
 
@@ -306,13 +350,39 @@ async function openLog(lv) {
 // ------------------------------------------------------------------ 라이브 추가/수정
 async function openLiveEditor(lv) {
   const isNew = !lv;
-  let media;
-  try { media = { video: await api("GET", "/api/media/video"), audio: await api("GET", "/api/media/audio") }; }
-  catch (e) { toast(e.message, true); return; }
+  let media, chans;
+  try {
+    [media, chans] = await Promise.all([
+      Promise.all([api("GET", "/api/media/video"), api("GET", "/api/media/audio")]).then(([v, a]) => ({ video: v, audio: a })),
+      api("GET", "/api/channels").then((r) => r.channels)]);
+  } catch (e) { toast(e.message, true); return; }
   const cur = lv || { name: "", video_folders: [], audio_folders: [], audio_mode: "random_norepeat", norepeat_count: 30, crossfade: 0, youtube_video_id: "",
     timer_mode: "off", timer_minutes: 710, timer_until: 0, timer_repeat: false, timer_gap_minutes: 2 };
   const name = h("input", { class: "input", value: cur.name, placeholder: "예: 재즈 색소폰 24/7", maxlength: 80 });
-  const key = h("input", { class: "input", type: "password", autocomplete: "off", placeholder: lv ? `현재 키 ${lv.key_masked || "없음"} — 바꿀 때만 입력` : "유튜브 스튜디오의 스트림 키" });
+  // 채널 → 그 채널의 스트림 키 (키는 채널 메뉴에서만 등록). 다른 라이브가 쓰는 키는 고를 수 없다
+  let chId = cur.channel_id || (chans.length === 1 ? chans[0].id : ""), keyId = cur.key_id || "";
+  const chSel = h("select", { class: "input", style: "max-width:320px" }, h("option", { value: "" }, "채널 선택"),
+    chans.map((c) => h("option", { value: c.id }, c.name)));
+  chSel.value = chId;
+  const keyBox = h("div", { class: "keys" });
+  const drawKeys = () => {
+    const c = chans.find((x) => x.id === chId);
+    if (!c) { keyBox.replaceChildren(h("div", { class: "muted small" }, chans.length ? "채널을 고르세요" : "등록된 채널이 없습니다. '채널' 메뉴에서 채널과 스트림 키를 먼저 등록하세요.")); return; }
+    if (!c.keys.length) { keyBox.replaceChildren(h("div", { class: "muted small" }, "이 채널에 등록된 스트림 키가 없습니다. '채널' 메뉴에서 추가하세요.")); return; }
+    keyBox.replaceChildren(...c.keys.map((k) => {
+      const mine = lv && k.used_by === lv.id;
+      const taken = k.used_by && !mine;
+      const rb = h("input", { type: "radio", name: "key", value: k.id, disabled: taken });
+      rb.checked = keyId === k.id && !taken;
+      const lab = h("label", { class: "check" + (rb.checked ? " on" : "") + (taken ? " taken" : "") }, rb,
+        h("span", { class: "nm" }, h("b", {}, k.label), h("span", { class: "desc" }, k.masked)),
+        taken ? h("span", { class: "pill " + (k.status === "live" ? "r" : "") }, `${k.status === "live" ? "생방중" : "등록"} · ${k.used_by_name}`) : null);
+      rb.addEventListener("change", () => { keyId = k.id; keyBox.querySelectorAll(".check").forEach((x) => x.classList.toggle("on", x === lab)); });
+      return lab;
+    }));
+  };
+  chSel.addEventListener("change", () => { chId = chSel.value; keyId = ""; drawKeys(); });
+  drawKeys();
   const checks = (kind, selected) => {
     const box = h("div", { class: "checks" });
     if (!media[kind].folders.length) box.append(h("div", { class: "muted small" }, `${kind === "video" ? "비디오" : "음악"} 폴더가 없습니다. 먼저 '${kind === "video" ? "비디오" : "음악"}' 메뉴에서 폴더를 만들고 파일을 올리세요.`));
@@ -374,7 +444,7 @@ async function openLiveEditor(lv) {
   }));
   showPane();
 
-  const payload = (apply) => ({ name: name.value, stream_key: key.value, video_folders: vbox.values(), audio_folders: abox.values(),
+  const payload = (apply) => ({ name: name.value, channel_id: chId, key_id: keyId, video_folders: vbox.values(), audio_folders: abox.values(),
     audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, apply,
     timer_mode: tmode, timer_minutes: Number(tH.value || 0) * 60 + Number(tM.value || 0),
     timer_until: tU.value ? new Date(tU.value).getTime() / 1000 : 0, timer_repeat: tRep.checked, timer_gap_minutes: Number(tGap.value || 2) });
@@ -389,7 +459,9 @@ async function openLiveEditor(lv) {
   };
   openModal(isNew ? "라이브 추가" : `라이브 설정 — ${lv.name}`, [
     h("label", { class: "field" }, h("span", {}, "이름"), name),
-    h("label", { class: "field" }, h("span", {}, "스트림 키"), key, h("div", { class: "hint" }, "유튜브 스튜디오 → 라이브 스트리밍 → 스트림 키. 저장 후에는 마지막 4자리만 보입니다.")),
+    h("div", { class: "field" }, h("span", { class: "flabel" }, "채널"), chSel),
+    h("div", { class: "field" }, h("span", { class: "flabel" }, "스트림 키"), keyBox,
+      h("div", { class: "hint" }, "키는 '채널' 메뉴에서 등록합니다. 다른 라이브가 쓰는(등록·생방중) 키는 고를 수 없습니다.")),
     h("div", { class: "field" }, h("span", { class: "flabel" }, "비디오 폴더 (여러 개 선택 가능)"), vbox, mixWarn),
     h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "음악 폴더 (여러 개 선택 가능)"), abox),
     h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "재생 방식"), modeSeg),
@@ -397,7 +469,7 @@ async function openLiveEditor(lv) {
     adv, msg,
   ], [
     isNew ? null : h("button", { class: "btn danger", onclick: async () => {
-      if (!confirm(`'${lv.name}' 라이브를 삭제할까요? 송출이 멈추고 설정과 스트림 키가 지워집니다.`)) return;
+      if (!confirm(`'${lv.name}' 라이브를 삭제할까요? 송출이 멈추고 설정·로그가 지워집니다. (채널의 스트림 키는 남아 다른 라이브에서 쓸 수 있습니다)`)) return;
       try { await api("DELETE", `/api/lives/${lv.id}`); closeModal(); toast("삭제했습니다"); route(); } catch (e) { msg.textContent = e.message; }
     } }, "삭제"),
     h("span", { class: "spacer" }),
@@ -433,7 +505,7 @@ async function showMedia(kind) {
           newName, h("button", { class: "btn primary sm" }, "만들기")),
         h("p", { class: "hint" }, kind === "video"
           ? "규격: H.264 High, 1080p 30fps 5000k 기본 (720p~4K, 24~60fps 도 가능 — 올린 파일 그대로 송출), 키프레임 2초, B프레임·오디오 없음. PC의 변환기(LiveMax-Convert)로 만들면 됩니다."
-          : "규격: AAC-LC 128k 44.1kHz 스테레오 (-14 LUFS). PC의 변환기(LiveMax-Convert)로 만들면 됩니다.")));
+          : "규격: AAC-LC 128k~192k 44.1kHz 스테레오 (-14 LUFS). PC의 변환기(LiveMax-Convert)로 만들면 됩니다.")));
     await renderFolder(kind, right, data);
   };
   await load();
@@ -473,7 +545,7 @@ async function renderFolder(kind, root, data) {
       h("div", { class: "card-head" }, folder, h("span", { class: "spacer" }),
         info?.used_by?.length ? h("span", { class: "pill g", style: "text-transform:none" }, `사용 중: ${info.used_by.map(liveName).join(", ")}`) : null,
         h("button", { class: "btn sm ghost", onclick: () => renameFolder(kind, folder) }, "이름 변경"),
-        h("button", { class: "btn sm danger", onclick: () => deleteFolder(kind, folder) }, "삭제")),
+        h("button", { class: "btn sm danger", onclick: () => deleteFolder(kind, folder, info) }, "폴더 삭제")),
       h("div", { class: "card-body" }, drop, list,
         detail.pending.length ? h("div", { class: "small", style: "margin-top:12px" }, h("span", { class: "pill y" }, "규격 검증 중"), " ", detail.pending.join(", ")) : null,
         h("div", { class: "small muted", style: "margin-top:14px" }, `${detail.files.length}개 · ${fmt.bytes(info?.size || 0)}`,
@@ -494,9 +566,27 @@ async function renameFolder(kind, folder) {
   const n = prompt("새 폴더 이름", folder); if (!n || n === folder) return;
   try { await api("PUT", `/api/media/${kind}/${encodeURIComponent(folder)}`, { name: n }); mediaFolder[kind] = n.trim(); showMedia(kind); } catch (e) { toast(e.message, true); }
 }
-async function deleteFolder(kind, folder) {
-  if (!confirm(`'${folder}' 폴더를 삭제할까요? (비어 있어야 합니다)`)) return;
-  try { await api("DELETE", `/api/media/${kind}/${encodeURIComponent(folder)}`); mediaFolder[kind] = null; showMedia(kind); } catch (e) { toast(e.message, true); }
+async function deleteFolder(kind, folder, info) {
+  const label = kind === "video" ? "비디오" : "음악";
+  const typed = h("input", { class: "input", placeholder: folder, autocomplete: "off" });
+  const msg = h("div", { class: "msg err" });
+  const go = h("button", { class: "btn danger solid", disabled: true, onclick: async () => {
+    msg.textContent = "";
+    try {
+      const r = await api("DELETE", `/api/media/${kind}/${encodeURIComponent(folder)}?confirm=${encodeURIComponent(typed.value)}`);
+      closeModal(); toast(r.message); mediaFolder[kind] = null; showMedia(kind);
+    } catch (e) { msg.textContent = e.message; }
+  } }, "영구 삭제");
+  typed.addEventListener("input", () => { go.disabled = typed.value !== folder; });
+  openModal(`${label} 폴더 삭제`, [
+    h("div", { class: "danger-box" },
+      h("b", {}, `'${folder}' 폴더와 안의 ${label} 파일 ${info?.count ?? 0}개 (${fmt.bytes(info?.size || 0)})를 모두 지웁니다.`),
+      h("ul", {}, h("li", {}, "서버에서 바로 영구 삭제됩니다. 휴지통이 없어 되돌릴 수 없습니다."),
+        h("li", {}, "썸네일·업로드 대기·격리 파일·기록까지 함께 지워 아무것도 남기지 않습니다."),
+        h("li", {}, "PC에 원본이 없다면 먼저 내려받아 두세요."))),
+    h("label", { class: "field", style: "margin-top:16px" }, h("span", {}, `확인을 위해 폴더 이름 '${folder}' 을(를) 그대로 입력하세요`), typed), msg,
+  ], [h("span", { class: "spacer" }), h("button", { class: "btn ghost", onclick: closeModal }, "취소"), go]);
+  setTimeout(() => typed.focus(), 50);
 }
 
 // 이어 올리기: 8MB 조각, 끊기면 서버가 가진 지점부터 다시. 동시에 3개 파일.
@@ -539,6 +629,90 @@ async function uploadFiles(kind, folder, fileList, listEl) {
   const workers = Array.from({ length: Math.min(3, queue.length) }, async () => { while (queue.length) await one(queue.shift()); });
   await Promise.all(workers);
   setTimeout(() => showMedia(kind), 4000);
+}
+
+// ------------------------------------------------------------------ 채널
+async function showChannels() {
+  stopPoll();
+  let list;
+  try { list = (await api("GET", "/api/channels")).channels; } catch (e) { toast(e.message, true); return; }
+  const STAT = { free: ["사용 가능", "g"], registered: ["등록", ""], live: ["생방중", "r"] };
+  const cards = list.map((c) => {
+    const label = h("input", { class: "input", placeholder: "키 이름 (예: 메인 방송)", maxlength: 30, style: "flex:1;min-width:140px" });
+    const value = h("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: "유튜브 스튜디오의 스트림 키", style: "flex:2;min-width:180px" });
+    const addKey = async (e) => {
+      e.preventDefault();
+      try { await api("POST", `/api/channels/${c.id}/keys`, { label: label.value, key: value.value }); value.value = ""; toast("스트림 키를 등록했습니다"); showChannels(); }
+      catch (er) { toast(er.message, true); }
+    };
+    return h("article", { class: "card ch-card" },
+      h("div", { class: "card-head" }, chLink(c, "ch-name", chLogo(c, 28), h("span", {}, c.name)), h("span", { class: "spacer" }),
+        h("button", { class: "btn sm ghost", onclick: () => openChannelEditor(c) }, "수정"),
+        h("button", { class: "btn sm danger", onclick: () => deleteChannel(c) }, "삭제")),
+      h("div", { class: "card-body" },
+        c.description ? h("p", { class: "muted", style: "margin:0 0 6px" }, c.description) : null,
+        safeUrl(c.url) ? h("a", { class: "small link", href: c.url, target: "_blank", rel: "noopener noreferrer" }, c.url) : h("span", { class: "small faint" }, "채널 주소 없음"),
+        h("div", { class: "section-title", style: "margin:18px 0 8px" }, `스트림 키 ${c.keys.length}개`),
+        c.keys.length ? h("table", { class: "list-table", style: "margin-top:0" }, h("tbody", {}, c.keys.map((k) => h("tr", {},
+          h("td", {}, h("b", {}, k.label), h("div", { class: "small faint mono" }, k.masked)),
+          h("td", {}, h("span", { class: "pill " + STAT[k.status][1] }, STAT[k.status][0]), k.used_by_name ? h("span", { class: "small muted" }, ` ${k.used_by_name}`) : null),
+          h("td", { class: "r", style: "width:40px" }, h("button", { class: "btn sm danger", html: ICON.trash, title: k.used_by ? "라이브가 쓰는 키는 지울 수 없습니다" : "키 삭제",
+            disabled: !!k.used_by, onclick: async () => {
+              if (!confirm(`'${k.label}' 스트림 키를 지울까요?`)) return;
+              try { await api("DELETE", `/api/channels/${c.id}/keys/${k.id}`); showChannels(); } catch (e) { toast(e.message, true); }
+            } }))))))
+          : h("div", { class: "muted small" }, "아직 등록된 키가 없습니다."),
+        h("form", { class: "row", style: "margin-top:12px", onsubmit: addKey }, label, value, h("button", { class: "btn primary sm" }, "키 등록")),
+        h("p", { class: "hint" }, "키는 서버의 보호된 파일에만 저장되고, 화면에는 마지막 4자리만 보입니다. 키를 바꾸려면 새 키를 등록하고 라이브에서 고른 뒤 옛 키를 지우세요.")));
+  });
+  mount(shell("channels", h("div", {},
+    h("div", { class: "row", style: "margin-bottom:16px" }, h("div", { class: "muted" }, "채널마다 이름·로고·주소와 스트림 키를 등록하면, 라이브를 만들 때 채널과 키를 고르기만 하면 됩니다."),
+      h("span", { class: "spacer" }), h("button", { class: "btn primary", onclick: () => openChannelEditor(null) }, "+ 채널 추가")),
+    list.length ? h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(440px,1fr))" }, cards)
+      : h("div", { class: "card empty" }, h("div", { class: "card-body" }, h("b", {}, "등록된 채널이 없습니다"), h("p", { class: "muted" }, "'채널 추가'로 시작하세요."))))));
+}
+
+function openChannelEditor(c) {
+  const isNew = !c;
+  const name = h("input", { class: "input", value: c?.name || "", maxlength: 40, placeholder: "예: Jazz Night Radio" });
+  const desc = h("input", { class: "input", value: c?.description || "", maxlength: 120, placeholder: "라이브 목록의 채널 줄 오른쪽에 보입니다" });
+  const url = h("input", { class: "input", value: c?.url || "", maxlength: 300, placeholder: "https://www.youtube.com/@내채널" });
+  const file = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp", hidden: true });
+  const prev = h("div", { class: "logo-prev" }, c?.logo ? h("img", { src: c.logo, alt: "" }) : h("span", { class: "faint small" }, "로고 없음"));
+  let logoBlob = null, removeLogo = false;
+  file.addEventListener("change", () => {
+    const f = file.files[0]; if (!f) return;
+    if (f.size > 1000000) { toast("로고는 1MB 이하로 올려 주세요", true); return; }
+    logoBlob = f; removeLogo = false;
+    prev.replaceChildren(h("img", { src: URL.createObjectURL(f), alt: "" }));
+  });
+  const msg = h("div", { class: "msg err" });
+  openModal(isNew ? "채널 추가" : `채널 수정 — ${c.name}`, [
+    h("label", { class: "field" }, h("span", {}, "채널명"), name),
+    h("label", { class: "field" }, h("span", {}, "채널 설명"), desc),
+    h("label", { class: "field" }, h("span", {}, "채널 주소"), url, h("div", { class: "hint" }, "라이브 목록·썸네일의 채널명을 누르면 이 주소가 새 창으로 열립니다.")),
+    h("div", { class: "field" }, h("span", { class: "flabel" }, "채널 로고 (정사각형 PNG/JPG/WEBP, 1MB 이하)"),
+      h("div", { class: "row" }, prev, h("button", { type: "button", class: "btn sm", onclick: () => file.click() }, "이미지 선택"),
+        c?.logo ? h("button", { type: "button", class: "btn sm ghost", onclick: () => { removeLogo = true; logoBlob = null; prev.replaceChildren(h("span", { class: "faint small" }, "로고 없음")); } }, "로고 빼기") : null, file)),
+    msg,
+  ], [h("span", { class: "spacer" }), h("button", { class: "btn ghost", onclick: closeModal }, "취소"),
+    h("button", { class: "btn primary", onclick: async () => {
+      msg.textContent = "";
+      try {
+        const body = { name: name.value, description: desc.value, url: url.value };
+        const id = isNew ? (await api("POST", "/api/channels", body)).id : (await api("PUT", `/api/channels/${c.id}`, body), c.id);
+        if (logoBlob) await api("POST", `/api/channels/${id}/logo`, logoBlob);
+        else if (removeLogo) await api("DELETE", `/api/channels/${id}/logo`);
+        closeModal(); toast(isNew ? "채널을 추가했습니다 — 이제 스트림 키를 등록하세요" : "저장했습니다"); showChannels();
+      } catch (e) { msg.textContent = e.message; }
+    } }, "저장")]);
+  setTimeout(() => name.focus(), 50);
+}
+
+async function deleteChannel(c) {
+  if (c.lives.length) { toast(`이 채널의 라이브 ${c.lives.length}개를 먼저 지우거나 다른 채널로 옮기세요`, true); return; }
+  if (!confirm(`'${c.name}' 채널을 삭제할까요?\n등록된 스트림 키 ${c.keys.length}개와 로고도 함께 지워집니다.`)) return;
+  try { await api("DELETE", `/api/channels/${c.id}`); toast("채널을 삭제했습니다"); showChannels(); } catch (e) { toast(e.message, true); }
 }
 
 // ------------------------------------------------------------------ 설정 / 시스템
@@ -670,6 +844,7 @@ async function route() {
   if (r.startsWith("media/video")) return showMedia("video");
   if (r.startsWith("media/audio")) return showMedia("audio");
   if (r.startsWith("system")) return showSystem();
+  if (r.startsWith("channels")) return showChannels();
   return showLives();
 }
 window.addEventListener("hashchange", route);

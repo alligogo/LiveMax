@@ -226,14 +226,14 @@ def validate_audio(path: Path, spec: dict) -> ProbeResult:
     if ch != int(spec["channels"]):
         r.reasons.append(f"채널 {ch} — 스테레오(2) 여야 함")
 
-    want = parse_bitrate(spec["bitrate"])
+    lo, hi = parse_bitrate(spec["bitrate_min"]), parse_bitrate(spec["bitrate_max"])
     tol = float(spec["bitrate_tolerance"])
     br = a.get("bit_rate") or fmt.get("bit_rate")
     if br:
         kbps = int(br) / 1000
         r.bitrate_kbps = kbps
-        if abs(kbps - want) > want * tol:
-            r.reasons.append(f"비트레이트 {kbps:.0f}k — {want}k 여야 함")
+        if not (lo * (1 - tol) <= kbps <= hi * (1 + tol)):
+            r.reasons.append(f"비트레이트 {kbps:.0f}k — {lo}k ~ {hi}k 여야 함")
     else:
         r.warnings.append("비트레이트 정보를 읽을 수 없음")
 
