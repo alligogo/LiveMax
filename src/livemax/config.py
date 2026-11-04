@@ -56,7 +56,7 @@ DEFAULTS: dict[str, Any] = {
     "concat": {"hours": 24, "margin_minutes": 45},
     "supervisor": {
         "boot_start_gap_seconds": 10,   # 컨테이너 시작 시 라이브 간 시작 간격
-        "restart_backoff_seconds": [2, 5, 10, 30, 60],
+        "restart_backoff_seconds": [1, 3, 10, 30, 60],  # 오래 잘 돌다 끊긴 경우 1초 뒤 재연결
     },
     "restart": {"base_utc": "09:00", "slot_minutes": 2},  # 일일 재시작: 09:00 UTC(미국 새벽) + 슬롯×2분
     "watchdog": {"speed_min": 0.97, "speed_grace_seconds": 60, "stall_seconds": 30,

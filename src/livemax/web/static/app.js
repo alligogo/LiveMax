@@ -163,7 +163,7 @@ function renderLives(grid, ov) {
   const cards = ov.lives.map((lv) => {
     const running = lv.state === "running";
     const preview = h("div", { class: "preview" },
-      lv.clip && lv.clip_folder
+      running && lv.clip && lv.clip_folder
         ? h("img", { src: `/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}`, alt: "", loading: "lazy" })
         : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
       running ? h("span", { class: "badge-live" }, "LIVE") : null);
@@ -177,11 +177,11 @@ function renderLives(grid, ov) {
       preview,
       h("div", { class: "card-body" },
         h("div", { class: "tiles" },
-          tile(lv.started_at ? fmt.dur(now - lv.started_at) : "-", "가동 시간"),
-          tile(lv.bitrate_kbps ? Math.round(lv.bitrate_kbps).toLocaleString() : "-", "kbit/s"),
+          tile(running && (lv.session_started_at || lv.started_at) ? fmt.dur(now - (lv.session_started_at || lv.started_at)) : "-", "방송 시간"),
+          tile(running && lv.bitrate_kbps ? Math.round(lv.bitrate_kbps).toLocaleString() : "-", "kbit/s"),
           tile(lv.speed != null ? lv.speed.toFixed(2) + "x" : "-", "speed", speedCls)),
-        h("div", { class: "nowline" }, ico("music", "lbl"), h("span", { class: "val" }, lv.song_title ? `${lv.song_title}${lv.song_artist ? " — " + lv.song_artist : ""}` : "-")),
-        h("div", { class: "nowline" }, ico("video", "lbl"), h("span", { class: "val" }, lv.clip ? `${lv.clip_folder} / ${lv.clip}` : "-")),
+        h("div", { class: "nowline" }, ico("music", "lbl"), h("span", { class: "val" }, running && lv.song_title ? `${lv.song_title}${lv.song_artist ? " — " + lv.song_artist : ""}` : "-")),
+        h("div", { class: "nowline" }, ico("video", "lbl"), h("span", { class: "val" }, running && lv.clip ? `${lv.clip_folder} / ${lv.clip}` : "-")),
         timerLine(lv, now),
         lv.message ? h("div", { class: "msg" + (lv.status === "down" ? " err" : "") }, lv.message) : null,
         h("div", { class: "actions" },
@@ -190,6 +190,7 @@ function renderLives(grid, ov) {
             : h("button", { class: "btn primary", onclick: () => liveAction(lv, "start") }, "시작"),
           h("button", { class: "btn", disabled: !lv.enabled, onclick: () => liveAction(lv, "restart") }, "재시작")),
         h("div", { class: "links" },
+          reconnects(lv),
           lv.youtube_video_id ? h("a", { onclick: () => openPreview(lv) }, "유튜브 미리보기") : null,
           h("a", { onclick: () => openLog(lv) }, "로그"),
           h("span", { class: "faint" }, lv.timer_mode !== "off" ? "타이머 방송 — 일일 재시작 안 함" : `다음 자동 재시작 ${fmt.time(lv.next_restart)}`))));
@@ -199,6 +200,16 @@ function renderLives(grid, ov) {
   grid.replaceChildren(addBtn("m-only"), ...cards);
 }
 const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => openLiveEditor(null) }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
+
+// 이번 방송(세션) 동안 자동 재연결·재시작 횟수 — 가동 시간 대신 "몇 번 끊겼다 붙었나"를 보여준다
+function reconnects(lv) {
+  if (!lv.session_started_at) return null;
+  const list = (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at);
+  if (!list.length) return h("span", { class: "faint" }, "끊김 없음");
+  const last = list[list.length - 1];
+  return h("span", { class: "warnline", title: list.map((r) => `${fmt.time(r.ts)} ${r.reason}`).join("\n") },
+    `재연결 ${list.length}회 (최근 ${fmt.clock(last.ts)})`);
+}
 
 function timerLine(lv, now) {
   if (lv.timer_mode === "off") return null;
@@ -306,7 +317,7 @@ async function openLiveEditor(lv) {
   const xfade = h("input", { class: "input", type: "number", min: 0, max: 10, step: 0.5, value: cur.crossfade });
   const vid = h("input", { class: "input", value: cur.youtube_video_id || "", placeholder: "선택 — youtu.be/ 뒤의 영상 ID" });
   const msg = h("div", { class: "msg err" });
-  const adv = h("details", {}, h("summary", { class: "muted", style: "cursor:pointer;margin:6px 0 14px" }, "고급 설정"),
+  const adv = h("div", { class: "adv" }, h("div", { class: "section-title", style: "margin:18px 0 12px" }, "추가 설정"),
     h("label", { class: "field" }, h("span", {}, "중복방지 곡 수"), norep),
     h("label", { class: "field" }, h("span", {}, "크로스페이드 (초)"), xfade, h("div", { class: "hint" }, "0 = 오디오 copy (CPU 최소). 0보다 크면 이 라이브만 오디오를 디코딩·재인코딩합니다.")),
     h("label", { class: "field" }, h("span", {}, "유튜브 영상 ID"), vid, h("div", { class: "hint" }, "넣으면 카드에서 유튜브 미리보기를 열 수 있습니다.")));
@@ -523,8 +534,10 @@ async function showSystem() {
   mount(shell("system", h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(420px,1fr))" },
     h("div", {},
       card("업데이트",
-        h("p", {}, "현재 버전: ", h("b", { class: "mono" }, s.version)),
-        s.update_requested ? h("p", { class: "msg" }, "업데이트 요청됨 — 잠시 후 자동으로 새 버전으로 바뀝니다.") : null,
+        h("p", {}, "현재 버전: ", h("b", { class: "mono" }, (s.version || "").slice(0, 7))),
+        s.update_requested ? h("p", { class: "msg" }, "업데이트 요청됨 — 1~2분 안에 처리됩니다.")
+          : s.update_last ? h("p", { class: "small " + (s.update_last.result === "failed" ? "msg err" : "muted") }, `마지막 확인 ${fmt.time(Date.parse(s.update_last.at) / 1000)} — `,
+            { latest: "이미 최신 버전입니다", updated: "새 버전으로 업데이트했습니다", failed: "업데이트 실패 (서버의 logs/update.log 확인)", running: "업데이트 진행 중" }[s.update_last.result]) : null,
         h("button", { class: "btn primary", onclick: async () => {
           if (!confirm("새 버전으로 업데이트할까요? 모든 라이브가 잠깐 끊겼다가 차례대로 복귀합니다.")) return;
           try { const r = await api("POST", "/api/system/update"); toast(r.message); } catch (e) { toast(e.message, true); }

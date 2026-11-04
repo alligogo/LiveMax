@@ -136,7 +136,10 @@ class LiveProc:
         for t in self.threads:
             t.join(timeout=15)
         self.threads = []
-        self.set(state="stopped", message=reason, speed=None, progress_at=None, ffmpeg_started_at=None)
+        # 정지 상태에서 마지막 비트레이트·곡·클립이 남아 보이지 않게 비운다
+        self.set(state="stopped", message=reason, speed=None, progress_at=None, ffmpeg_started_at=None,
+                 out_time=None, bitrate=None, clip=None, clip_folder=None, transport=None)
+        (self.sup.paths.run_dir / f"{self.id}.nowplaying.json").unlink(missing_ok=True)
         self.event("info", f"정지 ({reason})")
 
     def restart(self, reason: str, audio_too: bool = False) -> None:
@@ -283,6 +286,7 @@ class LiveProc:
             elif ran >= 60:
                 self.relay_fails = 0
             if self.desired and not reason:
+                self.restarts.append((time.time(), f"송출 끊김 rc={rc}"))
                 self.event("error", f"ffmpeg 종료 rc={rc} (가동 {int(ran)}초) — 재기동")
                 self.sup.notify("restart", f"{live.name}: 송출 프로그램 종료 — 자동 재시작", f"ffmpeg rc={rc}, 가동 {int(ran)}초")
                 self.set(state="restarting", message=f"ffmpeg 종료 rc={rc}")
@@ -362,6 +366,7 @@ class Supervisor:
         self.done_today: dict[str, str] = {}
         self.last_planned = 0.0
         self.last_timer_start = 0.0
+        self.last_m3u = 0.0
         self.notify = lambda *a, **k: False  # daemon 이 Notifier.send 로 바꿔 끼운다
 
     def proc(self, live_id: str) -> LiveProc:
@@ -443,6 +448,31 @@ class Supervisor:
             p.stop("삭제")
         self._clear_session(live_id)
         self.store.delete(live_id)
+        self._purge(live_id)
+
+    def _purge(self, live_id: str) -> None:
+        """삭제한 라이브의 찌꺼기: 실행 파일·목록·로그·지표·이벤트. (같은 ID 를 새 라이브가 다시 쓸 수 있으므로)"""
+        import shutil
+
+        run = self.paths.run_dir
+        for suffix in (".liq", ".m3u", ".m3u.tmp", ".tmp", ".nowplaying.json", ".session.json", ".stunnel.conf",
+                       ".stunnel.pid"):
+            (run / f"{live_id}{suffix}").unlink(missing_ok=True)
+        shutil.rmtree(self.paths.concat_dir / live_id, ignore_errors=True)
+        for pre in ("live", "audio", "tls"):
+            for f in self.paths.logs.glob(f"{pre}-{live_id}.log*"):
+                f.unlink(missing_ok=True)
+        lg = logging.getLogger(f"livemax.live.{live_id}")
+        for hd in list(lg.handlers):
+            lg.removeHandler(hd)
+            hd.close()
+        try:
+            with db.session(self.paths.db) as c:
+                c.execute("DELETE FROM metrics_live WHERE live_id=?", (live_id,))
+                c.execute("DELETE FROM events WHERE live_id=?", (live_id,))
+        except Exception:  # noqa: BLE001
+            log.exception("라이브 기록 정리 실패 %s", live_id)
+        log.info("라이브 삭제 정리 완료: %s", live_id)
 
     def snapshot(self) -> dict[str, dict]:
         return {lid: p.snapshot() for lid, p in list(self.procs.items())}
@@ -564,7 +594,21 @@ class Supervisor:
                 self._timers()
             except Exception:  # noqa: BLE001
                 log.exception("타이머 처리 실패")
+            if now - self.last_m3u >= 15:
+                self.last_m3u = now
+                self._refresh_playlists()
             self._planned_restarts()
+
+    def _refresh_playlists(self) -> None:
+        """음악 폴더에 곡이 추가·삭제되면 송출 중인 라이브의 m3u 를 갱신 → Liquidsoap 이 재시작 없이 다시 읽음."""
+        for lv in self.store.all():
+            p = self.procs.get(lv.id)
+            if p and p.desired:
+                try:
+                    if liquidsoap.write_m3u(lv, self.paths):
+                        p.log.info("음악 목록 갱신")
+                except Exception:  # noqa: BLE001
+                    log.exception("m3u 갱신 실패 %s", lv.id)
 
     def _health(self, p: LiveProc, now: float) -> None:
         """송출하려는데 1분 넘게 송출이 안 되면 '중단' 알림, 다시 30초 이상 정상이면 '복구' 알림."""

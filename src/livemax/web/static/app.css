@@ -100,6 +100,8 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .actions { display: flex; gap: 8px; margin-top: 14px; }
 .actions .btn { flex: 1; }
 .links { display: flex; gap: 14px; justify-content: flex-end; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.links .warnline { color: var(--yellow); cursor: help; margin-right: auto; }
+.links .faint:first-child { margin-right: auto; }
 .links a:hover { color: var(--text); text-decoration: underline; cursor: pointer; }
 
 .add-btn { width: 100%; display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 16px;
@@ -186,7 +188,7 @@ pre.log { margin: 0; background: #0d0d0d; border-radius: 8px; padding: 12px; fon
 .folder-list { list-style: none; margin: 0; padding: 6px; }
 .folder-list li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; }
 .folder-list li:hover { background: #2a2a2a; }
-.folder-list li.on { background: var(--accent); color: #fff; box-shadow: 0 4px 14px rgba(229,57,53,.25); }
+.folder-list li.on { background: #15803d; color: #fff; box-shadow: 0 4px 14px rgba(21,128,61,.3); }
 .folder-list li.on .ct { color: rgba(255,255,255,.8); }
 .folder-list .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-list .ct { color: var(--faint); font-size: 12px; }

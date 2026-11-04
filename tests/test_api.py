@@ -117,3 +117,24 @@ def test_reboot_flag_shown(client):
 def test_spa_served(client):
     assert "LiveMax" in client.get("/").text
     assert client.get("/assets/app.js").status_code == 200
+
+
+def test_update_result_shown(client):
+    _ready(client)
+    log = client.core.paths.logs / "update.log"
+    log.write_text("2026-11-03T16:12:16Z 웹 요청으로 업데이트\nStatus: Image is up to date for x\n")
+    assert client.get("/api/system").json()["update_last"] == {"at": "2026-11-03T16:12:16Z", "result": "latest"}
+    with open(log, "a") as f:
+        f.write("2026-11-03T16:19:43Z 웹 요청으로 업데이트\nStatus: Downloaded newer image for x\n")
+    assert client.get("/api/system").json()["update_last"]["result"] == "updated"
+
+
+def test_stopped_live_shows_no_stale_stats(client):
+    _ready(client)
+    client.post("/api/lives", headers=ORIGIN, json={"name": "재즈", "stream_key": "fake-0000-0000-0000-9z9z",
+                                                  "video_folders": ["Sax After Six"], "audio_folders": ["재즈-색소폰"], "apply": "later"})
+    p = client.core.supervisor.proc("live1")
+    p.set(state="running", bitrate=5186.0, clip="1.mp4", clip_folder="Sax After Six", out_time=100.0)
+    p.stop("사용자 정지")
+    lv = client.get("/api/overview").json()["lives"][0]
+    assert lv["bitrate_kbps"] is None and lv["clip"] is None and lv["out_time"] is None

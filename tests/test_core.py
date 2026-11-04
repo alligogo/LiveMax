@@ -166,3 +166,25 @@ def test_mask_and_redact(caplog):
     with caplog.at_level(logging.INFO):
         lg.info("rtmps://a.rtmps.youtube.com/live2/%s", key)
     assert key not in caplog.text
+
+
+def test_m3u_mixes_all_songs_of_all_folders(paths):
+    """여러 폴더를 골라도 곡 단위로 섞이도록 한 목록 (폴더별 50% 비중 버그 방지)."""
+    from livemax import liquidsoap
+
+    for folder, n in (("big", 5), ("small", 2)):
+        (paths.audio / folder).mkdir(parents=True)
+        for i in range(n):
+            (paths.audio / folder / f"{folder}{i}.m4a").write_bytes(b"x")
+    lv = make_live(audio_folders=["big", "small"])
+    assert liquidsoap.write_m3u(lv, paths) is True
+    m3u = liquidsoap.m3u_path(lv, paths)
+    lines = m3u.read_text().splitlines()
+    assert len(lines) == 7 and all(line.startswith("/") for line in lines)
+    ino = m3u.stat().st_ino
+    assert liquidsoap.write_m3u(lv, paths) is False  # 안 바뀌면 건드리지 않음
+    (paths.audio / "small" / "small1.m4a").unlink()
+    assert liquidsoap.write_m3u(lv, paths) is True
+    assert m3u.stat().st_ino == ino and len(m3u.read_text().splitlines()) == 6  # 같은 파일에 덮어씀 (감시 유지)
+    liq = liquidsoap.render(lv, paths, settings={"spec": {"audio": {"bitrate": "128k", "sample_rate": 44100, "channels": 2}}})
+    assert liq.count("playlist(") == 1 and "random([" not in liq and "track_sensitive=false" in liq

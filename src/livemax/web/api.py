@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import capacity, catalog, config, db, notify, secrets, thumbs
+from .. import capacity, catalog, config, db, liquidsoap, notify, secrets, thumbs
 from ..config import ConfigError, Live, live_from_dict
 from . import auth
 
@@ -270,13 +270,17 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             secrets.write_secret(paths.stream_key(lv.id), key)
         db.add_event(request.state.conn, "info", "web", "설정 변경" + (" (스트림 키 교체)" if key else ""), lv.id)
         after = lv.to_dict()
-        audio_changed = any(before[k] != after[k] for k in ("audio_folders", "audio_mode", "norepeat_count", "crossfade"))
+        audio_changed = any(before[k] != after[k] for k in ("audio_mode", "norepeat_count", "crossfade"))
         video_changed = bool(key) or before["video_folders"] != after["video_folders"]
         running = sup.proc(lv.id).desired
-        if apply == "now" and running and (audio_changed or video_changed):
-            # 바뀐 것만 다시 띄운다: 음악 설정 → 전체(약 8초), 비디오·키 → 영상만(약 2초). 이름·타이머는 재시작 없음
+        if running and before["audio_folders"] != after["audio_folders"]:
+            liquidsoap.write_m3u(lv, paths)  # 음악 폴더 변경은 목록만 바꾸면 Liquidsoap 이 다음 곡부터 반영 (끊김 없음)
+        restarted = apply == "now" and running and (audio_changed or video_changed)
+        if restarted:
+            # 바뀐 것만 다시 띄운다: 재생 방식·크로스페이드 → 전체(약 8초), 비디오·키 → 영상만(2~3초).
+            # 음악 폴더·이름·타이머는 재시작 없음
             sup.restart(lv.id, "설정 적용", audio_too=audio_changed)
-        return {"ok": True, "restarted": bool(apply == "now" and running and (audio_changed or video_changed))}
+        return {"ok": True, "restarted": bool(restarted)}
 
     @app.delete("/api/lives/{live_id}")
     def live_delete(request: Request, live_id: str):
@@ -506,8 +510,37 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          for r in conn.execute("SELECT * FROM sessions ORDER BY last_seen DESC").fetchall()],
             "attempts": [dict(r) for r in conn.execute("SELECT ts, ip, username, success FROM login_attempts ORDER BY ts DESC LIMIT 30").fetchall()],
             "update_requested": (paths.state / "update.request").exists(),
+            "update_last": _update_last(),
             "notify": _notify_view(),
         }
+
+    def _update_last() -> dict | None:
+        """호스트가 남긴 logs/update.log 의 마지막 업데이트 결과 (웹 버튼으로 요청한 것)."""
+        f = paths.logs / "update.log"
+        if not f.exists():
+            return None
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 20000))
+                text = fh.read().decode("utf-8", "replace")
+        except OSError:
+            return None
+        marker = "웹 요청으로 업데이트"
+        i = text.rfind(marker)
+        if i < 0:
+            return None
+        block = text[i:]
+        ts_text = text[max(0, text.rfind("\n", 0, i) + 1):i].strip()
+        if "업데이트 실패" in block:
+            result = "failed"
+        elif "Image is up to date" in block:
+            result = "latest"
+        elif "Downloaded newer image" in block:
+            result = "updated"
+        else:
+            result = "running"
+        return {"at": ts_text, "result": result}
 
     def _notify_view() -> dict:
         cfg = notifier.cfg

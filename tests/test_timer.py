@@ -125,3 +125,24 @@ def test_stop_clears_session(sup):
     sup.start("live1")
     sup.stop("live1")
     assert sup.session("live1") == {} and sup.store.get("live1").enabled is False
+
+
+def test_remove_purges_leftovers(sup, paths):
+    from livemax import db
+
+    _save(sup)
+    for suffix in (".liq", ".m3u", ".nowplaying.json", ".stunnel.conf"):
+        (paths.run_dir / f"live1{suffix}").write_text("x")
+    (paths.concat_dir / "live1").mkdir(parents=True)
+    (paths.concat_dir / "live1" / "a.ffconcat").write_text("x")
+    for pre in ("live", "audio", "tls"):
+        (paths.logs / f"{pre}-live1.log").write_text("x")
+    (paths.logs / "live-live10.log").write_text("다른 라이브")
+    with db.session(paths.db) as c:
+        db.add_event(c, "error", "live", "x", "live1")
+    sup.remove("live1")
+    assert not list(paths.run_dir.glob("live1.*")) and not (paths.concat_dir / "live1").exists()
+    assert not list(paths.logs.glob("*-live1.log")) and (paths.logs / "live-live10.log").exists()
+    with db.session(paths.db) as c:
+        assert c.execute("SELECT COUNT(*) FROM events WHERE live_id='live1'").fetchone()[0] == 0
+    assert not paths.stream_key("live1").exists() and sup.store.get("live1") is None
