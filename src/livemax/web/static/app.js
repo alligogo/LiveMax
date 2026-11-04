@@ -857,7 +857,7 @@ async function showSystem() {
     if (relay.checked) return;
     const ok = confirm("⚠ TLS 중계를 끄면 안 됩니다 (권장: 켜 둠)\n\n" +
       "• 서버 송신 트래픽이 라이브마다 약 30~50% 늘어납니다 (5.2 → 약 8 Mbps).\n" +
-      "• 라이브 15개 기준 월 약 25TB → 39TB 로, Contabo 월 32TB 한도를 넘습니다.\n" +
+      "• 라이브 15개 기준 월 약 25TB → 39TB 로, 우리가 정한 월 25TB 안전선(공정사용 30TB)을 크게 넘습니다.\n" +
       "• 저장 후 각 라이브가 다음 재시작 때부터 직접 암호화 방식으로 바뀝니다.\n\n" +
       "문제 해결용으로 잠깐 끄는 경우가 아니라면 '취소'를 누르세요.\n정말 끌까요?");
     if (!ok) relay.checked = true;
