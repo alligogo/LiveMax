@@ -326,19 +326,20 @@ function pulseBox(ov) {
   const n = { ok: 0, warn: 0, down: 0 };
   active.forEach((l) => { if (l.status === "ok") n.ok++; else if (l.status === "down") n.down++; else n.warn++; });  // 재시작중도 '경고'로
   const idle = ov.lives.length - active.length;
-  const dropCnt = active.reduce((a, l) => a + drops(l).length, 0);
+  // 관제는 '지금 상태'만: 끊김은 최근 10분 안의 것만 센다 (지난 기록은 각 카드·로그에 남아 있음)
+  const dropCnt = active.reduce((a, l) => a + drops(l).filter((r) => ov.server_time - r.ts < 600).length, 0);
   const level = !active.length ? "idle" : n.down ? "bad" : n.warn ? "warn" : "good";
   const pct = active.length ? Math.floor((n.ok / active.length) * 100) : null;
   const icon = { good: "sun", warn: "cloud", bad: "storm", idle: "idle" }[level];
   const cpu = ov.system?.cpu_pct;
-  const stat = (k, v, cls) => h("span", { class: "ps " + (cls || "") }, k, " ", h("b", {}, v));
+  const stat = (k, v, cls, title) => h("span", { class: "ps " + (cls || ""), title: title || null }, k, " ", h("b", {}, v));
   return h("div", { class: "pulse " + level, role: "status" },
     h("span", { class: "p-ico", html: ICON[icon] }),
     h("div", { class: "p-title" }, pct == null ? "준비중" : ["가동률 ", h("b", {}, `${pct}%`)]),
     cpu != null ? h("span", { class: "p-cpu" + (cpu >= 85 ? " hot" : ""), title: "서버 전체 CPU 사용량" }, "CPU ", h("b", {}, `${Math.round(cpu)}%`)) : null,
     h("div", { class: "p-stats" },
       stat("라이브", active.length), stat("정상", n.ok), stat("경고", n.warn, n.warn ? "hot" : ""), stat("중단", n.down, n.down ? "hot" : ""),
-      stat("끊김", dropCnt, dropCnt ? "hot" : ""), idle ? stat("대기", idle, "dim") : null));
+      stat("끊김", dropCnt, dropCnt ? "hot" : "", "최근 10분 안의 끊김 (지난 기록은 각 라이브 카드에)"), idle ? stat("대기", idle, "dim") : null));
 }
 
 // 이번 방송(세션) 동안 자동 재연결·재시작 횟수 — 가동 시간 대신 "몇 번 끊겼다 붙었나"를 보여준다
