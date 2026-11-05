@@ -126,3 +126,69 @@ def test_relay_end_to_end_with_ffmpeg_rtmp_server(tmp_path: Path):
         assert len(ts) > 100
         assert ts[0] < 16777 < ts[-1]  # 경계를 넘었고
         assert all(0 <= b - a < 0.2 for a, b in zip(ts, ts[1:]))  # 끊기거나 거꾸로 가지 않음
+
+
+def test_feed_rewinds_to_latest_keyframe_and_keeps_headers():
+    """유튜브 재접속 때: 설정 정보(메타·AVC·AAC 헤더)는 기억하고, 쌓인 것 중 최근 키프레임부터 이어 보낸다."""
+    f = rr.Feed()
+    meta, avc, aac = (18, 0, b"m"), (9, 0, bytes([0x17, 0]) + b"cfg"), (8, 0, bytes([0xAF, 0]) + b"cfg")
+    key1, inter, key2 = (9, 1000, bytes([0x17, 1]) + b"k1"), (9, 1033, bytes([0x27, 1]) + b"p"), (9, 3000, bytes([0x17, 1]) + b"k2")
+    a_early, a_late = (8, 2990, bytes([0xAF, 1]) + b"a"), (8, 3010, bytes([0xAF, 1]) + b"b")
+    for t, ts, d in (meta, avc, aac, key1, inter, a_early, key2, a_late):
+        if t == 18 and f.meta is None:
+            f.meta = (t, ts, d)
+        elif rr._avc_seq(t, d):
+            f.avc = (t, ts, d)
+        elif rr._aac_seq(t, d):
+            f.aac = (t, ts, d)
+        f.q.append((t, ts, d))
+    assert f.rewind_to_keyframe() == 3000
+    assert list(f.q) == [key2, a_late]  # 키프레임 앞(이른 소리 포함)은 버림
+    assert f.headers() == [meta, avc, aac]
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg 없음")
+def test_relay_reconnects_without_restarting_ffmpeg(tmp_path: Path):
+    """가짜 유튜브가 송출 중간에 끊으면 중계기만 다시 붙고, ffmpeg 는 끝까지 안 멈추며, 새 세션은 키프레임부터."""
+    clip = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30", "-f", "lavfi",
+                    "-i", "sine=f=440:sample_rate=48000", "-t", "12", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-g", "60", "-bf", "0", "-c:a", "aac", "-shortest", str(clip)], check=True)
+    sink_port, relay_port = _free_port(), _free_port()
+    outs = [tmp_path / f"out{i}.flv" for i in (1, 2)]
+
+    def sink(out):
+        return subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-listen", "1", "-i",
+                                 f"rtmp://127.0.0.1:{sink_port}/live2/k", "-c", "copy", "-f", "flv", str(out)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    s1 = sink(outs[0])
+    log = tmp_path / "relay.log"
+    relay = subprocess.Popen([sys.executable, "-m", "livemax.rtmp_relay"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
+    s2 = pub = None
+    try:
+        time.sleep(1)
+        relay.stdin.write((json.dumps({"listen_port": relay_port, "host": "127.0.0.1", "port": sink_port, "app": "live2",
+                                       "key": "k", "tcurl": f"rtmp://127.0.0.1:{sink_port}/live2", "tls": False,
+                                       "log": str(log)}) + "\n").encode())
+        relay.stdin.close()
+        time.sleep(1.5)
+        pub = subprocess.Popen(["ffmpeg", "-v", "error", "-re", "-i", str(clip), "-c", "copy", "-flush_packets", "0",
+                                "-f", "flv", f"tcp://127.0.0.1:{relay_port}"])
+        time.sleep(4)
+        s1.kill()            # 유튜브가 끊음
+        s1.wait()
+        s2 = sink(outs[1])   # 곧 다시 받을 준비
+        assert pub.wait(timeout=30) == 0  # ffmpeg 는 재시작 없이 끝까지
+        s2.wait(timeout=20)
+    finally:
+        for p in (relay, s1, s2, pub):
+            if p and p.poll() is None:
+                p.kill()
+    text = log.read_text(encoding="utf-8")
+    assert "재접속 성공" in text
+    flags = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=flags",
+                            "-of", "csv=p=0", str(outs[1])], capture_output=True, text=True, check=True).stdout.split()
+    assert flags and flags[0].startswith("K")  # 새 세션은 키프레임부터
+    dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(outs[1]), "-f", "null", "-"], capture_output=True, text=True)
+    assert dec.stderr.strip() == ""  # 끊김 없이 디코딩됨

@@ -32,12 +32,15 @@ import ssl
 import struct
 import sys
 import time
+from collections import deque
 
 log = logging.getLogger("livemax.rtmp_relay")
 
 OUT_CHUNK = 4096  # 보내는 RTMP 조각 크기 (OBS·nginx 와 같은 값)
-WRITE_TIMEOUT = 20.0
-BATCH_S = 0.1  # ffmpeg 쪽에서 이만큼 모아 한 번에 보낸다  # 유튜브 쪽 쓰기가 이만큼 막히면 세션을 닫는다
+WRITE_TIMEOUT = 10.0  # 유튜브 쪽 쓰기가 이만큼 막히면 끊긴 것으로 보고 다시 접속
+BATCH_S = 0.1  # ffmpeg 쪽에서 이만큼 모아 한 번에 보낸다
+RECONNECT_GIVEUP_S = 30.0  # 유튜브 재접속을 이만큼 시도해도 안 되면 ffmpeg 재시작으로 넘긴다
+MAX_BUFFER = 40 * 1024 * 1024  # 재접속 동안 쌓아 둘 최대 크기 (5Mbps 기준 약 60초)
 
 # ------------------------------------------------------------------ AMF0
 
@@ -415,6 +418,82 @@ async def read_flv_tag(r: asyncio.StreamReader) -> tuple[int, int, bytes]:
 # ------------------------------------------------------------------ 중계 본체
 
 
+def _emit(obj: dict) -> None:
+    """supervisor 에 알릴 일(재접속 등)을 표준출력 한 줄 JSON 으로."""
+    try:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _avc_seq(t: int, d: bytes) -> bool:
+    return t == 9 and len(d) > 1 and (d[0] & 0x0F) == 7 and d[1] == 0
+
+
+def _aac_seq(t: int, d: bytes) -> bool:
+    return t == 8 and len(d) > 1 and (d[0] >> 4) == 10 and d[1] == 0
+
+
+def _keyframe(t: int, d: bytes) -> bool:
+    return t == 9 and len(d) > 1 and (d[0] >> 4) == 1 and not _avc_seq(t, d)
+
+
+class Feed:
+    """ffmpeg 쪽을 계속 읽어 태그를 쌓는다 — 유튜브가 끊겨 재접속하는 동안에도 ffmpeg 는 막히지 않는다."""
+
+    def __init__(self):
+        self.q: deque = deque()
+        self.size = 0
+        self.eof = False
+        self.meta = self.avc = self.aac = None
+
+    async def pump(self, fr: asyncio.StreamReader) -> None:
+        try:
+            await read_flv_header(fr)
+            parser = FlvParser()
+            while True:
+                chunk = await fr.read(256 * 1024)
+                if not chunk:
+                    break
+                for t, ts, d in parser.feed(chunk):
+                    if t == 18 and self.meta is None:
+                        self.meta = (t, ts, d)
+                    elif _avc_seq(t, d):
+                        self.avc = (t, ts, d)
+                    elif _aac_seq(t, d):
+                        self.aac = (t, ts, d)
+                    self.q.append((t, ts, d))
+                    self.size += len(d)
+                if self.size > MAX_BUFFER:  # 오래 끊겨 너무 쌓이면 최근 키프레임부터만 남긴다
+                    self.rewind_to_keyframe()
+        except (asyncio.IncompleteReadError, ConnectionError, OSError, RtmpError):
+            pass
+        finally:
+            self.eof = True
+
+    def take(self) -> list:
+        out = list(self.q)
+        self.q.clear()
+        self.size = 0
+        return out
+
+    def rewind_to_keyframe(self) -> int:
+        """쌓인 것 중 가장 최근 키프레임 앞은 버린다. 그 키프레임의 시각을 돌려준다 (없으면 첫 태그 시각)."""
+        q = list(self.q)
+        idx = next((i for i in range(len(q) - 1, -1, -1) if _keyframe(q[i][0], q[i][2])), None)
+        if idx is None:
+            return q[0][1] if q else 0
+        base = q[idx][1]
+        rest = [x for x in q[idx:] if x[0] == 9 or x[1] >= base]  # 키프레임보다 이른 소리는 버림
+        self.q = deque(rest)
+        self.size = sum(len(x[2]) for x in rest)
+        return base
+
+    def headers(self) -> list:
+        return [x for x in (self.meta, self.avc, self.aac) if x]
+
+
 class Relay:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -439,6 +518,35 @@ class Relay:
                     sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
         return r, w
 
+    async def _publish(self) -> Publisher:
+        c = self.cfg
+        ur, uw = await self._open_upstream()
+        pub = Publisher(ur, uw)
+        try:
+            await asyncio.wait_for(pub.handshake(), 15)
+            await pub.connect(c["app"], c["tcurl"])
+            await pub.publish(c["key"])
+        except BaseException:
+            await pub.close()
+            raise
+        return pub
+
+    async def _reconnect(self, feed: "Feed") -> Publisher | None:
+        """유튜브가 끊었을 때: ffmpeg 는 그대로 두고 중계기만 다시 접속 (그동안 들어온 영상은 버퍼에)."""
+        t0 = time.monotonic()
+        for i, delay in enumerate((0, 0.5, 1, 1, 2, 3, 5, 5, 5, 5)):
+            if feed.eof:
+                return None
+            if delay:
+                await asyncio.sleep(delay)
+            if time.monotonic() - t0 > RECONNECT_GIVEUP_S:
+                break
+            try:
+                return await self._publish()
+            except (RtmpError, ssl.SSLError, ConnectionError, OSError, asyncio.TimeoutError) as e:
+                log.warning("유튜브 재접속 %d회째 실패: %s", i + 1, e)
+        return None
+
     async def handle(self, fr: asyncio.StreamReader, fw: asyncio.StreamWriter) -> None:
         if self.busy:  # 라이브 1개 = ffmpeg 1개. 겹치면 새 것은 거절
             fw.close()
@@ -447,31 +555,46 @@ class Relay:
         pub = None
         t0 = time.monotonic()
         sent = 0
+        feed = Feed()
+        reader = asyncio.create_task(feed.pump(fr))
         try:
             c = self.cfg
-            ur, uw = await self._open_upstream()
-            pub = Publisher(ur, uw)
-            await asyncio.wait_for(pub.handshake(), 15)
-            await pub.connect(c["app"], c["tcurl"])
-            await pub.publish(c["key"])
+            pub = await self._publish()
             log.info("유튜브 송출 시작 (%s:%s%s, %.2f초)", c["host"], c["port"], " TLS" if c.get("tls") else "",
                      time.monotonic() - t0)
-            await read_flv_header(fr)
-            parser = FlvParser()
-            while not pub.closed.is_set():
-                chunk = await fr.read(256 * 1024)
-                if not chunk:
-                    log.info("ffmpeg 연결 종료")
-                    break
-                tags = parser.feed(chunk)
-                if tags:
-                    out = b"".join(pub.tag_bytes(t, ts, d) for t, ts, d in tags)
-                    await pub.send_media(out)
-                    sent += len(out)
-                # 40ms 씩 모아서 처리 — 깨어나는 횟수를 줄여 CPU 절약 (지연 40ms 는 송출에 영향 없음)
-                await asyncio.sleep(BATCH_S)
-            else:
-                log.warning("유튜브 쪽 연결이 끊김 — ffmpeg 연결도 닫음")
+            offset = 0
+            while True:
+                # --- 보내기: 버퍼에 쌓인 태그를 모아 한 번에 (40~100ms 마다 깨어남 — CPU 절약)
+                while not pub.closed.is_set():
+                    tags = feed.take()
+                    if tags:
+                        out = b"".join(pub.tag_bytes(t, max(0, ts - offset), d) for t, ts, d in tags)
+                        try:
+                            await pub.send_media(out)
+                        except (asyncio.TimeoutError, ConnectionError, OSError, ssl.SSLError) as e:
+                            log.warning("유튜브 쓰기 실패: %s", type(e).__name__)
+                            break
+                        sent += len(out)
+                    elif feed.eof:
+                        log.info("ffmpeg 연결 종료")
+                        return
+                    await asyncio.sleep(BATCH_S)
+                # --- 유튜브가 끊음 → 빠른 재접속
+                cut = time.monotonic()
+                log.warning("유튜브 쪽 연결이 끊김 — 중계기만 바로 다시 접속 (ffmpeg 는 계속)")
+                await pub.close()
+                pub = await self._reconnect(feed)
+                if pub is None:
+                    log.warning("재접속 실패 — ffmpeg 연결도 닫음 (송출 프로그램 재시작으로 넘김)")
+                    return
+                # 다시 붙으면: 영상·소리 설정 정보를 먼저 보내고, 가장 최근 키프레임부터 이어서 (시각은 0부터 다시)
+                base = feed.rewind_to_keyframe()
+                offset = base
+                head = b"".join(pub.tag_bytes(t, 0, d) for t, _ts, d in feed.headers())
+                await pub.send_media(head)
+                gap = time.monotonic() - cut
+                log.warning("유튜브 재접속 성공 — 공백 %.1f초", gap)
+                _emit({"event": "reconnect", "gap": round(gap, 2)})
         except asyncio.IncompleteReadError:
             log.info("ffmpeg 연결 종료")
         except asyncio.TimeoutError:
@@ -482,6 +605,7 @@ class Relay:
             log.exception("송출 세션 오류")
         finally:
             log.info("세션 종료 (%.0f초, %.1f MB)", time.monotonic() - t0, sent / 1e6)
+            reader.cancel()
             if pub:
                 await pub.close()
             fw.close()
@@ -525,8 +649,9 @@ def main() -> None:
 class RelayProc:
     """라이브 1개의 중계기 자식 프로세스 (tls_relay.Relay 와 같은 모양: start/alive/stop)."""
 
-    def __init__(self, live_id: str, log_dir):
+    def __init__(self, live_id: str, log_dir, on_event=None):
         self.live_id = live_id
+        self.on_event = on_event  # 중계기가 알려 오는 일 (예: {"event": "reconnect", "gap": 1.2})
         self.log_path = log_dir / f"tls-{live_id}.log"  # 웹의 'TLS' 로그 자리를 그대로 쓴다
         self.proc = None
         self.port: int | None = None
@@ -549,7 +674,10 @@ class RelayProc:
                "cafile": tls_relay.CA_FILE if os.path.exists(tls_relay.CA_FILE) else None,
                "connect_addr": tls_relay.resolve_ipv4(host, port) if ipv4 else None, "log": str(self.log_path)}
         self.proc = subprocess.Popen([sys.executable, "-m", "livemax.rtmp_relay"], stdin=subprocess.PIPE,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        import threading
+
+        threading.Thread(target=self._read_events, args=(self.proc,), name=f"{self.live_id}-relay-ev", daemon=True).start()
         try:
             self.proc.stdin.write((json.dumps(cfg) + "\n").encode())
             self.proc.stdin.close()
@@ -567,6 +695,18 @@ class RelayProc:
         log.warning("%s: 새 중계기를 띄우지 못함 — 기존 방식으로 송출 (로그: %s)", self.live_id, self.log_path)
         self.stop()
         return None
+
+    def _read_events(self, proc) -> None:
+        for raw in proc.stdout:
+            try:
+                ev = json.loads(raw)
+            except ValueError:
+                continue
+            if self.on_event:
+                try:
+                    self.on_event(ev)
+                except Exception:  # noqa: BLE001
+                    log.exception("중계기 알림 처리 실패")
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None

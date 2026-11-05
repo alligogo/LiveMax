@@ -261,7 +261,7 @@ class LiveProc:
             # 새 중계기(lmrelay): 라이브별로 켠 경우만. 못 띄우거나 연속 실패하면 기존 방식(stunnel)으로
             if (live.fast_relay and settings["output"].get("lm_relay", {}).get("enabled", True)
                     and time.time() >= self.lm_block_until):
-                lm = rtmp_relay.RelayProc(live.id, paths.logs)
+                lm = rtmp_relay.RelayProc(live.id, paths.logs, on_event=self._relay_event)
                 lport = lm.start(base, key, verify=bool(rcfg.get("verify", True)), ipv4=bool(rcfg.get("ipv4", True)))
                 if lport:
                     self.relay = lm
@@ -314,6 +314,13 @@ class LiveProc:
             return ran >= 300
         finally:
             conn.close()
+
+    def _relay_event(self, ev: dict) -> None:
+        """새 중계기가 유튜브에 혼자 다시 붙었을 때 — 송출 프로그램은 안 멈췄지만 끊김으로 기록한다 (카드·관제·로그)."""
+        if ev.get("event") == "reconnect":
+            gap = float(ev.get("gap") or 0)
+            self.restarts.append((time.time(), f"유튜브 재접속 {gap:.1f}초"))
+            self.event("warn", f"유튜브가 연결을 끊음 → 중계기가 {gap:.1f}초 만에 다시 접속 (송출 프로그램은 계속)")
 
     def _read_progress(self, p: subprocess.Popen) -> None:
         block: dict[str, str] = {}
