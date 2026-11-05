@@ -467,3 +467,9 @@ tr.locked td:first-child { color: #fff; }
 .logout-row .btn { display: inline-flex; align-items: center; gap: 8px; }
 .logout-row .ico { display: inline-flex; width: 16px; height: 16px; }
 .logout-row .ico svg { width: 16px; height: 16px; }
+/* 링크로 가져오기 */
+.linkbox { margin-top: 14px; }
+.linkbox .row { display: flex; gap: 8px; align-items: stretch; }
+.linkbox textarea { flex: 1; min-width: 0; resize: vertical; min-height: 42px; font-size: 13px; }
+.linkbox .btn { flex: none; }
+@media (max-width: 560px) { .linkbox .row { flex-direction: column; } }

@@ -665,6 +665,15 @@ async function renderFolder(kind, root, data) {
   const drop = h("div", { class: "drop" }, h("div", {}, h("b", {}, "파일을 여기로 끌어다 놓거나 "), h("a", { style: "color:var(--green);cursor:pointer", onclick: () => input.click() }, "선택"), input),
     h("div", { class: "small faint", style: "margin-top:6px" }, "큰 파일도 끊기면 이어서 올라갑니다 · 다른 폴더·메뉴로 옮겨도 계속 올라가요 (오른쪽 아래 업로드 창)"));
   const go = (files) => uploadFiles(kind, folder, files);
+  const links = h("textarea", { class: "input", rows: 2, placeholder: "구글 드라이브·드롭박스 공유 링크 (한 줄에 하나)" });
+  const linkBox = h("form", { class: "linkbox", onsubmit: async (e) => {
+      e.preventDefault();
+      try { await fetchLinks(kind, folder, links.value); links.value = ""; toast("서버가 받기 시작했습니다 — 오른쪽 아래 창에서 확인"); }
+      catch (er) { toast(er.message, true); }
+    } },
+    h("div", { class: "flabel" }, "링크로 가져오기 (빠름 — 서버가 직접 받음)"),
+    h("div", { class: "row" }, links, h("button", { class: "btn primary" }, "가져오기")),
+    h("div", { class: "hint" }, "구글 드라이브: 공유 → '링크가 있는 모든 사용자' 로 바꾼 뒤 링크 복사. 폴더 링크는 안 되고 파일마다 넣으세요."));
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("over"));
   drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); go(e.dataTransfer.files); });
@@ -709,7 +718,7 @@ async function renderFolder(kind, root, data) {
         info?.used_by?.length ? h("span", { class: "pill g", style: "text-transform:none" }, `사용 중: ${info.used_by.map(liveName).join(", ")}`) : null,
         h("button", { class: "btn sm ghost", onclick: () => renameFolder(kind, folder) }, "이름 변경"),
         h("button", { class: "btn sm danger", onclick: () => deleteFolder(kind, folder, info) }, "폴더 삭제")),
-      h("div", { class: "card-body" }, drop,
+      h("div", { class: "card-body" }, drop, linkBox,
         detail.pending.length ? h("div", { class: "small", style: "margin-top:12px" }, h("span", { class: "pill y" }, "규격 검증 중"), " ", detail.pending.join(", ")) : null,
         h("div", { class: "small muted", style: "margin-top:14px" }, `${detail.files.length}개 · ${fmt.bytes(info?.size || 0)}`,
           inUse ? h("span", { class: "faint" }, kind === "video" ? " · 라이브에서 쓰는 폴더라 파일을 지울 수 없습니다 (추가는 가능)"
@@ -773,7 +782,7 @@ function upPanel() {
   return UP.panel;
 }
 function upHead() {
-  const left = UP.queue.length + (UP.running ? 1 : 0);
+  const left = UP.queue.length + (UP.running ? 1 : 0) + UP.items.filter((x) => x.fetch && (x.state === "wait" || x.state === "run")).length;
   const done = UP.items.filter((x) => x.state === "done").length, fail = UP.items.filter((x) => x.state === "err").length;
   const canceled = UP.items.filter((x) => x.state === "cancel").length;
   UP.head.replaceChildren(
@@ -810,6 +819,10 @@ function upRow(it) {
   return it.row;
 }
 function upCancel(it) {
+  if (it.fetch) {  // 링크로 가져오기: 서버에 취소 요청 (상태는 다음 확인 때 반영)
+    if (it.state === "wait" || it.state === "run") { it.txt.textContent = "취소 중…"; api("DELETE", `/api/fetch/${it.id}`).catch(() => {}); }
+    return;
+  }
   if (it.state === "wait") {
     UP.queue = UP.queue.filter((x) => x !== it);
     upMark(it, "cancel", "취소됨");
@@ -820,7 +833,47 @@ function upCancel(it) {
 }
 function upCancelAll() {
   for (const it of [...UP.queue]) upCancel(it);
-  for (const it of UP.items.filter((x) => x.state === "run")) upCancel(it);
+  for (const it of UP.items.filter((x) => x.state === "run" || (x.fetch && x.state === "wait"))) upCancel(it);
+}
+
+// 링크로 가져오기: 서버가 받는 상황을 1.5초마다 받아 업로드 창에 같이 보여 준다
+async function fetchLinks(kind, folder, text) {
+  const r = await api("POST", `/api/media/${kind}/${encodeURIComponent(folder)}/fetch`, { urls: text });
+  upPanel();
+  const g = upGroup(kind, folder);
+  for (const j of r.jobs) {
+    const it = { fetch: true, id: j.id, kind, folder, state: "wait", file: { name: `링크 · ${j.source}` } };
+    UP.items.push(it); g.list.append(upRow(it));
+    it.txt.textContent = "대기 (서버가 받음)";
+  }
+  upHead();
+  if (!UP.fetchTimer) UP.fetchTimer = setInterval(fetchPoll, 1500);
+}
+async function fetchPoll() {
+  let jobs;
+  try { jobs = (await api("GET", "/api/fetch")).jobs; } catch (e) { return; }
+  const byId = Object.fromEntries(jobs.map((j) => [j.id, j]));
+  let active = 0;
+  for (const it of UP.items.filter((x) => x.fetch && (x.state === "wait" || x.state === "run"))) {
+    const j = byId[it.id];
+    if (!j) { upMark(it, "err", "기록 없음 (서버 재시작?)"); continue; }
+    if (j.name) it.row.querySelector(".nm").textContent = j.name;
+    if (j.state === "run") {
+      it.state = "run";
+      const pct = j.total ? (j.got / j.total) * 100 : 0;
+      it.bar.style.width = (j.total ? pct : 30).toFixed(1) + "%";
+      it.txt.textContent = `${j.total ? pct.toFixed(0) + "% · " : fmt.bytes(j.got) + " · "}${fmt.bytes(j.speed)}/s`;
+      active++;
+    } else if (j.state === "wait") { active++; }
+    else if (j.state === "done") { it.bar.style.width = "100%"; upMark(it, "done", "완료 · 검증 중"); }
+    else if (j.state === "cancel") upMark(it, "cancel", "취소됨");
+    else if (j.state === "err") upMark(it, "err", "실패: " + j.error);
+  }
+  upHead();
+  if (!active) {
+    clearInterval(UP.fetchTimer); UP.fetchTimer = null;
+    setTimeout(() => { const m = location.hash.match(/^#\/media\/(video|audio)/); if (m && !UP.running) showMedia(m[1]); }, 4000);
+  }
 }
 function upMark(it, state, text) {
   it.state = state; it.txt.textContent = text;

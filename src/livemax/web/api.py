@@ -597,6 +597,27 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         pending = sorted(p.name for p in pend_dir.iterdir() if p.is_file()) if pend_dir.is_dir() else []
         return {"files": out, "pending": pending}
 
+    # ------------------------------------------------------------------ 링크로 가져오기
+    @app.post("/api/media/{kind}/{folder}/fetch")
+    def fetch_add(kind: str, folder: str, b: dict = Body(default={})):
+        if not _kind(kind) or not config.valid_folder_name(folder) or not (paths.kind_root(kind) / folder).is_dir():
+            return err("폴더 없음")
+        urls = [u.strip() for u in str(b.get("urls", "")).splitlines() if u.strip()][:50]
+        if not urls:
+            return err("링크를 넣으세요 (한 줄에 하나)")
+        bad = [u for u in urls if not u.lower().startswith(("http://", "https://"))]
+        if bad:
+            return err(f"http(s) 링크가 아닙니다: {bad[0][:60]}")
+        return {"ok": True, "jobs": core.fetcher.add(kind, folder, urls)}
+
+    @app.get("/api/fetch")
+    def fetch_list():
+        return {"jobs": core.fetcher.list()}
+
+    @app.delete("/api/fetch/{jid}")
+    def fetch_cancel(jid: int):
+        return {"ok": core.fetcher.cancel(jid)}
+
     @app.post("/api/media/{kind}")
     def folder_create(request: Request, kind: str, b: dict = Body(default={})):
         name = str(b.get("name", "")).strip()
