@@ -237,3 +237,40 @@ def test_relay_keeps_youtube_session_when_ffmpeg_is_replaced(tmp_path: Path):
         capture_output=True, text=True, check=True).stdout.split()]
     assert 7.0 < ts[-1] - ts[0] < 11.0       # 4초 + 쉰 시간 1초 남짓 + 4초 — 이어 붙은 하나의 타임라인
     assert all(b >= a for a, b in zip(ts, ts[1:]))  # 거꾸로 가지 않음
+
+
+def test_relay_reports_slow_youtube_only_when_it_lasts(monkeypatch):
+    """유튜브로 못 나가고 밀리면 → 5초 이어질 때 '밀림 시작', 회복 5초 뒤 '밀림 끝' 한 번씩. 평소엔 15초마다 stats 만."""
+    events = []
+    monkeypatch.setattr(rr, "_emit", events.append)
+    r = rr.Relay({})
+    r.busy = True
+    r.feed = rr.Feed(r.stats)
+    w = r._watch_state(0.0)
+    bps = 625_000  # 5Mbps
+    t = 0.0
+
+    def tick(sent_frac: float):
+        nonlocal t
+        t += 1
+        r.stats["in"] += bps
+        r.stats["out"] += int(bps * sent_frac)  # 유튜브 쪽으로 넘긴 양
+        r.feed.size += bps - int(bps * sent_frac)  # 못 넘긴 건 중계기 버퍼에 쌓임
+        r._watch_step(w, t)
+
+    for _ in range(16):
+        tick(1.0)
+    assert [e["event"] for e in events] == ["stats"]
+    assert 4900 <= events[0]["kbps_in"] <= 5100 and 4900 <= events[0]["kbps_out"] <= 5100
+    events.clear()
+    for _ in range(4):  # 2초치 쌓일 때까지는 조용
+        tick(0.5)
+    assert not [e for e in events if e["event"] != "stats"]
+    for _ in range(10):
+        tick(0.5)
+    assert [e["event"] for e in events if e["event"] != "stats"] == ["slow_start"]
+    r.feed.size = 0  # 회복: 밀린 게 다 나감
+    for _ in range(6):
+        tick(1.0)
+    ends = [e for e in events if e["event"] == "slow_end"]
+    assert len(ends) == 1 and ends[0]["max_delay"] >= 4 and ends[0]["kbps_out"] < ends[0]["kbps_in"]

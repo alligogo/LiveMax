@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS metrics_live (
     state TEXT, speed REAL,
     cpu_pct REAL, rss_mb REAL,
     audio_cpu_pct REAL, audio_rss_mb REAL,
-    out_time_s REAL
+    out_time_s REAL,
+    kbps_in REAL, kbps_out REAL, delay_s REAL
 );
 CREATE INDEX IF NOT EXISTS ix_ml_ts ON metrics_live(ts);
 CREATE INDEX IF NOT EXISTS ix_ml_live_ts ON metrics_live(live_id, ts);
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS metrics_system_hourly (
 CREATE TABLE IF NOT EXISTS metrics_live_hourly (
     hour_ts INTEGER NOT NULL, live_id TEXT NOT NULL,
     speed_avg REAL, speed_min REAL, cpu_avg REAL, rss_max REAL, samples INTEGER,
+    kbps_out_min REAL, delay_max REAL,
     PRIMARY KEY (hour_ts, live_id)
 );
 
@@ -121,6 +123,13 @@ def init(db_path: Path) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
+        # 예전 DB 에 새 칸 추가 (있으면 그대로)
+        for table, cols in (("metrics_live", ("kbps_in", "kbps_out", "delay_s")),
+                            ("metrics_live_hourly", ("kbps_out_min", "delay_max"))):
+            have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for c in cols:
+                if c not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {c} REAL")
     finally:
         conn.close()
 

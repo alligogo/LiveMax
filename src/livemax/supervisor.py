@@ -334,7 +334,18 @@ class LiveProc:
 
     def _relay_event(self, ev: dict) -> None:
         """새 중계기가 유튜브에 혼자 다시 붙었을 때 — 송출 프로그램은 안 멈췄지만 끊김으로 기록한다 (카드·관제·로그)."""
-        if ev.get("event") == "reconnect":
+        kind = ev.get("event")
+        if kind == "stats":  # 15초마다: 유튜브로 실제 나간 양·밀린 시간 (DB 기록용, 로그 없음)
+            self.set(kbps_in=ev.get("kbps_in"), kbps_out=ev.get("kbps_out"), delay_s=ev.get("delay"), relay_at=time.time())
+            return
+        if kind == "slow_start":
+            self.log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %s초 쌓임 (연결은 유지)", ev.get("delay"))
+            return
+        if kind == "slow_end":
+            self.event("warn", f"유튜브 전송 밀림 {ev.get('dur')}초 — 최대 {ev.get('max_delay')}초 밀림, "
+                               f"유튜브로 {ev.get('kbps_out')}kbps (보낼 양 {ev.get('kbps_in')}kbps). 연결은 유지됨")
+            return
+        if kind == "reconnect":
             gap = float(ev.get("gap") or 0)
             self.restarts.append((time.time(), f"유튜브 재접속 {gap:.1f}초"))
             self.event("warn", f"유튜브가 연결을 끊음 → 중계기가 {gap:.1f}초 만에 다시 접속 (송출 프로그램은 계속)")

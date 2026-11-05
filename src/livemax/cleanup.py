@@ -208,8 +208,10 @@ def rollup_metrics(conn, raw_days: float, now: float, dry: bool) -> int:
                           MAX(lives_running), COUNT(*)
                    FROM metrics_system WHERE ts >= ? AND ts < ? GROUP BY CAST(ts/3600 AS INTEGER)""", (start, end))
             conn.execute(
-                """INSERT OR REPLACE INTO metrics_live_hourly
-                   SELECT CAST(ts/3600 AS INTEGER)*3600, live_id, AVG(speed), MIN(speed), AVG(cpu_pct), MAX(rss_mb), COUNT(*)
+                """INSERT OR REPLACE INTO metrics_live_hourly(hour_ts, live_id, speed_avg, speed_min, cpu_avg, rss_max,
+                                                              samples, kbps_out_min, delay_max)
+                   SELECT CAST(ts/3600 AS INTEGER)*3600, live_id, AVG(speed), MIN(speed), AVG(cpu_pct), MAX(rss_mb), COUNT(*),
+                          MIN(kbps_out), MAX(delay_s)
                    FROM metrics_live WHERE ts >= ? AND ts < ? GROUP BY CAST(ts/3600 AS INTEGER), live_id""", (start, end))
             n += conn.execute("DELETE FROM metrics_system WHERE ts >= ? AND ts < ?", (start, end)).rowcount
             conn.execute("DELETE FROM metrics_live WHERE ts >= ? AND ts < ?", (start, end))

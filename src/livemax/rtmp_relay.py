@@ -34,6 +34,14 @@ import sys
 import time
 from collections import deque
 
+try:
+    import fcntl
+    import termios
+    _OUTQ = getattr(termios, "TIOCOUTQ", 0x5411)
+except ImportError:  # 윈도우 (테스트용) — 커널 대기량은 0 으로 본다
+    fcntl = None
+    _OUTQ = 0
+
 log = logging.getLogger("livemax.rtmp_relay")
 
 OUT_CHUNK = 4096  # 보내는 RTMP 조각 크기 (OBS·nginx 와 같은 값)
@@ -42,6 +50,9 @@ BATCH_S = 0.1  # ffmpeg 쪽에서 이만큼 모아 한 번에 보낸다
 RECONNECT_GIVEUP_S = 30.0  # 유튜브 재접속을 이만큼 시도해도 안 되면 ffmpeg 재시작으로 넘긴다
 KEEP_S = 20  # ffmpeg 가 바뀌는 동안(영상 교체·일일 재시작) 유튜브 연결을 이만큼 살려 둔다
 MAX_BUFFER = 40 * 1024 * 1024  # 재접속 동안 쌓아 둘 최대 크기 (5Mbps 기준 약 60초)
+STATS_S = 15  # 이만큼마다 supervisor 에 전송량·지연을 알린다 (DB 기록용)
+SLOW_DELAY_S = 2.0  # 유튜브로 못 보내고 밀린 영상이 이만큼(초) 넘게 이어지면 '전송 밀림'
+SLOW_HOLD_S = 5  # 밀림이 이만큼 계속돼야 기록 (순간 출렁임은 무시), 회복도 이만큼 계속돼야 끝으로 봄
 
 # ------------------------------------------------------------------ AMF0
 
@@ -443,10 +454,11 @@ def _keyframe(t: int, d: bytes) -> bool:
 class Feed:
     """ffmpeg 쪽을 계속 읽어 태그를 쌓는다 — 유튜브가 끊겨 재접속하는 동안에도 ffmpeg 는 막히지 않는다."""
 
-    def __init__(self):
+    def __init__(self, stats: dict | None = None):
         self.q: deque = deque()
         self.size = 0
         self.eof = False
+        self.stats = stats if stats is not None else {"in": 0}
         self.meta = self.avc = self.aac = None
 
     async def pump(self, fr: asyncio.StreamReader) -> None:
@@ -457,6 +469,7 @@ class Feed:
                 chunk = await fr.read(256 * 1024)
                 if not chunk:
                     break
+                self.stats["in"] += len(chunk)
                 for t, ts, d in parser.feed(chunk):
                     if t == 18 and self.meta is None:
                         self.meta = (t, ts, d)
@@ -503,6 +516,79 @@ class Relay:
         self.last_out = 0  # 마지막으로 보낸 시각(ms)
         self.last_wall = 0.0  # 그때의 실제 시각
         self.idle_task: asyncio.Task | None = None
+        self.stats = {"in": 0, "out": 0}  # ffmpeg 에서 받은 바이트 / 유튜브 쪽에 넘긴 바이트 (누적)
+        self.feed: Feed | None = None
+        self.reconnecting = False
+
+    def _pending(self) -> int:
+        """유튜브로 아직 못 나간 바이트: 중계기 버퍼 + 보내기 버퍼 + 커널 송신 대기열."""
+        n = self.feed.size if self.feed else 0
+        pub = self.pub
+        if pub is not None and not pub.closed.is_set():
+            try:
+                n += pub.w.transport.get_write_buffer_size()
+            except Exception:  # noqa: BLE001
+                pass
+            sock = pub.w.get_extra_info("socket")
+            if fcntl is not None and sock is not None:
+                try:
+                    n += struct.unpack("i", fcntl.ioctl(sock.fileno(), _OUTQ, b"\0\0\0\0"))[0]
+                except (OSError, ValueError):
+                    pass
+        return n
+
+    async def watch(self) -> None:
+        """1초마다 '유튜브로 밀린 영상(초)'을 재고, 15초마다 전송량을 알린다. 문제 있을 때만 로그 (밀림 시작·끝)."""
+        w = self._watch_state(time.monotonic())
+        while True:
+            await asyncio.sleep(1)
+            self._watch_step(w, time.monotonic())
+
+    def _watch_state(self, now: float) -> dict:
+        return {"t": now, "in": self.stats["in"], "out": self.stats["out"], "rate": 0.0, "win": deque(maxlen=STATS_S),
+                "slow": None, "calm": 0, "emit": now}
+
+    def _watch_step(self, w: dict, now: float) -> None:
+        dt = max(0.001, now - w["t"])
+        pend = self._pending()
+        wire = self.stats["out"] - pend + (self.feed.size if self.feed else 0)  # 실제로 소켓을 떠난 누적 바이트
+        d_in, d_out = self.stats["in"] - w["in"], max(0, wire - w["out"])
+        w["t"], w["in"], w["out"] = now, self.stats["in"], wire
+        if d_in > 0:  # 최근 입력 속도 (바이트/초) — 밀린 양을 '초'로 바꿀 때 쓴다
+            w["rate"] = d_in / dt if w["rate"] == 0 else w["rate"] * 0.9 + d_in / dt * 0.1
+        w["win"].append((dt, d_in, d_out))
+        delay = pend / w["rate"] if w["rate"] > 0 and self.busy else 0.0
+        slow = w["slow"]
+        # --- 밀림 판정 (재접속 중은 이미 따로 기록하므로 제외)
+        if self.busy and not self.reconnecting and delay >= SLOW_DELAY_S:
+            w["calm"] = 0
+            if slow is None:
+                slow = w["slow"] = {"t0": now, "max": delay, "in": 0, "out": 0, "n": 0, "logged": False}
+            slow["max"] = max(slow["max"], delay)
+            slow["in"] += d_in
+            slow["out"] += d_out
+            slow["n"] += dt
+            if not slow["logged"] and now - slow["t0"] >= SLOW_HOLD_S:
+                slow["logged"] = True
+                log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %.1f초 쌓임", delay)
+                _emit({"event": "slow_start", "delay": round(delay, 1)})
+        elif slow is not None:
+            w["calm"] += 1
+            if w["calm"] >= SLOW_HOLD_S or not self.busy:
+                if slow["logged"]:
+                    span = max(1.0, slow["n"])
+                    kin, kout = slow["in"] * 8 / span / 1000, slow["out"] * 8 / span / 1000
+                    log.warning("유튜브 전송 밀림 끝 — %.0f초 동안, 최대 %.1f초 밀림, 유튜브로 %.0f kbps (입력 %.0f kbps)",
+                                span, slow["max"], kout, kin)
+                    _emit({"event": "slow_end", "dur": round(span), "max_delay": round(slow["max"], 1),
+                           "kbps_out": round(kout), "kbps_in": round(kin)})
+                w["slow"], w["calm"] = None, 0
+        # --- 15초마다 알림 (DB 기록용)
+        if now - w["emit"] >= STATS_S:
+            w["emit"] = now
+            span = sum(x[0] for x in w["win"]) or 1
+            _emit({"event": "stats", "kbps_in": round(sum(x[1] for x in w["win"]) * 8 / span / 1000),
+                   "kbps_out": round(sum(x[2] for x in w["win"]) * 8 / span / 1000), "delay": round(delay, 2)})
 
     async def _open_upstream(self):
         c = self.cfg
@@ -573,7 +659,8 @@ class Relay:
             self.idle_task = None
         t0 = time.monotonic()
         sent = 0
-        feed = Feed()
+        feed = Feed(self.stats)
+        self.feed = feed
         reader = asyncio.create_task(feed.pump(fr))
         keep = False  # 끝날 때 유튜브 연결을 살려 둘지 (ffmpeg 만 바뀌는 경우)
         try:
@@ -606,6 +693,7 @@ class Relay:
                             if o > self.last_out:
                                 self.last_out = o
                         out = b"".join(parts)
+                        self.stats["out"] += len(out)
                         try:
                             await pub.send_media(out)
                         except (asyncio.TimeoutError, ConnectionError, OSError, ssl.SSLError) as e:
@@ -622,7 +710,11 @@ class Relay:
                 cut = time.monotonic()
                 log.warning("유튜브 쪽 연결이 끊김 — 중계기만 바로 다시 접속 (ffmpeg 는 계속)")
                 await pub.close()
-                self.pub = await self._reconnect(feed)
+                self.reconnecting = True
+                try:
+                    self.pub = await self._reconnect(feed)
+                finally:
+                    self.reconnecting = False
                 if self.pub is None:
                     log.warning("재접속 실패 — ffmpeg 연결도 닫음 (송출 프로그램 재시작으로 넘김)")
                     return
@@ -647,6 +739,7 @@ class Relay:
             log.info("세션 종료 (%.0f초, %.1f MB)", time.monotonic() - t0, sent / 1e6)
             reader.cancel()
             fw.close()
+            self.feed = None
             if keep and self.pub is not None and not self.pub.closed.is_set():
                 self.idle_task = asyncio.create_task(self._close_idle())
             elif self.pub is not None:
@@ -657,8 +750,12 @@ class Relay:
     async def serve(self) -> None:
         srv = await asyncio.start_server(self.handle, "127.0.0.1", int(self.cfg["listen_port"]))
         log.info("중계 대기 127.0.0.1:%s → %s:%s", self.cfg["listen_port"], self.cfg["host"], self.cfg["port"])
-        async with srv:
-            await srv.serve_forever()
+        watcher = asyncio.create_task(self.watch())
+        try:
+            async with srv:
+                await srv.serve_forever()
+        finally:
+            watcher.cancel()
 
 
 class _HideKey(logging.Filter):

@@ -64,16 +64,19 @@ class Collector:
                         "cpu": sum(self._cpu(x, dt, 0) for x in pids),
                         "rss_mb": sum(sysmetrics.proc_rss_mb(x) or 0 for x in pids) or None,
                     }
+                    fresh = now - (s.get("relay_at") or 0) < 40  # 중계기 알림이 최근 것일 때만 (꺼진 라이브의 옛 값 X)
                     live_rows.append((now, lid, s.get("state"), s.get("speed"), self.per_live[lid]["cpu"],
-                                      self.per_live[lid]["rss_mb"], s.get("out_time")))
+                                      self.per_live[lid]["rss_mb"], s.get("out_time"),
+                                      s.get("kbps_in") if fresh else None, s.get("kbps_out") if fresh else None,
+                                      s.get("delay_s") if fresh else None))
                 self.latest = {"ts": now, "cpu_pct": cpu, "steal_pct": steal, "iowait_pct": iowait,
                                "mem_used_mb": mem_used, "mem_total_mb": mem_total, "disk_used_gb": d_used,
                                "disk_total_gb": d_total, "disk_pct": d_pct, "net_tx_mbps": tx, "net_rx_mbps": rx,
                                "month_tx_bytes": month_tx, "lives_running": running, "iface": iface}
                 # 한 번의 짧은 트랜잭션으로 (라이브 15개면 예전엔 쓰기 16번)
                 conn.execute("BEGIN")
-                conn.executemany("INSERT INTO metrics_live(ts, live_id, state, speed, cpu_pct, rss_mb, out_time_s)"
-                                 " VALUES (?,?,?,?,?,?,?)", live_rows)
+                conn.executemany("INSERT INTO metrics_live(ts, live_id, state, speed, cpu_pct, rss_mb, out_time_s,"
+                                 " kbps_in, kbps_out, delay_s) VALUES (?,?,?,?,?,?,?,?,?,?)", live_rows)
                 conn.execute(
                     "INSERT INTO metrics_system(ts, cpu_pct, steal_pct, iowait_pct, mem_used_mb, mem_total_mb, disk_used_gb,"
                     " disk_total_gb, net_tx_mbps, net_rx_mbps, month_tx_gb, lives_running) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
