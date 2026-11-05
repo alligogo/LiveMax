@@ -341,9 +341,10 @@ class LiveProc:
             self.set(speed=speed, out_time=ot, bitrate=kbps, progress_at=time.time(),
                      clip=Path(clip["path"]).name if clip else None,
                      clip_folder=Path(clip["path"]).parent.name if clip else None)
-            if time.time() - last_log >= 60:
+            # 1분마다 남기던 정상 진행 기록은 뺐다 — 느려질 때만 남긴다 (감시는 웹·알림이 한다)
+            if speed is not None and speed < 0.97 and time.time() - last_log >= 60:
                 last_log = time.time()
-                self.log.info("progress speed=%s out_time=%s bitrate=%s", speed, block.get("out_time"), br)
+                self.log.warning("송출 느림 speed=%s bitrate=%s", speed, br)
             block = {}
 
     def _read_stderr(self, p: subprocess.Popen) -> None:

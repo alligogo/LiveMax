@@ -87,10 +87,10 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     o: list[str] = []
     w = o.append
     w(f"# 자동 생성 — 직접 수정하지 말 것 ({live.id}, LiveMax)")
-    w("settings.log.stdout.set(true)")
+    w("settings.log.stdout.set(false)")  # 화면 출력은 버려지므로 만들지 않는다
     w("settings.log.file.set(true)")
     w(f"settings.log.file.path.set({q(paths.logs / f'audio-{live.id}.log')})")
-    w("settings.log.level.set(3)")
+    w("settings.log.level.set(2)")  # 문제(심각·치명)만 기록 — 곡마다 남기던 기록은 뺌 (지금 곡은 nowplaying.json 으로 충분)
     w('settings.harbor.bind_addrs.set(["127.0.0.1"])')
     w("settings.server.telnet.set(false)")
     w("settings.init.allow_root.set(true)")
@@ -125,7 +125,6 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     w("end")
     w("def on_new_track(m) =")
     w('  uri = m["filename"]')
-    w('  log.important("now playing: #{uri}")')
     w('  np = json.stringify({live=live_id, file=uri, title=m["title"], artist=m["artist"], started=time()})')
     w("  file.write(data=np, nowplaying_path)")
     w("end")
