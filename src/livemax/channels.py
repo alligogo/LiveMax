@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from . import secrets
+from .config import read_yaml_cached
 from .config import ConfigError, Live, LiveStore, _atomic_write
 from .paths import Paths
 
@@ -108,7 +109,7 @@ class ChannelStore:
         if self.dir.is_dir():
             for p in self.dir.glob("ch*.yaml"):
                 try:
-                    out.append(_from_dict(yaml.safe_load(p.read_text(encoding="utf-8"))))
+                    out.append(_from_dict(read_yaml_cached(p)))
                 except Exception:  # noqa: BLE001
                     continue
         return sorted(out, key=lambda c: c.number)
@@ -117,7 +118,10 @@ class ChannelStore:
         if not CH_ID_RE.match(cid or ""):
             return None
         p = self._file(cid)
-        return _from_dict(yaml.safe_load(p.read_text(encoding="utf-8"))) if p.exists() else None
+        try:
+            return _from_dict(read_yaml_cached(p))
+        except FileNotFoundError:
+            return None
 
     def new(self, name: str) -> Channel:
         used = {c.number for c in self.all()}

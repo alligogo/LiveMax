@@ -23,6 +23,22 @@ import yaml
 
 from .paths import Paths
 
+# YAML 읽기 캐시 — 감시 루프·관제 화면이 몇 초마다 라이브·채널 설정을 읽는다. 파일이 바뀌었을 때만 다시 해석한다
+# (live1 실측: 매번 YAML 을 해석하느라 관리 프로그램이 순간적으로 코어 하나를 다 쓰는 일이 잦았다).
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)  # C 로 된 빠른 해석기 (없으면 기본)
+_YAML_CACHE: dict[Path, tuple[tuple[int, int, int], Any]] = {}
+
+
+def read_yaml_cached(p: Path) -> Any:
+    """파일 내용(dict)을 돌려준다. 바뀌지 않았으면 이전에 해석한 결과의 복사본."""
+    st = p.stat()
+    sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+    hit = _YAML_CACHE.get(p)
+    if hit is None or hit[0] != sig:
+        hit = (sig, yaml.load(p.read_text(encoding="utf-8"), Loader=_YAML_LOADER))
+        _YAML_CACHE[p] = hit
+    return copy.deepcopy(hit[1])
+
 AUDIO_MODES = ("random_norepeat", "random", "sequential_loop", "sequential")
 LIVE_ID_RE = re.compile(r"^live([1-9][0-9]{0,3})$")
 FOLDER_RE = re.compile(r"^[^\W_][\w .()\-]{0,63}$")
@@ -277,7 +293,7 @@ class LiveStore:
         if self.paths.lives_dir.is_dir():
             for p in self.paths.lives_dir.glob("live*.yaml"):
                 try:
-                    out.append(live_from_dict(yaml.safe_load(p.read_text(encoding="utf-8"))))
+                    out.append(live_from_dict(read_yaml_cached(p)))
                 except Exception:  # noqa: BLE001 — 깨진 파일 하나가 전체를 막지 않게
                     continue
         return sorted(out, key=lambda lv: lv.number)
@@ -286,9 +302,10 @@ class LiveStore:
         if not LIVE_ID_RE.match(live_id or ""):
             return None
         p = self._file(live_id)
-        if not p.exists():
+        try:
+            return live_from_dict(read_yaml_cached(p))
+        except FileNotFoundError:
             return None
-        return live_from_dict(yaml.safe_load(p.read_text(encoding="utf-8")))
 
     def new(self, name: str) -> Live:
         lives = self.all()

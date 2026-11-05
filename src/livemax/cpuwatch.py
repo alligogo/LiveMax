@@ -1,7 +1,7 @@
 """관리 프로그램(livemaxd) 순간 CPU 범인 찾기 — 몰릴 때만 '어느 스레드가 무슨 함수를 하고 있었는지' 로그 한 줄.
 
-0.5초마다 /proc/self/task 의 스레드별 CPU 시간을 읽는다 (파일 몇십 개 읽기 — 부담 거의 없음).
-0.5초 동안 코어 하나의 40% 이상을 쓰면, CPU 를 가장 많이 쓴 스레드 3개의 이름과 그 순간 실행 중이던
+1초마다 /proc/self/task 의 스레드별 CPU 시간을 읽는다 (파일 몇십 개 읽기 — 부담 거의 없음).
+1초 동안 코어 하나의 40% 이상을 쓰면, CPU 를 가장 많이 쓴 스레드 3개의 이름과 그 순간 실행 중이던
 함수(파일:줄)를 남긴다. 로그는 10초에 최대 1줄. 송출(ffmpeg·중계기·Liquidsoap)은 별도 프로세스라 대상 아님.
 """
 
@@ -33,11 +33,13 @@ def _where(ident: int | None, frames: dict) -> str:
     fr = frames.get(ident) if ident is not None else None
     if fr is None:
         return "?"
-    st = [f for f in traceback.extract_stack(fr) if "/livemax/" in f.filename] or traceback.extract_stack(fr)
+    full = traceback.StackSummary.extract(traceback.walk_stack(fr), lookup_lines=False)  # 소스 줄은 안 읽음 (가볍게)
+    full.reverse()
+    st = [f for f in full if "/livemax/" in f.filename] or list(full)
     return " ← ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in reversed(st[-3:]))
 
 
-def run(stop: threading.Event, interval: float = 0.5, threshold: float = 0.4, quiet_s: float = 10.0) -> None:
+def run(stop: threading.Event, interval: float = 1.0, threshold: float = 0.4, quiet_s: float = 10.0) -> None:
     if not os.path.isdir("/proc/self/task"):
         return
     tck = os.sysconf("SC_CLK_TCK")
