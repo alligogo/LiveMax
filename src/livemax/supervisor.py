@@ -40,6 +40,7 @@ from .paths import Paths
 from .state import read_json, write_json_atomic
 
 log = logging.getLogger("livemax.supervisor")
+PLANNED = ("일일 재시작", "설정 적용", "사용자 재시작")  # 일부러 한 재시작 (끊김·경고로 세지 않음)
 LIQUIDSOAP = "liquidsoap"
 
 
@@ -104,7 +105,8 @@ class LiveProc:
         d["video_pid"] = self.video.pid if self.video and self.video.poll() is None else None
         d["audio_pid"] = self.audio.pid if self.audio and self.audio.poll() is None else None
         now = time.time()
-        d["restarts_hour"] = sum(1 for t, _ in self.restarts if now - t < 3600)
+        # 경고 판정용: 일부러 한 재시작(설정 적용·매일 자동·재시작 버튼)은 세지 않는다 — 진짜 문제만
+        d["restarts_hour"] = sum(1 for t, r in self.restarts if now - t < 3600 and not r.startswith(PLANNED))
         d["restarts"] = [{"ts": t, "reason": r} for t, r in list(self.restarts)[-10:]]
         d["nowplaying"] = read_json(self.sup.paths.run_dir / f"{self.id}.nowplaying.json") or {}
         return d
@@ -155,7 +157,7 @@ class LiveProc:
             return
         self.pending_reason = reason
         self.set(state="restarting", message=reason)
-        self._kill_video()
+        self._kill_video(keep_relay=True)
 
     @staticmethod
     def _kill(p: subprocess.Popen | None, sig=signal.SIGTERM, wait: float = 8) -> None:
@@ -166,10 +168,12 @@ class LiveProc:
             except subprocess.TimeoutExpired:
                 p.kill()
 
-    def _kill_video(self) -> None:
+    def _kill_video(self, keep_relay: bool = False) -> None:
+        """ffmpeg 정지. keep_relay: 새 중계기는 살려 둔다 (영상만 다시 띄울 때 — 유튜브 연결 유지)."""
         self._kill(self.video, signal.SIGINT)
-        if self.relay:
+        if self.relay and not (keep_relay and isinstance(self.relay, rtmp_relay.RelayProc)):
             self.relay.stop()
+            self.relay = None
 
     def _backoff(self, n: int) -> float:
         steps = self.sup.settings["supervisor"]["restart_backoff_seconds"]
@@ -259,12 +263,22 @@ class LiveProc:
             rcfg = settings["output"]["tls_relay"]
             out = None
             # 새 중계기(lmrelay): 라이브별로 켠 경우만. 못 띄우거나 연속 실패하면 기존 방식(stunnel)으로
-            if (live.fast_relay and settings["output"].get("lm_relay", {}).get("enabled", True)
-                    and time.time() >= self.lm_block_until):
-                lm = rtmp_relay.RelayProc(live.id, paths.logs, on_event=self._relay_event)
-                lport = lm.start(base, key, verify=bool(rcfg.get("verify", True)), ipv4=bool(rcfg.get("ipv4", True)))
+            use_lm = (live.fast_relay and settings["output"].get("lm_relay", {}).get("enabled", True)
+                      and time.time() >= self.lm_block_until)
+            sig = (base, key)
+            if isinstance(self.relay, rtmp_relay.RelayProc) and not (use_lm and self.relay.alive() and self.relay.sig == sig):
+                self.relay.stop()  # 방식·주소·키가 바뀌었거나 죽었으면 새로
+                self.relay = None
+            if use_lm:
+                if isinstance(self.relay, rtmp_relay.RelayProc):
+                    lport = self.relay.port  # 살아 있는 중계기 재사용 → 유튜브 연결 그대로 (영상 교체·일일 재시작)
+                else:
+                    lm = rtmp_relay.RelayProc(live.id, paths.logs, on_event=self._relay_event)
+                    lport = lm.start(base, key, verify=bool(rcfg.get("verify", True)), ipv4=bool(rcfg.get("ipv4", True)))
+                    if lport:
+                        lm.sig = sig
+                        self.relay = lm
                 if lport:
-                    self.relay = lm
                     out = tls_relay.OutputPlan(url=f"tcp://127.0.0.1:{lport}", extra_args=["-flush_packets", "0"],
                                                mode="lm-relay")
             if out is None:
@@ -287,8 +301,9 @@ class LiveProc:
             self._read_progress(self.video)
             rc = self.video.wait()
             ran = time.time() - started
-            if self.relay:
-                self.relay.stop()
+            if self.relay and not (isinstance(self.relay, rtmp_relay.RelayProc) and self.desired and self.relay.alive()):
+                self.relay.stop()  # 새 중계기는 라이브가 켜져 있는 동안 살려 둔다 (다음 ffmpeg 가 같은 유튜브 연결로)
+                self.relay = None
             reason, self.pending_reason = self.pending_reason, None
             self.intentional = bool(reason)
             if out.mode == "rtmps-relay" and ran < 60 and not reason and self.desired:
@@ -606,7 +621,7 @@ class Supervisor:
                 try:
                     reason = p.watch(now)
                     if reason:
-                        recent = sum(1 for t, _ in p.restarts if now - t < 3600)
+                        recent = sum(1 for t, r in p.restarts if now - t < 3600 and not r.startswith(PLANNED))
                         lv_ = self.store.get(lid)
                         name = lv_.name if lv_ else lid
                         if recent >= int(wd["max_restarts_per_hour"]):

@@ -40,6 +40,7 @@ OUT_CHUNK = 4096  # 보내는 RTMP 조각 크기 (OBS·nginx 와 같은 값)
 WRITE_TIMEOUT = 10.0  # 유튜브 쪽 쓰기가 이만큼 막히면 끊긴 것으로 보고 다시 접속
 BATCH_S = 0.1  # ffmpeg 쪽에서 이만큼 모아 한 번에 보낸다
 RECONNECT_GIVEUP_S = 30.0  # 유튜브 재접속을 이만큼 시도해도 안 되면 ffmpeg 재시작으로 넘긴다
+KEEP_S = 20  # ffmpeg 가 바뀌는 동안(영상 교체·일일 재시작) 유튜브 연결을 이만큼 살려 둔다
 MAX_BUFFER = 40 * 1024 * 1024  # 재접속 동안 쌓아 둘 최대 크기 (5Mbps 기준 약 60초)
 
 # ------------------------------------------------------------------ AMF0
@@ -498,6 +499,10 @@ class Relay:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.busy = False
+        self.pub: Publisher | None = None  # 유튜브 연결 — ffmpeg 가 바뀌어도(영상 교체) 살려 둔다
+        self.last_out = 0  # 마지막으로 보낸 시각(ms)
+        self.last_wall = 0.0  # 그때의 실제 시각
+        self.idle_task: asyncio.Task | None = None
 
     async def _open_upstream(self):
         c = self.cfg
@@ -547,56 +552,91 @@ class Relay:
                 log.warning("유튜브 재접속 %d회째 실패: %s", i + 1, e)
         return None
 
+    async def _close_idle(self) -> None:
+        """ffmpeg 가 끊긴 뒤 KEEP_S 안에 다시 안 오면 (라이브 정지 등) 유튜브 연결을 닫는다."""
+        try:
+            await asyncio.sleep(KEEP_S)
+        except asyncio.CancelledError:
+            return
+        if not self.busy and self.pub:
+            log.info("ffmpeg 가 %d초 동안 다시 오지 않아 유튜브 연결을 닫음", KEEP_S)
+            await self.pub.close()
+            self.pub = None
+
     async def handle(self, fr: asyncio.StreamReader, fw: asyncio.StreamWriter) -> None:
         if self.busy:  # 라이브 1개 = ffmpeg 1개. 겹치면 새 것은 거절
             fw.close()
             return
         self.busy = True
-        pub = None
+        if self.idle_task:
+            self.idle_task.cancel()
+            self.idle_task = None
         t0 = time.monotonic()
         sent = 0
         feed = Feed()
         reader = asyncio.create_task(feed.pump(fr))
+        keep = False  # 끝날 때 유튜브 연결을 살려 둘지 (ffmpeg 만 바뀌는 경우)
         try:
             c = self.cfg
-            pub = await self._publish()
-            log.info("유튜브 송출 시작 (%s:%s%s, %.2f초)", c["host"], c["port"], " TLS" if c.get("tls") else "",
-                     time.monotonic() - t0)
-            offset = 0
+            if self.pub is not None and not self.pub.closed.is_set():
+                # 영상 교체·일일 재시작: ffmpeg 만 새로 왔다 → 같은 유튜브 연결에 이어 붙인다 (재접속·방송 시작 신호 없음)
+                gap = time.monotonic() - self.last_wall
+                base_out = self.last_out + max(33, int(gap * 1000))  # 실제 흐른 시간만큼 시각을 이어 붙임
+                log.info("송출 프로그램 교체 — 유튜브 연결 유지, %.1f초 만에 이어서 송출", gap)
+            else:
+                if self.pub:
+                    await self.pub.close()
+                self.pub = await self._publish()
+                base_out = 0
+                log.info("유튜브 송출 시작 (%s:%s%s, %.2f초)", c["host"], c["port"], " TLS" if c.get("tls") else "",
+                         time.monotonic() - t0)
+            first_in = None
             while True:
-                # --- 보내기: 버퍼에 쌓인 태그를 모아 한 번에 (40~100ms 마다 깨어남 — CPU 절약)
+                pub = self.pub
+                # --- 보내기: 버퍼에 쌓인 태그를 모아 한 번에 (100ms 마다 깨어남 — CPU 절약)
                 while not pub.closed.is_set():
                     tags = feed.take()
                     if tags:
-                        out = b"".join(pub.tag_bytes(t, max(0, ts - offset), d) for t, ts, d in tags)
+                        if first_in is None:
+                            first_in = tags[0][1]
+                        parts = []
+                        for t, ts, d in tags:
+                            o = max(0, base_out + ts - first_in)
+                            parts.append(pub.tag_bytes(t, o, d))
+                            if o > self.last_out:
+                                self.last_out = o
+                        out = b"".join(parts)
                         try:
                             await pub.send_media(out)
                         except (asyncio.TimeoutError, ConnectionError, OSError, ssl.SSLError) as e:
                             log.warning("유튜브 쓰기 실패: %s", type(e).__name__)
                             break
+                        self.last_wall = time.monotonic()
                         sent += len(out)
                     elif feed.eof:
-                        log.info("ffmpeg 연결 종료")
+                        log.info("ffmpeg 연결 종료 — 유튜브 연결은 잠시 유지 (영상 교체 대비)")
+                        keep = True
                         return
                     await asyncio.sleep(BATCH_S)
                 # --- 유튜브가 끊음 → 빠른 재접속
                 cut = time.monotonic()
                 log.warning("유튜브 쪽 연결이 끊김 — 중계기만 바로 다시 접속 (ffmpeg 는 계속)")
                 await pub.close()
-                pub = await self._reconnect(feed)
-                if pub is None:
+                self.pub = await self._reconnect(feed)
+                if self.pub is None:
                     log.warning("재접속 실패 — ffmpeg 연결도 닫음 (송출 프로그램 재시작으로 넘김)")
                     return
-                # 다시 붙으면: 영상·소리 설정 정보를 먼저 보내고, 가장 최근 키프레임부터 이어서 (시각은 0부터 다시)
-                base = feed.rewind_to_keyframe()
-                offset = base
-                head = b"".join(pub.tag_bytes(t, 0, d) for t, _ts, d in feed.headers())
-                await pub.send_media(head)
+                # 다시 붙으면: 영상·소리 설정 정보를 먼저 보내고, 가장 최근 키프레임부터 이어서 (새 연결이라 시각은 0부터)
+                first_in = feed.rewind_to_keyframe()
+                base_out = 0
+                self.last_out = 0
+                await self.pub.send_media(b"".join(self.pub.tag_bytes(t, 0, d) for t, _ts, d in feed.headers()))
                 gap = time.monotonic() - cut
                 log.warning("유튜브 재접속 성공 — 공백 %.1f초", gap)
                 _emit({"event": "reconnect", "gap": round(gap, 2)})
         except asyncio.IncompleteReadError:
             log.info("ffmpeg 연결 종료")
+            keep = True
         except asyncio.TimeoutError:
             log.warning("유튜브 응답·쓰기 시간 초과 — 세션 닫음")
         except (RtmpError, ssl.SSLError, ConnectionError, OSError) as e:
@@ -606,9 +646,12 @@ class Relay:
         finally:
             log.info("세션 종료 (%.0f초, %.1f MB)", time.monotonic() - t0, sent / 1e6)
             reader.cancel()
-            if pub:
-                await pub.close()
             fw.close()
+            if keep and self.pub is not None and not self.pub.closed.is_set():
+                self.idle_task = asyncio.create_task(self._close_idle())
+            elif self.pub is not None:
+                await self.pub.close()
+                self.pub = None
             self.busy = False
 
     async def serve(self) -> None:
@@ -652,6 +695,7 @@ class RelayProc:
     def __init__(self, live_id: str, log_dir, on_event=None):
         self.live_id = live_id
         self.on_event = on_event  # 중계기가 알려 오는 일 (예: {"event": "reconnect", "gap": 1.2})
+        self.sig = None  # (주소, 키) — 바뀌면 새로 띄운다
         self.log_path = log_dir / f"tls-{live_id}.log"  # 웹의 'TLS' 로그 자리를 그대로 쓴다
         self.proc = None
         self.port: int | None = None

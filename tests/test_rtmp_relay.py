@@ -112,6 +112,8 @@ def test_relay_end_to_end_with_ffmpeg_rtmp_server(tmp_path: Path):
         # 4시간 40분(0xFFFFFF ms) 경계를 넘는 타임스탬프로 보낸다 → 확장 타임스탬프 경로 검증
         subprocess.run(["ffmpeg", "-v", "error", "-re", "-i", str(clip), "-c", "copy", "-output_ts_offset", "16774",
                         "-flush_packets", "0", "-f", "flv", f"tcp://127.0.0.1:{relay_port}"], check=True, timeout=60)
+        time.sleep(0.5)
+        relay.kill()  # 중계기는 영상 교체에 대비해 유튜브 연결을 잠시 살려 두므로, 끝내야 받는 쪽이 마무리한다
         sink.wait(timeout=20)
     finally:
         for p in (relay, sink):
@@ -180,6 +182,8 @@ def test_relay_reconnects_without_restarting_ffmpeg(tmp_path: Path):
         s1.wait()
         s2 = sink(outs[1])   # 곧 다시 받을 준비
         assert pub.wait(timeout=30) == 0  # ffmpeg 는 재시작 없이 끝까지
+        time.sleep(0.5)
+        relay.kill()
         s2.wait(timeout=20)
     finally:
         for p in (relay, s1, s2, pub):
@@ -192,3 +196,44 @@ def test_relay_reconnects_without_restarting_ffmpeg(tmp_path: Path):
     assert flags and flags[0].startswith("K")  # 새 세션은 키프레임부터
     dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(outs[1]), "-f", "null", "-"], capture_output=True, text=True)
     assert dec.stderr.strip() == ""  # 끊김 없이 디코딩됨
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg 없음")
+def test_relay_keeps_youtube_session_when_ffmpeg_is_replaced(tmp_path: Path):
+    """영상 교체·일일 재시작: ffmpeg 가 끝나고 새 ffmpeg 가 와도 유튜브 연결은 하나로 이어지고 시각도 이어진다."""
+    clip = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30", "-f", "lavfi",
+                    "-i", "sine=f=440:sample_rate=48000", "-t", "4", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-g", "60", "-bf", "0", "-c:a", "aac", "-shortest", str(clip)], check=True)
+    sink_port, relay_port = _free_port(), _free_port()
+    out = tmp_path / "out.flv"
+    sink = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-listen", "1", "-i",
+                             f"rtmp://127.0.0.1:{sink_port}/live2/k", "-copyts", "-c", "copy", "-f", "flv", str(out)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = tmp_path / "relay.log"
+    relay = subprocess.Popen([sys.executable, "-m", "livemax.rtmp_relay"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
+    try:
+        time.sleep(1)
+        relay.stdin.write((json.dumps({"listen_port": relay_port, "host": "127.0.0.1", "port": sink_port, "app": "live2",
+                                       "key": "k", "tcurl": f"rtmp://127.0.0.1:{sink_port}/live2", "tls": False,
+                                       "log": str(log)}) + "\n").encode())
+        relay.stdin.close()
+        time.sleep(1.5)
+        for _ in range(2):  # 영상 1 → 1초 쉼 → 영상 2
+            subprocess.run(["ffmpeg", "-v", "error", "-re", "-i", str(clip), "-c", "copy", "-flush_packets", "0",
+                            "-f", "flv", f"tcp://127.0.0.1:{relay_port}"], check=True, timeout=30)
+            time.sleep(1)
+        relay.kill()          # 그 뒤 연결이 닫혀야 받는 쪽이 파일을 마무리한다
+        sink.wait(timeout=20)
+    finally:
+        for p in (relay, sink):
+            if p.poll() is None:
+                p.kill()
+    text = log.read_text(encoding="utf-8")
+    assert text.count("유튜브 송출 시작") == 1 and "유튜브 연결 유지" in text  # 재접속 없이 한 연결
+    ts = [float(x) for x in subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=dts_time", "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True, check=True).stdout.split()]
+    assert 7.0 < ts[-1] - ts[0] < 11.0       # 4초 + 쉰 시간 1초 남짓 + 4초 — 이어 붙은 하나의 타임라인
+    assert all(b >= a for a, b in zip(ts, ts[1:]))  # 거꾸로 가지 않음
