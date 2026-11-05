@@ -467,9 +467,19 @@ tr.locked td:first-child { color: #fff; }
 .logout-row .btn { display: inline-flex; align-items: center; gap: 8px; }
 .logout-row .ico { display: inline-flex; width: 16px; height: 16px; }
 .logout-row .ico svg { width: 16px; height: 16px; }
-/* 링크로 가져오기 */
-.linkbox { margin-top: 14px; }
-.linkbox .row { display: flex; gap: 8px; align-items: stretch; }
-.linkbox textarea { flex: 1; min-width: 0; resize: vertical; min-height: 42px; font-size: 13px; }
-.linkbox .btn { flex: none; }
-@media (max-width: 560px) { .linkbox .row { flex-direction: column; } }
+/* 드래그앤드롭 + 구글 링크 버튼 */
+.drop-row { display: flex; gap: 12px; align-items: stretch; }
+.drop-row .drop { flex: 1; min-width: 0; }
+.link-btn { flex: none; width: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  border: 0; border-radius: 10px; padding: 16px 12px; color: #fff; cursor: pointer; text-align: center;
+  background: linear-gradient(140deg, #1a73e8 0%, #1557b0 100%); box-shadow: 0 6px 18px rgba(26,115,232,.3); transition: transform .12s, filter .12s; }
+.link-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.link-btn b { font-size: 14px; }
+.link-btn span:last-child { font-size: 11.5px; color: rgba(255,255,255,.8); }
+.link-btn .lk-ico { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: rgba(255,255,255,.18); }
+@media (max-width: 560px) {
+  .drop-row { flex-direction: column; }
+  .link-btn { width: auto; flex-direction: row; padding: 12px; }
+  .link-btn span:last-child { display: none; }
+  .link-btn .lk-ico { width: 30px; height: 30px; }
+}

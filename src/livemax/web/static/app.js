@@ -45,6 +45,7 @@ const ICON = {
   warn: '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/></svg>',
   grid: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   list: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="5" height="4" rx="1"/><rect x="3" y="10" width="5" height="4" rx="1"/><rect x="3" y="16" width="5" height="4" rx="1"/><path d="M11 6h10M11 12h10M11 18h10"/></svg>',
+  link: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>',
   sun: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2" fill="currentColor" fill-opacity=".25"/><path d="M12 2v2.5M12 19.5V22M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2 12h2.5M19.5 12H22M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>',
   cloud: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.2 4.4 4.4 0 0 0 7 18z" fill="currentColor" fill-opacity=".2"/></svg>',
   storm: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 15.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 6.7 4.4 4.4 0 0 0 7 15.5z" fill="currentColor" fill-opacity=".2"/><path d="m12.5 13-2.5 4h3.5l-2.5 4"/></svg>',
@@ -665,15 +666,9 @@ async function renderFolder(kind, root, data) {
   const drop = h("div", { class: "drop" }, h("div", {}, h("b", {}, "파일을 여기로 끌어다 놓거나 "), h("a", { style: "color:var(--green);cursor:pointer", onclick: () => input.click() }, "선택"), input),
     h("div", { class: "small faint", style: "margin-top:6px" }, "큰 파일도 끊기면 이어서 올라갑니다 · 다른 폴더·메뉴로 옮겨도 계속 올라가요 (오른쪽 아래 업로드 창)"));
   const go = (files) => uploadFiles(kind, folder, files);
-  const links = h("textarea", { class: "input", rows: 2, placeholder: "구글 드라이브·드롭박스 공유 링크 (한 줄에 하나)" });
-  const linkBox = h("form", { class: "linkbox", onsubmit: async (e) => {
-      e.preventDefault();
-      try { await fetchLinks(kind, folder, links.value); links.value = ""; toast("서버가 받기 시작했습니다 — 오른쪽 아래 창에서 확인"); }
-      catch (er) { toast(er.message, true); }
-    } },
-    h("div", { class: "flabel" }, "링크로 가져오기 (빠름 — 서버가 직접 받음)"),
-    h("div", { class: "row" }, links, h("button", { class: "btn primary" }, "가져오기")),
-    h("div", { class: "hint" }, "구글 드라이브: 공유 → '링크가 있는 모든 사용자' 로 바꾼 뒤 링크 복사. 폴더 링크는 안 되고 파일마다 넣으세요."));
+  // 드래그앤드롭 오른쪽: 구글 드라이브 링크로 올리기 (붙여넣기는 사람이 직접 — 클립보드를 몰래 읽지 않는다)
+  const linkBtn = h("button", { type: "button", class: "link-btn", onclick: () => openLinkModal(kind, folder) },
+    h("span", { class: "lk-ico", html: ICON.link }), h("b", {}, "구글 링크로 올리기"), h("span", {}, "빠름 · 서버가 직접 받음"));
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("over"));
   drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); go(e.dataTransfer.files); });
@@ -718,7 +713,7 @@ async function renderFolder(kind, root, data) {
         info?.used_by?.length ? h("span", { class: "pill g", style: "text-transform:none" }, `사용 중: ${info.used_by.map(liveName).join(", ")}`) : null,
         h("button", { class: "btn sm ghost", onclick: () => renameFolder(kind, folder) }, "이름 변경"),
         h("button", { class: "btn sm danger", onclick: () => deleteFolder(kind, folder, info) }, "폴더 삭제")),
-      h("div", { class: "card-body" }, drop, linkBox,
+      h("div", { class: "card-body" }, h("div", { class: "drop-row" }, drop, linkBtn),
         detail.pending.length ? h("div", { class: "small", style: "margin-top:12px" }, h("span", { class: "pill y" }, "규격 검증 중"), " ", detail.pending.join(", ")) : null,
         h("div", { class: "small muted", style: "margin-top:14px" }, `${detail.files.length}개 · ${fmt.bytes(info?.size || 0)}`,
           inUse ? h("span", { class: "faint" }, kind === "video" ? " · 라이브에서 쓰는 폴더라 파일을 지울 수 없습니다 (추가는 가능)"
@@ -834,6 +829,23 @@ function upCancel(it) {
 function upCancelAll() {
   for (const it of [...UP.queue]) upCancel(it);
   for (const it of UP.items.filter((x) => x.state === "run" || (x.fetch && x.state === "wait"))) upCancel(it);
+}
+
+function openLinkModal(kind, folder) {
+  const links = h("textarea", { class: "input", rows: 5, placeholder: "https://drive.google.com/file/d/..../view?usp=sharing\n(여러 개면 한 줄에 하나씩)" });
+  const msg = h("div", { class: "msg err" });
+  const go = async () => {
+    msg.textContent = "";
+    try { await fetchLinks(kind, folder, links.value); closeModal(); toast("서버가 받기 시작했습니다 — 오른쪽 아래 창에서 확인"); }
+    catch (e) { msg.textContent = e.message; }
+  };
+  openModal(`구글 링크로 올리기 — ${KIND_LABEL[kind]} · ${folder}`, [
+    h("label", { class: "field" }, h("span", {}, "공유 링크 붙여넣기"), links),
+    h("div", { class: "tip" }, h("b", {}, "구글 드라이브: "), "파일 오른쪽 클릭 → 공유 → 일반 액세스를 ", h("b", {}, "'링크가 있는 모든 사용자'"),
+      "로 바꾸고 → 링크 복사. 폴더 링크는 안 되고 파일마다 넣으세요. 드롭박스 공유 링크와 일반 다운로드 주소도 됩니다."),
+    msg],
+    [h("button", { class: "btn ghost", onclick: closeModal }, "취소"), h("button", { class: "btn primary", onclick: go }, "가져오기")]);
+  setTimeout(() => links.focus(), 50);
 }
 
 // 링크로 가져오기: 서버가 받는 상황을 1.5초마다 받아 업로드 창에 같이 보여 준다
