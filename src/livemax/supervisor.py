@@ -78,6 +78,7 @@ class LiveProc:
         self.low_speed_since: float | None = None
         self.pending_reason: str | None = None
         self.intentional = False  # 마지막 ffmpeg 종료가 의도한 재시작이었나 (백오프 생략)
+        self.first_run = False  # 시작 버튼(또는 부팅) 뒤 아직 한 번도 송출이 안 붙었나 — 화면에 '재시작' 대신 '시작 중'
         self.bad_since: float | None = None  # 송출하려는데 송출이 안 되는 상태가 시작된 시각 (알림용)
         self.down_notified = False
         self.st: dict = {"state": "stopped", "message": "", "speed": None, "out_time": None, "bitrate": None,
@@ -110,6 +111,7 @@ class LiveProc:
         d["restarts"] = [{"ts": t, "reason": r} for t, r in list(self.restarts)[-10:]]
         # 일부러 한 재시작(폴더 변경·재시작 버튼·매일 자동) 중인지 — 화면에 '영상 교체 중'으로 차분하게
         d["planned"] = bool(self.pending_reason) or (bool(self.intentional) and d.get("state") in ("starting", "restarting"))
+        d["starting"] = self.first_run and d.get("state") in ("starting", "restarting")
         d["nowplaying"] = read_json(self.sup.paths.run_dir / f"{self.id}.nowplaying.json") or {}
         return d
 
@@ -127,6 +129,7 @@ class LiveProc:
             if self.desired:
                 return
             self.desired = True
+            self.first_run = True
             self.set(state="starting", message="시작 중")
         self.event("info", "시작")
         for target in (self._audio_loop, self._video_loop):
@@ -297,6 +300,7 @@ class LiveProc:
                                           stdin=subprocess.DEVNULL)
             started = time.time()
             self.low_speed_since = None
+            self.first_run = False
             self.set(state="running", message="", transport=out.mode, ffmpeg_started_at=started,
                      progress_at=started)
             threading.Thread(target=self._read_stderr, args=(self.video,), daemon=True).start()
@@ -341,9 +345,23 @@ class LiveProc:
         if kind == "slow_start":
             self.log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %s초 쌓임 (연결은 유지)", ev.get("delay"))
             return
+        if kind == "stall":
+            msg = f"중계기가 {ev.get('sec')}초 멈춤 — 그동안 유튜브로 못 보냄 (서버 처리 지연, 회선 아님)"
+            if float(ev.get("sec") or 0) >= 3:
+                self.event("warn", msg)
+            else:
+                self.log.warning(msg)
+            return
         if kind == "slow_end":
-            self.event("warn", f"유튜브 전송 밀림 {ev.get('dur')}초 — 최대 {ev.get('max_delay')}초 밀림, "
-                               f"유튜브로 {ev.get('kbps_out')}kbps (보낼 양 {ev.get('kbps_in')}kbps). 연결은 유지됨")
+            where = {"network": "서버→유튜브 회선", "server": "서버 처리 지연"}.get(ev.get("where"), "")
+            msg = (f"유튜브 전송 밀림 {ev.get('dur')}초 — 최대 {ev.get('max_delay')}초 밀림, "
+                   f"유튜브로 {ev.get('kbps_out')}kbps (보낼 양 {ev.get('kbps_in')}kbps)"
+                   + (f", 막힌 곳: {where}" if where else "") + ". 연결은 유지됨")
+            # 짧고 작은 밀림(5초 미만·15초 미만)은 로그에만 — 알림 목록은 눈여겨볼 것만
+            if float(ev.get("max_delay") or 0) >= 5 or float(ev.get("dur") or 0) >= 15:
+                self.event("warn", msg)
+            else:
+                self.log.warning(msg + f" (커널 대기 {ev.get('kern_kb')}KB · 중계기 {ev.get('app_kb')}KB · 멈칫 {ev.get('lag')}초)")
             return
         if kind == "reconnect":
             gap = float(ev.get("gap") or 0)

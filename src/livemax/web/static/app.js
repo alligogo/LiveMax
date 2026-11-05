@@ -250,7 +250,7 @@ function renderLives(grid, ov) {
         liveBadge(lv, running),
         withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 24), h("span", {}, ch.name)) : null),
       status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null,
-        lv.status === "restarting" && lv.planned ? "영상 교체 중" : (STATUS[lv.status] || lv.status)),
+        lv.status === "restarting" ? reLabel(lv) : (STATUS[lv.status] || lv.status)),
       title: h("span", { class: "lv-title" }, lv.name),
       keytag: lv.key_label ? h("span", { class: "keytag", title: `스트림 키: ${lv.key_label} (${lv.key_masked})` }, ico("key"), lv.key_label) : null,
       edit: h("button", { class: "iconbtn", style: "width:30px;height:30px;background:transparent", title: "설정", html: ICON.edit, onclick: () => openLiveEditor(lv) }),
@@ -332,11 +332,14 @@ const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => {
   openLiveEditor(null);
 } }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
 
+// 켜지는 중 표시: 처음 켤 때(시작 버튼·부팅·업데이트)는 '시작 중', 일부러 바꾸는 중이면 '영상 교체 중', 끊겨서 다시 켜면 '재시작중'
+const reLabel = (lv) => (lv.starting ? "시작 중" : lv.planned ? "영상 교체 중" : "재시작중");
+
 // 미리보기 왼쪽 위 표시: 정상 LIVE(빨강) · 경고(주황) · 재시작중(하늘) · 중단(검정+빨간 테두리). 송출 안 하는 라이브는 없음
 function liveBadge(lv, running) {
   if (!lv.desired) return null;
   if (lv.status === "ok" && running) return h("span", { class: "badge-live" }, "LIVE");
-  const [cls, text] = { warn: ["warn", "경고"], restarting: ["re", lv.planned ? "영상 교체 중" : "재시작중"], down: ["down", "중단"] }[lv.status] || [null, null];
+  const [cls, text] = { warn: ["warn", "경고"], restarting: ["re", reLabel(lv)], down: ["down", "중단"] }[lv.status] || [null, null];
   return cls ? h("span", { class: "badge-live " + cls }, cls === "re" ? null : ico("warn"), text) : null;
 }
 
@@ -350,11 +353,12 @@ const drops = (lv) => (lv.session_started_at ? (lv.restarts || []).filter((r) =>
 // 재시작·시작 중은 경고가 아니다 (정상 과정) — 따로 '재시작'으로.
 function liveCounts(ov) {
   const active = ov.lives.filter((l) => l.desired || (l.enabled && l.status !== "waiting"));
-  const n = { ok: 0, warn: 0, down: 0, re: 0, active, idle: ov.lives.length - active.length };
+  const n = { ok: 0, warn: 0, down: 0, re: 0, st: 0, active, idle: ov.lives.length - active.length };
   active.forEach((l) => {
     if (l.status === "ok") n.ok++;
     else if (l.status === "warn") n.warn++;
     else if (l.status === "down") n.down++;
+    else if (l.starting || !l.desired) n.st++;  // 처음 켜지는 중 · 켜기로 했지만 순서를 기다리는 중
     else n.re++;
   });
   return n;
@@ -377,7 +381,8 @@ function pulseBox(ov) {
     h("div", { class: "p-stats" },
       stat("라이브", active.length), stat("정상", n.ok), stat("경고", n.warn, n.warn ? "hot" : ""), stat("중단", n.down, n.down ? "hot" : ""),
       stat("끊김", dropCnt, dropCnt ? "hot" : "", "최근 10분 안의 끊김 (지난 기록은 각 라이브 카드에)"),
-      n.re ? stat("재시작", n.re, "dim", "다시 켜지는 중 (업데이트·재시작 직후 순서대로 — 정상 과정)") : null,
+      n.st ? stat("시작 중", n.st, "dim", "켜지는 중 (시작 버튼·업데이트 직후 순서대로 — 정상 과정)") : null,
+      n.re ? stat("재시작", n.re, "dim", "다시 켜지는 중 (끊겨서 자동으로 다시 켜거나 재시작 버튼)") : null,
       idle ? stat("대기", idle, "dim", "꺼 둔 라이브") : null));
 }
 
@@ -423,6 +428,7 @@ function renderSide(side, ov) {
       h("div", { class: "card-body" },
         h("div", { class: "group" }, "라이브"),
         kv("정상 / 경고 / 중단", `${counts.ok} / ${counts.warn} / ${counts.down}`),
+        counts.st ? kv("시작 중", `${counts.st}`) : null,
         counts.re ? kv("재시작 중", `${counts.re}`) : null,
         h("div", { class: "group" }, "서버"),
         kv("CPU", fmt.num(s.cpu_pct, 1, "%")), kv("steal time", fmt.num(s.steal_pct, 2, "%")),

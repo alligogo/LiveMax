@@ -334,3 +334,18 @@ def test_relay_renews_youtube_session_before_timestamp_wraps(tmp_path: Path, mon
     # 1번째: 새 연결(0~2초) → 2번째: 이어 붙임(~4초, 기준 3초 넘김) → 3번째: 새 연결, 시각 다시 0부터
     assert len(pubs) == 2
     assert pubs[0].max_ts > 3000 and pubs[1].max_ts < 2500 and r.last_out < 2500
+
+
+def test_relay_reports_its_own_stall(monkeypatch):
+    """중계기가 몇 초 멈췄다 깨어나면 (서버 CPU 등) 회선 밀림과 따로 'stall' 로 알린다."""
+    events = []
+    monkeypatch.setattr(rr, "_emit", events.append)
+    r = rr.Relay({})
+    r.busy = True
+    r.feed = rr.Feed(r.stats)
+    w = r._watch_state(0.0)
+    r._watch_step(w, 1.0)
+    r._watch_step(w, 2.1)
+    assert not events
+    r._watch_step(w, 6.1)  # 4초 만에 깨어남 → 3초 멈춤
+    assert events == [{"event": "stall", "sec": 3.0}]

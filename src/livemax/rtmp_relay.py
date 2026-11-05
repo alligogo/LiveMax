@@ -521,22 +521,26 @@ class Relay:
         self.feed: Feed | None = None
         self.reconnecting = False
 
-    def _pending(self) -> int:
-        """유튜브로 아직 못 나간 바이트: 중계기 버퍼 + 보내기 버퍼 + 커널 송신 대기열."""
-        n = self.feed.size if self.feed else 0
+    def _pending(self) -> tuple[int, int, int]:
+        """유튜브로 아직 못 나간 바이트 (중계기 버퍼 + 보내기 버퍼, 커널 송신 대기열).
+        커널 송신 버퍼가 차 있으면 '서버→유튜브 길이 느림', 비어 있는데 중계기에만 쌓였으면 '서버가 늦게 처리'.
+        돌려주는 값: (중계기 쪽, 커널 대기, 커널 송신 버퍼 크기)"""
+        app = self.feed.size if self.feed else 0
+        kern = cap = 0
         pub = self.pub
         if pub is not None and not pub.closed.is_set():
             try:
-                n += pub.w.transport.get_write_buffer_size()
+                app += pub.w.transport.get_write_buffer_size()
             except Exception:  # noqa: BLE001
                 pass
             sock = pub.w.get_extra_info("socket")
             if fcntl is not None and sock is not None:
                 try:
-                    n += struct.unpack("i", fcntl.ioctl(sock.fileno(), _OUTQ, b"\0\0\0\0"))[0]
+                    kern = struct.unpack("i", fcntl.ioctl(sock.fileno(), _OUTQ, b"\0\0\0\0"))[0]
+                    cap = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) // 2  # 리눅스는 2배로 알려 줌
                 except (OSError, ValueError):
                     pass
-        return n
+        return app, kern, cap
 
     async def watch(self) -> None:
         """1초마다 '유튜브로 밀린 영상(초)'을 재고, 15초마다 전송량을 알린다. 문제 있을 때만 로그 (밀림 시작·끝)."""
@@ -551,7 +555,8 @@ class Relay:
 
     def _watch_step(self, w: dict, now: float) -> None:
         dt = max(0.001, now - w["t"])
-        pend = self._pending()
+        app, kern, cap = self._pending()
+        pend = app + kern
         wire = self.stats["out"] - pend + (self.feed.size if self.feed else 0)  # 실제로 소켓을 떠난 누적 바이트
         d_in, d_out = self.stats["in"] - w["in"], max(0, wire - w["out"])
         w["t"], w["in"], w["out"] = now, self.stats["in"], wire
@@ -559,13 +564,20 @@ class Relay:
             w["rate"] = d_in / dt if w["rate"] == 0 else w["rate"] * 0.9 + d_in / dt * 0.1
         w["win"].append((dt, d_in, d_out))
         delay = pend / w["rate"] if w["rate"] > 0 and self.busy else 0.0
+        if self.busy and dt >= 2.5:  # 1초마다 깨어나야 하는데 한참 늦음 = 중계기 자체가 멈춤 (그동안 유튜브로 아무것도 안 감)
+            log.warning("중계기가 %.1f초 멈췄다가 다시 움직임 (서버 처리 지연)", dt - 1)
+            _emit({"event": "stall", "sec": round(dt - 1, 1)})
         slow = w["slow"]
         # --- 밀림 판정 (재접속 중은 이미 따로 기록하므로 제외)
         if self.busy and not self.reconnecting and delay >= SLOW_DELAY_S:
             w["calm"] = 0
             if slow is None:
-                slow = w["slow"] = {"t0": now, "max": delay, "in": 0, "out": 0, "n": 0, "logged": False}
+                slow = w["slow"] = {"t0": now, "max": delay, "in": 0, "out": 0, "n": 0, "logged": False,
+                                    "kern": 0, "app": 0, "lag": 0.0, "fill": 0.0}
             slow["max"] = max(slow["max"], delay)
+            slow["kern"], slow["app"] = max(slow["kern"], kern), max(slow["app"], app)
+            slow["fill"] = max(slow["fill"], kern / cap if cap else 0.0)
+            slow["lag"] = max(slow["lag"], dt - 1.0)  # 1초마다 깨어나야 하는데 늦었다 = 중계기 자체가 멈칫
             slow["in"] += d_in
             slow["out"] += d_out
             slow["n"] += dt
@@ -581,8 +593,11 @@ class Relay:
                     kin, kout = slow["in"] * 8 / span / 1000, slow["out"] * 8 / span / 1000
                     log.warning("유튜브 전송 밀림 끝 — %.0f초 동안, 최대 %.1f초 밀림, 유튜브로 %.0f kbps (입력 %.0f kbps)",
                                 span, slow["max"], kout, kin)
+                    # 막힌 곳: 커널 대기열이 컸으면 회선, 중계기가 늦게 깨어났으면 서버(CPU 등)
+                    where = "network" if slow["fill"] >= 0.3 and slow["lag"] < 1.0 else "server"
                     _emit({"event": "slow_end", "dur": round(span), "max_delay": round(slow["max"], 1),
-                           "kbps_out": round(kout), "kbps_in": round(kin)})
+                           "kbps_out": round(kout), "kbps_in": round(kin), "where": where,
+                           "kern_kb": slow["kern"] // 1024, "app_kb": slow["app"] // 1024, "lag": round(slow["lag"], 1)})
                 w["slow"], w["calm"] = None, 0
         # --- 15초마다 알림 (DB 기록용)
         if now - w["emit"] >= STATS_S:

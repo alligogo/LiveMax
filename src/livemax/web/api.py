@@ -187,7 +187,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "started_at": s.get("ffmpeg_started_at") if state == "running" else None,
             "transport": s.get("transport"), "clip": s.get("clip"), "clip_folder": s.get("clip_folder"),
             "clip_v": _thumb_v(s.get("clip_folder"), s.get("clip")),
-            "planned": bool(s.get("planned")),
+            "planned": bool(s.get("planned")), "starting": bool(s.get("starting")),
             "song_title": np_.get("title") or (Path(np_.get("file", "")).stem if np_.get("file") else ""),
             "song_artist": np_.get("artist") or "",
             "song_folder": Path(np_["file"]).parent.name if np_.get("file") else "", "restarts_hour": s.get("restarts_hour", 0),
