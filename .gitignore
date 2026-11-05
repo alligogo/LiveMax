@@ -32,3 +32,7 @@ Thumbs.db
 
 # 테스트
 .pytest_cache/
+
+# PC 유튜브 측정기 — 토큰 들어 있음
+tools/windows/yt_monitor_config.json
+tools/windows/yt_logs/
