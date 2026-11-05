@@ -31,15 +31,27 @@ def list_folders(paths: Paths, kind: str) -> list[str]:
     return sorted((p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith((".", "_"))), key=natural_key)
 
 
+_LIST_CACHE: dict[tuple[Path, str], tuple[int, list[Path]]] = {}
+
+
 def list_files(paths: Paths, kind: str, folder: str) -> list[Path]:
+    """폴더의 미디어 파일 (자연 정렬). 폴더 안에 파일이 추가·삭제·이름 변경되면 폴더 수정 시각이 바뀌므로
+    그때만 다시 훑는다 — 음악 목록 비교(15초 × 라이브 수)·관제 화면이 매번 수백 개 파일을 훑지 않게."""
     d = paths.kind_root(kind) / folder
-    if not d.is_dir():
+    try:
+        mt = d.stat().st_mtime_ns
+    except OSError:
         return []
+    hit = _LIST_CACHE.get((d, kind))
+    if hit and hit[0] == mt:
+        return list(hit[1])
     globs = VIDEO_GLOB if kind == "video" else AUDIO_GLOB
     files: list[Path] = []
     for g in globs:
         files.extend(p for p in d.glob(g) if p.is_file() and not p.name.startswith("."))
-    return sorted(files, key=lambda p: natural_key(p.name))
+    files.sort(key=lambda p: natural_key(p.name))
+    _LIST_CACHE[(d, kind)] = (mt, files)
+    return list(files)
 
 
 def upsert(conn: sqlite3.Connection, kind: str, folder: str, path: Path, duration: float | None,
