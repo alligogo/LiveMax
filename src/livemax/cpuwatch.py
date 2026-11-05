@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import sys
@@ -39,12 +40,42 @@ def _where(ident: int | None, frames: dict) -> str:
     return " ← ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in reversed(st[-3:]))
 
 
+# 파이썬 메모리 청소(GC)가 오래 걸리면 그 순간 실행 중이던 아무 작업이나 범인처럼 보인다 → 청소 시간을 따로 잰다.
+# (콜백 안에서는 기록만 하고, 로그는 감시 스레드가 남긴다)
+_gc = {"t0": 0.0, "max": 0.0, "gen": 0, "n": 0}
+
+
+def _gc_cb(phase: str, info: dict) -> None:
+    if phase == "start":
+        _gc["t0"] = time.perf_counter()
+    else:
+        d = time.perf_counter() - _gc["t0"]
+        if d >= 0.05:
+            _gc["n"] += 1
+            if d > _gc["max"]:
+                _gc["max"], _gc["gen"] = d, info.get("generation", -1)
+
+
+def tune_gc() -> None:
+    """시작이 끝난 뒤 한 번: 지금까지 만들어진 객체(설정·모듈 등)는 청소 대상에서 빼고(freeze), 청소를 덜 자주 한다."""
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(5000, 20, 20)
+
+
 def run(stop: threading.Event, interval: float = 1.0, threshold: float = 0.4, quiet_s: float = 10.0) -> None:
     if not os.path.isdir("/proc/self/task"):
         return
     tck = os.sysconf("SC_CLK_TCK")
     prev, last_log = _thread_ticks(), 0.0
+    if _gc_cb not in gc.callbacks:
+        gc.callbacks.append(_gc_cb)
+    last_gc_log = 0.0
     while not stop.wait(interval):
+        if _gc["n"] and time.monotonic() - last_gc_log >= 60:
+            last_gc_log = time.monotonic()
+            log.warning("메모리 청소(GC) 0.05초 넘음 %d회 — 최대 %.0fms (세대 %s)", _gc["n"], _gc["max"] * 1000, _gc["gen"])
+            _gc.update(max=0.0, n=0)
         cur = _thread_ticks()
         used = (sum(cur.values()) - sum(prev.get(t, 0) for t in cur)) / tck / interval
         if used >= threshold and time.monotonic() - last_log >= quiet_s:

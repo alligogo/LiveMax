@@ -7,6 +7,9 @@ ffmpeg 는 목록을 순서대로 copy 재생할 뿐이다. 송출 시작(재시
 
 from __future__ import annotations
 
+from array import array
+from bisect import bisect_right
+
 import json
 import logging
 import random
@@ -107,7 +110,9 @@ def generate(live: Live, paths: Paths, conn: sqlite3.Connection, settings: dict)
     return p
 
 
-_META_CACHE: dict = {}
+# 메타 캐시: 클립 수천 개를 dict 수천 개로 들고 있으면 파이썬 메모리 청소(GC)가 훑을 묶음이 수만 개가 된다
+# (라이브 10개 × 3,300개). 시작 시각·길이는 숫자 배열, 경로는 문자열 목록으로만 들고 있는다 (청소 대상 거의 없음).
+_META_CACHE: dict[Path, tuple[int, array, array, tuple[str, ...]]] = {}
 
 
 def current_clip(meta_path: Path | None, out_time_s: float | None) -> dict | None:
@@ -116,20 +121,18 @@ def current_clip(meta_path: Path | None, out_time_s: float | None) -> dict | Non
     try:
         mt = meta_path.stat().st_mtime_ns
         hit = _META_CACHE.get(meta_path)
-        if hit and hit[0] == mt:
-            ents = hit[1]
-        else:  # 2초마다 × 라이브 수만큼 불리므로 파일이 바뀌었을 때만 다시 읽는다
+        if not hit or hit[0] != mt:  # 2초마다 × 라이브 수만큼 불리므로 파일이 바뀌었을 때만 다시 읽는다
             ents = json.loads(meta_path.read_text(encoding="utf-8"))["entries"]
-            _META_CACHE[meta_path] = (mt, ents)
-    except (OSError, json.JSONDecodeError, KeyError):
+            hit = (mt, array("d", (float(e["offset"]) for e in ents)), array("d", (float(e["duration"]) for e in ents)),
+                   tuple(str(e["path"]) for e in ents))
+            del ents
+            for k in [k for k in _META_CACHE if k.parent == meta_path.parent and k != meta_path]:
+                del _META_CACHE[k]  # 같은 라이브의 지난 목록은 버린다 (라이브마다 폴더가 따로)
+            _META_CACHE[meta_path] = hit
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
-    lo, hi = 0, len(ents) - 1
-    if hi < 0:
+    _, offs, durs, paths_ = hit
+    if not offs:
         return None
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if ents[mid]["offset"] <= out_time_s:
-            lo = mid
-        else:
-            hi = mid - 1
-    return ents[lo]
+    i = max(0, bisect_right(offs, out_time_s) - 1)
+    return {"path": paths_[i], "offset": offs[i], "duration": durs[i]}

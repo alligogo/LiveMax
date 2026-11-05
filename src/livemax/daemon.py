@@ -152,6 +152,12 @@ class App:
             threading.Thread(target=target, name=name, daemon=True).start()
         log.info("livemaxd %s 시작 (data=%s)", self.version, self.paths.root)
 
+        def _gc_later():  # 라이브들이 순서대로 다 올라온 뒤 (부팅 순차 시작이 끝날 즈음)
+            if not self.stop.wait(180):
+                cpuwatch.tune_gc()
+                log.info("메모리 청소 조정 완료 (시작 때 객체 제외)")
+        threading.Thread(target=_gc_later, name="gc-tune", daemon=True).start()
+
     def shutdown(self) -> None:
         log.info("종료 중 — 라이브 정지")
         self.stop.set()
