@@ -44,7 +44,9 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .flabel { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
 
 /* ---------------- 상단 바 ---------------- */
-.topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 16px; padding: 14px 24px;
+.topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 16px;
+  /* 배경은 화면 끝까지, 로고·메뉴는 본문(.page 최대 1320px)과 같은 폭 안에 — 넓은 화면에서도 손이 멀리 안 가게 */
+  padding: 14px max(24px, calc((100% - 1320px) / 2 + 24px));
   background: rgba(18, 18, 18, .85); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 300; letter-spacing: .5px; }
 .brand b { font-weight: 800; letter-spacing: .2px; }
