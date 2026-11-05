@@ -433,7 +433,7 @@ tr.locked td:first-child { color: #fff; }
 .pulse .ps + .ps::before { content: ""; display: inline-block; width: 1px; height: 12px; margin: 0 12px; vertical-align: -1px; background: rgba(255,255,255,.3); }
 /* 가동률 | CPU | 숫자들 사이에도 같은 세로선 */
 .pulse .p-cpu, .pulse .p-stats { position: relative; }
-.pulse .p-cpu::before, .pulse .p-stats::before { content: ""; position: absolute; left: -7px; top: 50%; width: 1px; height: 16px; transform: translateY(-50%); background: rgba(255,255,255,.3); }
+/* 세로선은 숫자들(라이브·정상…) 사이에만 — 가동률·CPU 옆에는 없음 */
 .pulse .ps.hot b { color: #fff; text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
 .pulse .ps.dim { color: rgba(255,255,255,.65); }
 @media (max-width: 980px) {
@@ -453,8 +453,7 @@ tr.locked td:first-child { color: #fff; }
   .pulse .p-title b { font-size: 27px; }
   .pulse .p-stats { grid-column: 1 / -1; justify-content: space-between; flex-wrap: nowrap; font-size: 13px; }
   .pulse .ps + .ps::before { display: none; }
-  .pulse .p-cpu::before { display: none; }
-  .pulse .p-stats::before { left: 0; right: 0; top: -3px; width: auto; height: 1px; transform: none; }
+  .pulse .p-stats::before { content: ""; position: absolute; left: 0; right: 0; top: -3px; height: 1px; background: rgba(255,255,255,.3); }
   .pulse .p-stats { padding-top: 6px; }
   .pulse .ps { flex: 1 1 0; display: grid; justify-items: center; line-height: 1.15; font-size: 11.5px; color: rgba(255,255,255,.8); }
   .pulse .ps + .ps { border-left: 1px solid rgba(255,255,255,.3); }

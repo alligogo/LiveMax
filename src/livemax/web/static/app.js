@@ -248,7 +248,7 @@ function renderLives(grid, ov) {
                lv.desired ? null : h("span", { class: "idle-tag" }, "송출 전")]  // 송출하려는데 끊긴 라이브는 왼쪽 위 '중단' 표시로
             : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
         liveBadge(lv, running),
-        withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 18), h("span", {}, ch.name)) : null),
+        withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 24), h("span", {}, ch.name)) : null),
       status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null, STATUS[lv.status] || lv.status),
       title: h("span", { class: "lv-title" }, lv.name),
       keytag: lv.key_label ? h("span", { class: "keytag", title: `스트림 키: ${lv.key_label} (${lv.key_masked})` }, ico("key"), lv.key_label) : null,
@@ -307,7 +307,7 @@ function renderLives(grid, ov) {
   const list = LIVES_VIEW === "list";
   const sections = groups.map((g) => h("section", { class: "ch-group" },
     h("div", { class: "ch-head" },
-      g.ch ? chLink(g.ch, "ch-name", chLogo(g.ch, 26), h("span", {}, g.ch.name)) : h("span", { class: "ch-name muted" }, "채널 미지정"),
+      g.ch ? chLink(g.ch, "ch-name", chLogo(g.ch, 40), h("span", {}, g.ch.name)) : h("span", { class: "ch-name muted" }, "채널 미지정"),
       h("span", { class: "ch-rule" }),
       g.ch && g.ch.description ? h("span", { class: "ch-desc" }, g.ch.description) : null),
     list ? h("div", { class: "rows" }, g.lives.map(row)) : h("div", { class: "grid" }, g.lives.map(card))));
@@ -885,13 +885,22 @@ function openLinkModal(kind, folder) {
     try { await fetchLinks(kind, folder, links.value); closeModal(); toast("서버가 받기 시작했습니다 — 오른쪽 아래 창에서 확인"); }
     catch (e) { msg.textContent = e.message; }
   };
+  // Enter = 가져오기 (줄바꿈은 Shift+Enter) — 이 창에서만
+  links.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); go(); } });
   openModal(`구글 링크로 올리기 — ${KIND_LABEL[kind]} · ${folder}`, [
-    h("label", { class: "field" }, h("span", {}, "공유 링크 붙여넣기"), links),
+    h("label", { class: "field" }, h("span", {}, "공유 링크 (복사해 둔 링크가 있으면 자동으로 들어갑니다 · Enter = 가져오기)"), links),
     h("div", { class: "tip" }, h("b", {}, "구글 드라이브: "), "파일 오른쪽 클릭 → 공유 → 일반 액세스를 ", h("b", {}, "'링크가 있는 모든 사용자'"),
       "로 바꾸고 → 링크 복사. 폴더 링크는 안 되고 파일마다 넣으세요. 드롭박스 공유 링크와 일반 다운로드 주소도 됩니다."),
     msg],
     [h("button", { class: "btn ghost", onclick: closeModal }, "취소"), h("button", { class: "btn primary", onclick: go }, "가져오기")]);
   setTimeout(() => links.focus(), 50);
+  // 복사해 둔 링크가 있으면 미리 넣어 둔다 (이 버튼을 눌렀을 때만 읽음 — 링크 모양일 때만, 처음엔 브라우저가 허용을 물어봄)
+  if (navigator.clipboard?.readText) {
+    navigator.clipboard.readText().then((t) => {
+      const urls = (t || "").split(/\s+/).filter((x) => /^https?:\/\//i.test(x));
+      if (urls.length && !links.value) { links.value = urls.join("\n"); links.select(); }
+    }).catch(() => { /* 허용 안 함·지원 안 함 → 직접 붙여넣기 */ });
+  }
 }
 
 // 링크로 가져오기: 서버가 받는 상황을 1.5초마다 받아 업로드 창에 같이 보여 준다
@@ -1027,7 +1036,7 @@ async function showChannels() {
       catch (er) { toast(er.message, true); }
     };
     return h("article", { class: "card ch-card" },
-      h("div", { class: "card-head" }, chLink(c, "ch-name", chLogo(c, 28), h("span", {}, c.name)), h("span", { class: "spacer" }),
+      h("div", { class: "card-head" }, chLink(c, "ch-name", chLogo(c, 44), h("span", {}, c.name)), h("span", { class: "spacer" }),
         h("button", { class: "btn sm ghost", onclick: () => openChannelEditor(c) }, "수정"),
         h("button", { class: "btn sm danger", onclick: () => deleteChannel(c) }, "삭제")),
       h("div", { class: "card-body" },
