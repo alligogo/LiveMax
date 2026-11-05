@@ -48,6 +48,10 @@ ufw allow OpenSSH >/dev/null      # enable 전에 — 지금 접속이 끊기지
 ufw allow 80/tcp >/dev/null       # HTTPS 인증서 발급·https 로 넘겨주기
 ufw allow 443/tcp >/dev/null      # 대시보드
 ufw --force enable >/dev/null
+# 막은 접속을 한 줄씩 기록하면 인터넷 스캐너 때문에 로그(journald)가 계속 바쁘다 — 차단은 그대로, 기록만 끔
+ufw logging off >/dev/null
+# 10분마다 도는 sysstat 수집은 LiveMax 수집기(15초)와 중복이고 CPU 피크를 만든다 (live1 실측) — 깔려 있으면 끔
+systemctl disable --now sysstat-collect.timer sysstat-summary.timer >/dev/null 2>&1 || true
 cat > /etc/fail2ban/jail.d/livemax.local <<'EOF'
 [sshd]
 enabled  = true
