@@ -50,6 +50,7 @@ BATCH_S = 0.1  # ffmpeg 쪽에서 이만큼 모아 한 번에 보낸다
 RECONNECT_GIVEUP_S = 30.0  # 유튜브 재접속을 이만큼 시도해도 안 되면 ffmpeg 재시작으로 넘긴다
 KEEP_S = 20  # ffmpeg 가 바뀌는 동안(영상 교체·일일 재시작) 유튜브 연결을 이만큼 살려 둔다
 MAX_BUFFER = 40 * 1024 * 1024  # 재접속 동안 쌓아 둘 최대 크기 (5Mbps 기준 약 60초)
+TS_RENEW_MS = 40 * 86400 * 1000  # RTMP 시각은 32비트(약 49.7일)에서 0으로 돌아간다 → 40일 넘으면 다음 영상 교체 때 새로 접속
 STATS_S = 15  # 이만큼마다 supervisor 에 전송량·지연을 알린다 (DB 기록용)
 SLOW_DELAY_S = 2.0  # 유튜브로 못 보내고 밀린 영상이 이만큼(초) 넘게 이어지면 '전송 밀림'
 SLOW_HOLD_S = 5  # 밀림이 이만큼 계속돼야 기록 (순간 출렁임은 무시), 회복도 이만큼 계속돼야 끝으로 봄
@@ -665,6 +666,10 @@ class Relay:
         keep = False  # 끝날 때 유튜브 연결을 살려 둘지 (ffmpeg 만 바뀌는 경우)
         try:
             c = self.cfg
+            if self.pub is not None and not self.pub.closed.is_set() and self.last_out >= TS_RENEW_MS:
+                log.info("유튜브 연결이 40일 넘게 이어짐 — 시각이 한 바퀴 돌기 전에 이번 교체 때 새로 접속")
+                await self.pub.close()
+                self.pub = None
             if self.pub is not None and not self.pub.closed.is_set():
                 # 영상 교체·일일 재시작: ffmpeg 만 새로 왔다 → 같은 유튜브 연결에 이어 붙인다 (재접속·방송 시작 신호 없음)
                 gap = time.monotonic() - self.last_wall
@@ -675,6 +680,7 @@ class Relay:
                     await self.pub.close()
                 self.pub = await self._publish()
                 base_out = 0
+                self.last_out = 0  # 새 연결은 시각 0부터
                 log.info("유튜브 송출 시작 (%s:%s%s, %.2f초)", c["host"], c["port"], " TLS" if c.get("tls") else "",
                          time.monotonic() - t0)
             first_in = None

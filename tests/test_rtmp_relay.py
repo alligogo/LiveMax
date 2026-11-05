@@ -274,3 +274,63 @@ def test_relay_reports_slow_youtube_only_when_it_lasts(monkeypatch):
         tick(1.0)
     ends = [e for e in events if e["event"] == "slow_end"]
     assert len(ends) == 1 and ends[0]["max_delay"] >= 4 and ends[0]["kbps_out"] < ends[0]["kbps_in"]
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg 없음")
+def test_relay_renews_youtube_session_before_timestamp_wraps(tmp_path: Path, monkeypatch):
+    """RTMP 시각은 32비트(약 49.7일)에서 0으로 돌아간다 → 기준을 넘긴 연결은 다음 영상 교체 때 새로 접속, 시각은 0부터."""
+    import asyncio
+
+    flv = tmp_path / "a.flv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=30", "-t", "2",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-bf", "0", "-f", "flv", str(flv)], check=True)
+    data = flv.read_bytes()
+    monkeypatch.setattr(rr, "TS_RENEW_MS", 3000)
+    monkeypatch.setattr(rr, "BATCH_S", 0.01)
+
+    class FakeW:
+        transport = type("T", (), {"get_write_buffer_size": lambda self: 0})()
+
+        def get_extra_info(self, _):
+            return None
+
+    class FakePub:
+        def __init__(self):
+            self.closed, self.w, self.stream_id, self.max_ts = asyncio.Event(), FakeW(), 1, 0
+
+        def tag_bytes(self, t, ts, d):
+            self.max_ts = max(self.max_ts, ts)
+            return b"x"
+
+        async def send_media(self, _):
+            pass
+
+        async def close(self):
+            self.closed.set()
+
+    pubs = []
+
+    async def fake_publish(self):
+        pubs.append(FakePub())
+        return pubs[-1]
+
+    monkeypatch.setattr(rr.Relay, "_publish", fake_publish)
+
+    async def run():
+        r = rr.Relay({"listen_port": 0, "host": "x", "port": 1})
+        srv = await asyncio.start_server(r.handle, "127.0.0.1", 0)
+        port = srv.sockets[0].getsockname()[1]
+        for _ in range(3):  # 2초짜리를 세 번 (영상 교체)
+            _, w = await asyncio.open_connection("127.0.0.1", port)
+            w.write(data)
+            await w.drain()
+            await asyncio.sleep(0.2)
+            w.close()
+            await asyncio.sleep(0.2)
+        srv.close()
+        return r
+
+    r = asyncio.run(run())
+    # 1번째: 새 연결(0~2초) → 2번째: 이어 붙임(~4초, 기준 3초 넘김) → 3번째: 새 연결, 시각 다시 0부터
+    assert len(pubs) == 2
+    assert pubs[0].max_ts > 3000 and pubs[1].max_ts < 2500 and r.last_out < 2500

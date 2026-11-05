@@ -377,7 +377,8 @@ class LiveProc:
                      clip=Path(clip["path"]).name if clip else None,
                      clip_folder=Path(clip["path"]).parent.name if clip else None)
             # 1분마다 남기던 정상 진행 기록은 뺐다 — 느려질 때만 남긴다 (감시는 웹·알림이 한다)
-            if speed is not None and speed < 0.97 and time.time() - last_log >= 60:
+            # 시작 직후 첫 측정(speed=0)은 가짜 경고라 10초 지나서부터 본다
+            if speed is not None and speed < 0.97 and (ot or 0) >= 10 and time.time() - last_log >= 60:
                 last_log = time.time()
                 self.log.warning("송출 느림 speed=%s bitrate=%s", speed, br)
             block = {}
