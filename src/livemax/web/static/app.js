@@ -242,9 +242,9 @@ function renderLives(grid, ov) {
       running, ch,
       preview: (withBadge) => h("div", { class: "preview" },
         running && lv.clip && lv.clip_folder
-          ? cimg(`/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}`, null, lv.id + (withBadge ? "g" : "l"))
+          ? cimg(`/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}?v=${lv.clip_v || 0}`, null, lv.id + (withBadge ? "g" : "l"))
           : !running && lv.idle_thumb  // 송출 전: 고른 비디오의 첫 클립을 반투명으로
-            ? [cimg(`/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}`, "idle", lv.id + (withBadge ? "g" : "l")),
+            ? [cimg(`/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}?v=${lv.idle_thumb.v || 0}`, "idle", lv.id + (withBadge ? "g" : "l")),
                lv.desired ? null : h("span", { class: "idle-tag" }, "송출 전")]  // 송출하려는데 끊긴 라이브는 왼쪽 위 '중단' 표시로
             : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
         liveBadge(lv, running),
@@ -716,6 +716,11 @@ async function renderFolder(kind, root, data) {
   if (!folder) { root.replaceChildren(h("div", { class: "card" }, h("div", { class: "card-body muted" }, "왼쪽에서 폴더를 만드세요."))); return; }
   const info = data.folders.find((f) => f.name === folder);
   const detail = await api("GET", `/api/media/${kind}/${encodeURIComponent(folder)}`);
+  // 10초마다 확인하지만, 바뀐 게 없으면 화면을 다시 그리지 않는다 (곡이 많아도 가볍게·스크롤 그대로)
+  const clipNow = kind === "video" ? (lastOverview?.lives || []).filter((l) => l.state === "running" && l.clip_folder === folder).map((l) => [l.id, l.clip]) : [];
+  const sig = JSON.stringify([kind, folder, detail, info, data.rejected, clipNow]);
+  if (root.dataset.sig === sig && root.firstChild) return;
+  root.dataset.sig = sig;
   const input = h("input", { type: "file", multiple: true, hidden: true, accept: kind === "video" ? ".mp4,.mkv" : ".m4a,.aac" });
   const drop = h("div", { class: "drop" }, h("div", {}, h("b", {}, "파일을 여기로 끌어다 놓거나 "), h("a", { style: "color:var(--green);cursor:pointer", onclick: () => input.click() }, "선택"), input),
     h("div", { class: "small faint", style: "margin-top:6px" }, "큰 파일도 끊기면 이어서 올라갑니다 · 다른 폴더·메뉴로 옮겨도 계속 올라가요 (오른쪽 아래 업로드 창)"));

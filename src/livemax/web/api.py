@@ -186,6 +186,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "speed": speed, "bitrate_kbps": s.get("bitrate"), "out_time": s.get("out_time"),
             "started_at": s.get("ffmpeg_started_at") if state == "running" else None,
             "transport": s.get("transport"), "clip": s.get("clip"), "clip_folder": s.get("clip_folder"),
+            "clip_v": _thumb_v(s.get("clip_folder"), s.get("clip")),
             "planned": bool(s.get("planned")),
             "song_title": np_.get("title") or (Path(np_.get("file", "")).stem if np_.get("file") else ""),
             "song_artist": np_.get("artist") or "",
@@ -198,12 +199,22 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             **tinfo,
         }
 
+    def _thumb_v(folder: str | None, name: str | None) -> int:
+        """썸네일 그림의 판(수정 시각) — 주소에 붙여 그림이 바뀌면 크롬이 옛 그림을 못 쓰게."""
+        if not folder or not name:
+            return 0
+        try:
+            return thumbs.thumb_path(paths, folder, name).stat().st_mtime_ns // 1_000_000
+        except OSError:
+            return 0
+
     def _idle_thumb(lv: Live) -> dict | None:
         """송출 전에도 어떤 비디오인지 알 수 있게: 고른 비디오 폴더 중 썸네일이 있는 첫 클립 (숫자 순)."""
         for folder in lv.video_folders:
             for p in catalog.list_files(paths, "video", folder):
-                if thumbs.thumb_path(paths, folder, p.name).exists():
-                    return {"folder": folder, "name": p.name}
+                v = _thumb_v(folder, p.name)
+                if v:
+                    return {"folder": folder, "name": p.name, "v": v}
         return None
 
     def _key_label(lv: Live) -> str:
@@ -588,16 +599,32 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err("잘못된 폴더", 404)
         conn = request.state.conn
         out = []
-        lives = [lv for lv in store.all() if folder in lv.audio_folders] if kind == "audio" else []
+        # 곡 수가 많아도 가볍게: DB 는 폴더 단위로 한 번, '지금 곡·다음 곡' 파일은 라이브마다 한 번만 읽는다
+        rows = {r["path"]: r for r in conn.execute(
+            "SELECT path, duration, bitrate_kbps, thumb, added_at FROM media_files WHERE kind=? AND folder=?", (kind, folder))}
+        playing: dict[str, list] = {}
+        nexts: dict[str, list] = {}
+        if kind == "audio":
+            for lv in store.all():
+                if folder not in lv.audio_folders or not sup.proc(lv.id).desired:
+                    continue
+                cur = (read_json(paths.run_dir / f"{lv.id}.nowplaying.json") or {}).get("file")
+                nxt = (read_json(liquidsoap.next_path(lv, paths)) or {}).get("file")
+                if cur:
+                    playing.setdefault(cur, []).append(_who(lv))
+                if nxt and nxt != cur:
+                    nexts.setdefault(nxt, []).append(_who(lv))
         for p in catalog.list_files(paths, kind, folder):
-            r = conn.execute("SELECT * FROM media_files WHERE path=?", (str(p),)).fetchone()
-            states = [(lv, st) for lv in lives if (st := _song_state(lv, p))]
-            out.append({"name": p.name, "size": p.stat().st_size, "duration": r["duration"] if r else None,
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            r = rows.get(str(p))
+            out.append({"name": p.name, "size": st.st_size, "duration": r["duration"] if r else None,
                         "bitrate": r["bitrate_kbps"] if r else None, "thumb": bool(r and r["thumb"]),
-                        "added_at": r["added_at"] if r else p.stat().st_mtime,
-                        "v": int(p.stat().st_mtime),  # 썸네일 주소에 붙여 같은 이름을 다시 올려도 새 그림이 보이게
-                        "playing": [_who(lv) for lv, st in states if st == "playing"],
-                        "next": [_who(lv) for lv, st in states if st == "next"]})
+                        "added_at": r["added_at"] if r else st.st_mtime,
+                        "v": int(st.st_mtime),  # 썸네일 주소에 붙여 같은 이름을 다시 올려도 새 그림이 보이게
+                        "playing": playing.get(str(p), []), "next": nexts.get(str(p), [])})
         pend_dir = paths.incoming / kind / folder
         pending = sorted(p.name for p in pend_dir.iterdir() if p.is_file()) if pend_dir.is_dir() else []
         return {"files": out, "pending": pending}
