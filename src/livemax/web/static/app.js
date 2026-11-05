@@ -344,11 +344,24 @@ const PLANNED = /^(일일 재시작|설정 적용|사용자 재시작)/;
 const drops = (lv) => (lv.session_started_at ? (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at && !PLANNED.test(r.reason || "")) : []);
 
 // 라이브 화면 맨 위 미니 관제: 가동률(송출하려는 라이브 중 정상 비율)과 상태 수. 맑음(파랑)/주의(보라)/심각(빨강)
+// 미니 관제·시스템 칸이 같은 기준으로 센다.
+// 송출 대상 = 켜져 있는 라이브 + 켜기로 했지만 아직 순서를 기다리는 라이브(업데이트·부팅 직후). 타이머 '다음 방송 대기'는 제외.
+// 재시작·시작 중은 경고가 아니다 (정상 과정) — 따로 '재시작'으로.
+function liveCounts(ov) {
+  const active = ov.lives.filter((l) => l.desired || (l.enabled && l.status !== "waiting"));
+  const n = { ok: 0, warn: 0, down: 0, re: 0, active, idle: ov.lives.length - active.length };
+  active.forEach((l) => {
+    if (l.status === "ok") n.ok++;
+    else if (l.status === "warn") n.warn++;
+    else if (l.status === "down") n.down++;
+    else n.re++;
+  });
+  return n;
+}
+
 function pulseBox(ov) {
-  const active = ov.lives.filter((l) => l.desired);
-  const n = { ok: 0, warn: 0, down: 0 };
-  active.forEach((l) => { if (l.status === "ok") n.ok++; else if (l.status === "down") n.down++; else n.warn++; });  // 재시작중도 '경고'로
-  const idle = ov.lives.length - active.length;
+  const n = liveCounts(ov);
+  const active = n.active, idle = n.idle;
   // 관제는 '지금 상태'만: 끊김은 최근 10분 안의 것만 센다 (지난 기록은 각 카드·로그에 남아 있음)
   const dropCnt = active.reduce((a, l) => a + drops(l).filter((r) => ov.server_time - r.ts < 600).length, 0);
   const level = !active.length ? "idle" : n.down ? "bad" : n.warn ? "warn" : "good";
@@ -362,7 +375,9 @@ function pulseBox(ov) {
     cpu != null ? h("span", { class: "p-cpu" + (cpu >= 85 ? " hot" : ""), title: "서버 전체 CPU 사용량" }, "CPU ", h("b", {}, `${Math.round(cpu)}%`)) : null,
     h("div", { class: "p-stats" },
       stat("라이브", active.length), stat("정상", n.ok), stat("경고", n.warn, n.warn ? "hot" : ""), stat("중단", n.down, n.down ? "hot" : ""),
-      stat("끊김", dropCnt, dropCnt ? "hot" : "", "최근 10분 안의 끊김 (지난 기록은 각 라이브 카드에)"), idle ? stat("대기", idle, "dim") : null));
+      stat("끊김", dropCnt, dropCnt ? "hot" : "", "최근 10분 안의 끊김 (지난 기록은 각 라이브 카드에)"),
+      n.re ? stat("재시작", n.re, "dim", "다시 켜지는 중 (업데이트·재시작 직후 순서대로 — 정상 과정)") : null,
+      idle ? stat("대기", idle, "dim", "꺼 둔 라이브") : null));
 }
 
 // 이번 방송(세션) 동안 자동 재연결·재시작 횟수 — 가동 시간 대신 "몇 번 끊겼다 붙었나"를 보여준다
@@ -389,8 +404,7 @@ function fmtHM(min) { const hh = Math.floor(min / 60), mm = min % 60; return hh 
 
 function renderSide(side, ov) {
   const s = ov.system || {}, c = ov.capacity || {};
-  const counts = { ok: 0, warn: 0, down: 0 };
-  ov.lives.forEach((l) => { if (counts[l.status] !== undefined) counts[l.status]++; });
+  const counts = liveCounts(ov);
   const ratio = Math.min(1, c.usage_ratio || 0);
   const kv = (k, v) => h("div", { class: "kv" }, h("span", { class: "muted" }, k), h("b", {}, v));
   side.replaceChildren(
@@ -408,6 +422,7 @@ function renderSide(side, ov) {
       h("div", { class: "card-body" },
         h("div", { class: "group" }, "라이브"),
         kv("정상 / 경고 / 중단", `${counts.ok} / ${counts.warn} / ${counts.down}`),
+        counts.re ? kv("재시작 중", `${counts.re}`) : null,
         h("div", { class: "group" }, "서버"),
         kv("CPU", fmt.num(s.cpu_pct, 1, "%")), kv("steal time", fmt.num(s.steal_pct, 2, "%")),
         kv("메모리", s.mem_total_mb ? `${Math.round(s.mem_used_mb)} / ${Math.round(s.mem_total_mb)} MB` : "-"),
