@@ -175,7 +175,25 @@ function closeModal() { $("#modal-root").replaceChildren(); }
 // ------------------------------------------------------------------ 라이브 (메인)
 let lastOverview = null;
 
+// 같은 화면이면 통째로 다시 그리지 않고 내용만 갱신한다 (재시작·저장 뒤 깜빡임 없이 자연스럽게)
+const PAGE = { name: null, refresh: null, root: null };
+const samePage = (name) => PAGE.name === name && PAGE.root && document.contains(PAGE.root);
+function softRefresh() { if (PAGE.refresh && PAGE.root && document.contains(PAGE.root)) PAGE.refresh(); else route(); }
+// 썸네일은 같은 그림이면 같은 <img> 를 다시 쓴다 — 갱신 때마다 새로 만들면 그림이 깜빡인다
+const IMG = new Map();
+function cimg(src, cls, key) {
+  const k = `${key || ""}|${cls || ""}|${src}`;
+  let el = IMG.get(k);
+  if (!el) {
+    el = h("img", { class: cls || null, src, alt: "", loading: "lazy" });
+    IMG.set(k, el);
+    if (IMG.size > 500) IMG.delete(IMG.keys().next().value);
+  }
+  return el;
+}
+
 async function showLives() {
+  if (samePage("lives")) return PAGE.refresh();
   stopPoll();
   const grid = h("div", { class: "groups" });
   const side = h("aside", { class: "side" });
@@ -188,7 +206,9 @@ async function showLives() {
     catch (e) { if (!lastOverview) grid.replaceChildren(h("div", { class: "card empty" }, h("div", { class: "card-body muted" }, e.message))); }
     finally { busy = false; }
   };
-  grid.replaceChildren(h("div", { class: "muted small", style: "padding:20px" }, "불러오는 중…"));
+  PAGE.name = "lives"; PAGE.refresh = refresh; PAGE.root = grid;
+  if (lastOverview) { renderLives(grid, lastOverview); renderSide(side, lastOverview); }  // 마지막 모습부터 바로 보여 주고 뒤에서 갱신
+  else grid.replaceChildren(h("div", { class: "muted small", style: "padding:20px" }, "불러오는 중…"));
   await refresh();
   pollTimer = setInterval(refresh, 5000);
   document.onvisibilitychange = () => { if (!document.hidden && document.contains(grid)) refresh(); };  // 다시 보면 바로 갱신
@@ -222,9 +242,9 @@ function renderLives(grid, ov) {
       running, ch,
       preview: (withBadge) => h("div", { class: "preview" },
         running && lv.clip && lv.clip_folder
-          ? h("img", { src: `/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}`, alt: "", loading: "lazy" })
+          ? cimg(`/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}`, null, lv.id + (withBadge ? "g" : "l"))
           : !running && lv.idle_thumb  // 송출 전: 고른 비디오의 첫 클립을 반투명으로
-            ? [h("img", { class: "idle", src: `/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}`, alt: "", loading: "lazy" }),
+            ? [cimg(`/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}`, "idle", lv.id + (withBadge ? "g" : "l")),
                lv.desired ? null : h("span", { class: "idle-tag" }, "송출 전")]  // 송출하려는데 끊긴 라이브는 왼쪽 위 '중단' 표시로
             : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
         liveBadge(lv, running),
@@ -434,7 +454,7 @@ function armBtn(lv, action, cls, label) {
 async function liveAction(lv, action) {
   const label = { start: "시작", stop: "정지", restart: "재시작" }[action];
   if (action !== "start" && !confirm(`'${lv.name}' 을(를) ${label}할까요?\n${action === "stop" ? "유튜브 송출이 멈춥니다." + (lv.timer_repeat ? " (타이머 반복도 꺼집니다)" : "") : "비디오만 다시 띄워 1~3초 끊겼다가 같은 방송으로 돌아옵니다. 음악은 이어서 나옵니다."}`)) return;
-  try { await api("POST", `/api/lives/${lv.id}/${action}`); toast(`${lv.name}: ${label} 요청`); setTimeout(route, 800); }
+  try { await api("POST", `/api/lives/${lv.id}/${action}`); toast(`${lv.name}: ${label} 요청`); setTimeout(softRefresh, 600); setTimeout(softRefresh, 2500); }
   catch (e) { toast(e.message, true); }
 }
 
@@ -598,7 +618,7 @@ async function openLiveEditor(lv) {
       const r = isNew ? await api("POST", "/api/lives", payload(apply)) : await api("PUT", `/api/lives/${lv.id}`, payload(apply));
       closeModal();
       toast(r.message || (isNew ? "저장했습니다 — 목록에서 '시작'을 누르면 송출이 시작됩니다" : apply !== "now" ? "저장했습니다" : isNew ? "저장하고 송출을 시작했습니다" : r.restarted ? "저장하고 적용했습니다 (잠깐 끊겼다가 복귀)" : "저장했습니다 (재시작 없이 바로 반영)"));
-      route();
+      softRefresh(); setTimeout(softRefresh, 2500);
     } catch (e) { msg.textContent = e.message; }
   };
   openModal(isNew ? "라이브 추가" : `라이브 설정 — ${lv.name}`, [
@@ -614,7 +634,7 @@ async function openLiveEditor(lv) {
   ], [
     isNew ? null : h("button", { class: "btn danger", onclick: async () => {
       if (!confirm(`'${lv.name}' 라이브를 삭제할까요? 송출이 멈추고 설정·로그가 지워집니다. (채널의 스트림 키는 남아 다른 라이브에서 쓸 수 있습니다)`)) return;
-      try { await api("DELETE", `/api/lives/${lv.id}`); closeModal(); toast("삭제했습니다"); route(); } catch (e) { msg.textContent = e.message; }
+      try { await api("DELETE", `/api/lives/${lv.id}`); closeModal(); toast("삭제했습니다"); softRefresh(); } catch (e) { msg.textContent = e.message; }
     } }, "삭제"),
     h("span", { class: "spacer" }),
     h("button", { class: "btn ghost", onclick: closeModal }, "취소"),
@@ -630,30 +650,38 @@ async function openLiveEditor(lv) {
 let mediaFolder = { video: null, audio: null };
 
 async function showMedia(kind) {
+  if (samePage(`media-${kind}`)) return PAGE.refresh();
   stopPoll();
   const label = kind === "video" ? "비디오" : "음악";
-  const left = h("div", { class: "card" });
+  // 폴더 목록만 갱신하고, '새 폴더 이름' 입력칸은 한 번만 만들어 그대로 둔다 (쓰는 중에 지워지지 않게)
+  const listBox = h("div", {});
+  const newName = h("input", { class: "input", placeholder: "새 폴더 이름", maxlength: 64 });
+  const left = h("div", { class: "card" },
+    h("div", { class: "card-head" }, `${label} 폴더`),
+    listBox,
+    h("div", { class: "card-body", style: "border-top:1px solid var(--line)" },
+      h("form", { class: "row", onsubmit: async (e) => {
+        e.preventDefault();
+        try { await api("POST", `/api/media/${kind}`, { name: newName.value }); mediaFolder[kind] = newName.value.trim(); newName.value = ""; load(); }
+        catch (er) { toast(er.message, true); } } },
+        newName, h("button", { class: "btn primary sm" }, "만들기")),
+      h("p", { class: "hint" }, kind === "video"
+        ? "규격: H.264 High, 1080p 30fps 5000k 기본 (720p~4K, 24~60fps 도 가능 — 올린 파일 그대로 송출), 키프레임 2초, B프레임·오디오 없음. PC의 변환기(LiveMax-Convert)로 만들면 됩니다."
+        : "규격: AAC-LC 128k~192k 44.1kHz 스테레오 (-14 LUFS). PC의 변환기(LiveMax-Convert)로 만들면 됩니다.")));
   const right = h("div", {});
   mount(shell(kind, h("div", { class: "media-layout" }, left, right)));
   let data;
   const load = async () => {
     data = await api("GET", `/api/media/${kind}`);
     if (!mediaFolder[kind] || !data.folders.find((f) => f.name === mediaFolder[kind])) mediaFolder[kind] = data.folders[0]?.name || null;
-    const newName = h("input", { class: "input", placeholder: "새 폴더 이름", maxlength: 64 });
-    left.replaceChildren(
-      h("div", { class: "card-head" }, `${label} 폴더`),
+    listBox.replaceChildren(
       h("ul", { class: "folder-list" }, data.folders.length ? data.folders.map((f) =>
         h("li", { class: f.name === mediaFolder[kind] ? "on" : "", onclick: () => { mediaFolder[kind] = f.name; load(); } },
           h("span", { class: "nm" }, f.name), f.pending ? h("span", { class: "pill y" }, `검증 ${f.pending}`) : null, h("span", { class: "ct" }, f.count)))
-        : h("li", { class: "muted" }, "폴더가 없습니다")),
-      h("div", { class: "card-body", style: "border-top:1px solid var(--line)" },
-        h("form", { class: "row", onsubmit: async (e) => { e.preventDefault(); try { await api("POST", `/api/media/${kind}`, { name: newName.value }); mediaFolder[kind] = newName.value.trim(); load(); } catch (er) { toast(er.message, true); } } },
-          newName, h("button", { class: "btn primary sm" }, "만들기")),
-        h("p", { class: "hint" }, kind === "video"
-          ? "규격: H.264 High, 1080p 30fps 5000k 기본 (720p~4K, 24~60fps 도 가능 — 올린 파일 그대로 송출), 키프레임 2초, B프레임·오디오 없음. PC의 변환기(LiveMax-Convert)로 만들면 됩니다."
-          : "규격: AAC-LC 128k~192k 44.1kHz 스테레오 (-14 LUFS). PC의 변환기(LiveMax-Convert)로 만들면 됩니다.")));
+        : h("li", { class: "muted" }, "폴더가 없습니다")));
     await renderFolder(kind, right, data);
   };
+  PAGE.name = `media-${kind}`; PAGE.refresh = load; PAGE.root = listBox;
   await load();
   pollTimer = setInterval(async () => { if (!uploading) { try { await load(); } catch (e) { /* 무시 */ } } }, 10000);
 }
@@ -699,7 +727,7 @@ async function renderFolder(kind, root, data) {
     title: st.length ? `${st[0][2]} — 지금은 지울 수 없습니다` : "삭제", onclick: () => delFile(kind, folder, f.name) });
   const files = kind === "video"
     ? h("div", { class: "files" }, detail.files.map((f) => { const st = stateOf(f); return h("div", { class: "file" + (st.length ? " locked" : "") },
-        h("div", { class: "th" }, f.thumb ? h("img", { loading: "lazy", alt: "", src: `/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}` }) : ico("film"),
+        h("div", { class: "th" }, f.thumb ? cimg(`/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}`, null, "m") : ico("film"),
           st.length ? h("div", { class: "on-th" }, pills(st)) : null),
         h("div", { class: "meta" }, h("div", { class: "nm", title: f.name }, f.name),
           h("div", { class: "faint" }, `${fmt.dur(f.duration)} · ${fmt.bytes(f.size)}`)),
@@ -725,21 +753,21 @@ async function renderFolder(kind, root, data) {
     // 최근 3일 · 최대 10개만 (오래된 건 자동으로 안 보임). X 로 하나씩, '모두 지우기'로 한 번에
     data.rejected.length ? h("div", { class: "card", style: "margin-top:20px" },
       h("div", { class: "card-head" }, "검증 실패 (최근 3일)", h("span", { class: "spacer" }),
-        h("button", { class: "linkbtn", onclick: async () => { try { await api("DELETE", `/api/rejections/${kind}`); showMedia(kind); } catch (e) { toast(e.message, true); } } }, "모두 지우기")),
+        h("button", { class: "linkbtn", onclick: async () => { try { await api("DELETE", `/api/rejections/${kind}`); softRefresh(); } catch (e) { toast(e.message, true); } } }, "모두 지우기")),
       h("div", { class: "card-body" }, h("ul", { class: "alerts" }, data.rejected.map((r) =>
         h("li", { class: "warn" }, h("span", { class: "ic" }), h("span", {}, h("time", {}, fmt.time(r.ts)), h("b", {}, `${r.folder}/${r.name} `), r.reasons.join(" · ")),
-          h("button", { class: "x", title: "지우기", onclick: async () => { try { await api("DELETE", `/api/rejections/${kind}/${r.id}`); showMedia(kind); } catch (e) { toast(e.message, true); } } }, "✕")))))) : null,
+          h("button", { class: "x", title: "지우기", onclick: async () => { try { await api("DELETE", `/api/rejections/${kind}/${r.id}`); softRefresh(); } catch (e) { toast(e.message, true); } } }, "✕")))))) : null,
   ].filter(Boolean));
 }
 
 async function delFile(kind, folder, name) {
   if (!confirm(`'${name}' 을(를) 바로 삭제할까요? 되돌릴 수 없습니다.`)) return;
-  try { const r = await api("DELETE", `/api/media/${kind}/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`); toast(r.message || "삭제했습니다"); showMedia(kind); }
+  try { const r = await api("DELETE", `/api/media/${kind}/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`); toast(r.message || "삭제했습니다"); softRefresh(); }
   catch (e) { toast(e.message, true); }
 }
 async function renameFolder(kind, folder) {
   const n = prompt("새 폴더 이름", folder); if (!n || n === folder) return;
-  try { await api("PUT", `/api/media/${kind}/${encodeURIComponent(folder)}`, { name: n }); mediaFolder[kind] = n.trim(); showMedia(kind); } catch (e) { toast(e.message, true); }
+  try { await api("PUT", `/api/media/${kind}/${encodeURIComponent(folder)}`, { name: n }); mediaFolder[kind] = n.trim(); softRefresh(); } catch (e) { toast(e.message, true); }
 }
 async function deleteFolder(kind, folder, info) {
   const label = kind === "video" ? "비디오" : "음악";
@@ -749,7 +777,7 @@ async function deleteFolder(kind, folder, info) {
     msg.textContent = "";
     try {
       const r = await api("DELETE", `/api/media/${kind}/${encodeURIComponent(folder)}?confirm=${encodeURIComponent(typed.value)}`);
-      closeModal(); toast(r.message); mediaFolder[kind] = null; showMedia(kind);
+      closeModal(); toast(r.message); mediaFolder[kind] = null; softRefresh();
     } catch (e) { msg.textContent = e.message; }
   } }, "영구 삭제");
   typed.addEventListener("input", () => { go.disabled = typed.value !== folder; });
