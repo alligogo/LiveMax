@@ -11,9 +11,9 @@ echo "측정 시작 $(date +%H:%M:%S) — $((N * 2 / 60))분 동안 그대로 �
 top -c -b -d 2 -n "$N" -o %CPU -w 250 | awk -v O="$O" '
 function grp(c, a) {
   if (c ~ /ffmpeg/) return "송출(ffmpeg)";
-  if (c ~ /rtmp_relay/ || a ~ /rtmp_relay/) return "새 중계기";
+  if (a ~ /rtmp_relay/) return "새 중계기";
   if (c ~ /liquidsoap/) return "음악(liquidsoap)";
-  if (c ~ /livemax|uvicorn/ || a ~ /livemax/) return "관리 프로그램";
+  if (a ~ /livemax|uvicorn/) return "관리 프로그램";
   if (c ~ /ksoftirqd/) return "네트워크 처리";
   if (c ~ /stunnel/) return "stunnel(기존 방식)";
   if (c ~ /^top$|\/top$/) return "측정 도구(top)";
@@ -29,7 +29,7 @@ function grp(c, a) {
 }
 /^ *[0-9]+ / {
   if (s < 2) next;                       # 첫 화면은 측정 오류라 버림
-  g = grp($12, $13); sum[g] += $9;
+  g = grp($12, $12 " " $13 " " $14); sum[g] += $9;
   if ($9 + 0 >= 8 && n < 4) { cur = cur sprintf("  | %s %.0f%%", g, $9); n++ }
 }
 END { for (g in sum) printf "%s\t%.1f\n", g, sum[g] / (s - 1) > (O "/groups") }

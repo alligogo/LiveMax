@@ -108,6 +108,8 @@ class LiveProc:
         # 경고 판정용: 일부러 한 재시작(설정 적용·매일 자동·재시작 버튼)은 세지 않는다 — 진짜 문제만
         d["restarts_hour"] = sum(1 for t, r in self.restarts if now - t < 3600 and not r.startswith(PLANNED))
         d["restarts"] = [{"ts": t, "reason": r} for t, r in list(self.restarts)[-10:]]
+        # 일부러 한 재시작(폴더 변경·재시작 버튼·매일 자동) 중인지 — 화면에 '영상 교체 중'으로 차분하게
+        d["planned"] = bool(self.pending_reason) or (bool(self.intentional) and d.get("state") in ("starting", "restarting"))
         d["nowplaying"] = read_json(self.sup.paths.run_dir / f"{self.id}.nowplaying.json") or {}
         return d
 

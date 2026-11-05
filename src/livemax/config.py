@@ -185,6 +185,7 @@ class Live:
     restart_slot: int = 0
     youtube_video_id: str = ""
     output_url: str = ""
+    video_order: str = "sequential"  # 영상 순서: sequential(이름순 1,2,…,10) | random(섞기)
     fast_relay: bool = True  # 새 송출 중계기(lmrelay) — 기본. 끄면 기존 방식(stunnel, 문제 해결용)
     channel_id: str = ""   # 채널 (v2.4)
     key_id: str = ""       # 그 채널에 등록된 스트림 키
@@ -226,6 +227,7 @@ class Live:
             "audio_mode": self.audio_mode, "norepeat_count": self.norepeat_count, "crossfade": self.crossfade,
             "harbor_port": self.harbor_port, "restart_slot": self.restart_slot,
             "youtube_video_id": self.youtube_video_id, "output_url": self.output_url, "fast_relay": bool(self.fast_relay),
+            "video_order": self.video_order if self.video_order in ("sequential", "random") else "sequential",
             "created_at": self.created_at,
             "channel_id": self.channel_id, "key_id": self.key_id,
             "timer_mode": self.timer_mode, "timer_minutes": int(self.timer_minutes), "timer_until": float(self.timer_until),

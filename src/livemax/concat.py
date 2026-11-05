@@ -60,9 +60,18 @@ def build(live: Live, paths: Paths, conn: sqlite3.Connection, hours: float = 24,
 
     total = hours * 3600 + margin_minutes * 60
     entries: list[Entry] = []
+    t = 0.0
+    if getattr(live, "video_order", "sequential") != "random":
+        # 이름순(1, 2, … 9, 10 — 자연 정렬, 고른 폴더 순서대로) 반복 — 이름으로 순서를 짤 수 있게
+        i = 0
+        while t < total:
+            clip = usable[i % len(usable)]
+            entries.append(Entry(clip, durations[clip], t))
+            t += durations[clip]
+            i += 1
+        return entries
     bag: list[Path] = []
     last: Path | None = None
-    t = 0.0
     while t < total:
         if not bag:
             bag = usable[:]

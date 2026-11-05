@@ -249,7 +249,8 @@ function renderLives(grid, ov) {
             : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
         liveBadge(lv, running),
         withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 24), h("span", {}, ch.name)) : null),
-      status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null, STATUS[lv.status] || lv.status),
+      status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null,
+        lv.status === "restarting" && lv.planned ? "영상 교체 중" : (STATUS[lv.status] || lv.status)),
       title: h("span", { class: "lv-title" }, lv.name),
       keytag: lv.key_label ? h("span", { class: "keytag", title: `스트림 키: ${lv.key_label} (${lv.key_masked})` }, ico("key"), lv.key_label) : null,
       edit: h("button", { class: "iconbtn", style: "width:30px;height:30px;background:transparent", title: "설정", html: ICON.edit, onclick: () => openLiveEditor(lv) }),
@@ -335,7 +336,7 @@ const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => {
 function liveBadge(lv, running) {
   if (!lv.desired) return null;
   if (lv.status === "ok" && running) return h("span", { class: "badge-live" }, "LIVE");
-  const [cls, text] = { warn: ["warn", "경고"], restarting: ["re", "재시작중"], down: ["down", "중단"] }[lv.status] || [null, null];
+  const [cls, text] = { warn: ["warn", "경고"], restarting: ["re", lv.planned ? "영상 교체 중" : "재시작중"], down: ["down", "중단"] }[lv.status] || [null, null];
   return cls ? h("span", { class: "badge-live " + cls }, cls === "re" ? null : ico("warn"), text) : null;
 }
 
@@ -528,7 +529,7 @@ async function openLiveEditor(lv) {
       Promise.all([api("GET", "/api/media/video"), api("GET", "/api/media/audio")]).then(([v, a]) => ({ video: v, audio: a })),
       api("GET", "/api/channels").then((r) => r.channels)]);
   } catch (e) { toast(e.message, true); return; }
-  const cur = lv || { name: "", video_folders: [], audio_folders: [], audio_mode: "random_norepeat", norepeat_count: 30, crossfade: 0, youtube_video_id: "", fast_relay: true,
+  const cur = lv || { name: "", video_folders: [], audio_folders: [], audio_mode: "random_norepeat", norepeat_count: 30, crossfade: 0, youtube_video_id: "", fast_relay: true, video_order: "sequential",
     timer_mode: "off", timer_minutes: 710, timer_until: 0, timer_repeat: false, timer_gap_minutes: 2 };
   const name = h("input", { class: "input", value: cur.name, placeholder: "예: 재즈 색소폰 24/7", maxlength: 80 });
   // 채널 → 그 채널의 스트림 키 (키는 채널 메뉴에서만 등록). 다른 라이브가 쓰는 키는 고를 수 없다
@@ -556,7 +557,7 @@ async function openLiveEditor(lv) {
   chSel.addEventListener("change", () => { chId = chSel.value; keyId = ""; drawKeys(); });
   drawKeys();
   const checks = (kind, selected) => {
-    const box = h("div", { class: "checks" });
+    const box = h("div", { class: "checks " + kind });  // 음악은 진한 분홍 — 비디오(초록)와 구분
     if (!media[kind].folders.length) box.append(h("div", { class: "muted small" }, `${kind === "video" ? "비디오" : "음악"} 폴더가 없습니다. 먼저 '${kind === "video" ? "비디오" : "음악"}' 메뉴에서 폴더를 만들고 파일을 올리세요.`));
     media[kind].folders.forEach((f) => {
       const cb = h("input", { type: "checkbox", value: f.name });
@@ -569,6 +570,11 @@ async function openLiveEditor(lv) {
     return box;
   };
   const vbox = checks("video", cur.video_folders), abox = checks("audio", cur.audio_folders);
+  let vorder = cur.video_order === "random" ? "random" : "sequential";
+  const vorderSeg = h("div", { class: "seg" }, [["sequential", "이름순 (1, 2, … 10)"], ["random", "섞기"]].map(([v, l]) => {
+    const b = h("button", { type: "button", class: v === vorder ? "on" : "", onclick: () => { vorder = v; [...vorderSeg.children].forEach((x) => x.classList.toggle("on", x === b)); } }, l);
+    return b;
+  }));
   // 고른 비디오 폴더들의 해상도·fps 가 섞이면 경고 (송출은 파일 그대로라 섞이면 유튜브 화면이 깨질 수 있음)
   const mixWarn = h("div", { class: "msg", hidden: true });
   const checkMix = () => {
@@ -624,7 +630,7 @@ async function openLiveEditor(lv) {
   showPane();
 
   const payload = (apply) => ({ name: name.value, channel_id: chId, key_id: keyId, video_folders: vbox.values(), audio_folders: abox.values(),
-    audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, fast_relay: !legacy.checked, apply,
+    audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, fast_relay: !legacy.checked, video_order: vorder, apply,
     timer_mode: tmode, timer_minutes: Number(tH.value || 0) * 60 + Number(tM.value || 0),
     timer_until: tU.value ? new Date(tU.value).getTime() / 1000 : 0, timer_repeat: tRep.checked, timer_gap_minutes: Number(tGap.value || 2) });
   const save = async (apply) => {
@@ -642,6 +648,8 @@ async function openLiveEditor(lv) {
     h("div", { class: "field" }, h("span", { class: "flabel" }, "스트림 키"), keyBox,
       h("div", { class: "hint" }, "키는 '채널' 메뉴에서 등록합니다. 다른 라이브가 쓰는(등록·생방중) 키는 고를 수 없습니다.")),
     h("div", { class: "field" }, h("span", { class: "flabel" }, "비디오 폴더 (여러 개 선택 가능)"), vbox, mixWarn),
+    h("div", { class: "field", style: "margin-top:10px" }, h("span", { class: "flabel" }, "영상 순서"), vorderSeg,
+      h("div", { class: "hint" }, "이름순: 고른 폴더 순서대로, 폴더 안은 1, 2, … 9, 10 순서로 반복 — 이름으로 순서를 짤 수 있어요.")),
     h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "음악 폴더 (여러 개 선택 가능)"), abox),
     h("div", { class: "field", style: "margin-top:14px" }, h("span", { class: "flabel" }, "재생 방식"), modeSeg),
     h("div", { class: "field", style: "margin-top:18px" }, h("span", { class: "flabel" }, "타이머 (자동 종료)"), timerSeg, pDur, pUntil, tipYT),
@@ -742,7 +750,7 @@ async function renderFolder(kind, root, data) {
     title: st.length ? `${st[0][2]} — 지금은 지울 수 없습니다` : "삭제", onclick: () => delFile(kind, folder, f.name) });
   const files = kind === "video"
     ? h("div", { class: "files" }, detail.files.map((f) => { const st = stateOf(f); return h("div", { class: "file" + (st.length ? " locked" : "") },
-        h("div", { class: "th" }, f.thumb ? cimg(`/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}`, null, "m") : ico("film"),
+        h("div", { class: "th" }, f.thumb ? cimg(`/api/thumbs/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}?v=${f.v || 0}`, null, "m") : ico("film"),
           st.length ? h("div", { class: "on-th" }, pills(st)) : null),
         h("div", { class: "meta" }, h("div", { class: "nm", title: f.name }, f.name),
           h("div", { class: "faint" }, `${fmt.dur(f.duration)} · ${fmt.bytes(f.size)}`)),
@@ -903,6 +911,33 @@ function openLinkModal(kind, folder) {
   }
 }
 
+// 다 올린 뒤: 서버의 규격 검사가 끝날 때까지 지켜보고 결과로 바꾼다 (등록됨 / 검증 실패)
+const VERIFY = { items: new Set(), timer: null };
+function upVerify(it) {
+  it.verifyStart = Date.now();
+  VERIFY.items.add(it);
+  if (!VERIFY.timer) VERIFY.timer = setInterval(upVerifyPoll, 3000);
+}
+async function upVerifyPoll() {
+  const groups = {};
+  for (const it of VERIFY.items) (groups[`${it.kind}/${it.folder}`] = groups[`${it.kind}/${it.folder}`] || []).push(it);
+  for (const its of Object.values(groups)) {
+    const { kind, folder } = its[0];
+    let d;
+    try { d = await api("GET", `/api/media/${kind}/${encodeURIComponent(folder)}`); } catch (e) { continue; }
+    const have = new Set(d.files.map((f) => f.name)), wait = new Set(d.pending || []);
+    for (const it of its) {
+      const name = it.file.name;
+      if (have.has(name)) { it.txt.textContent = "등록 완료 ✓"; VERIFY.items.delete(it); }
+      else if (!wait.has(name) && Date.now() - it.verifyStart > 4000) {
+        it.txt.textContent = "검증 실패 — 폴더 화면 '검증 실패' 목록 확인"; it.row.classList.remove("ok"); it.row.classList.add("err"); VERIFY.items.delete(it);
+      } else if (Date.now() - it.verifyStart > 180000) { it.txt.textContent = "검증이 오래 걸림 — 폴더 화면에서 확인"; VERIFY.items.delete(it); }
+    }
+  }
+  if (!VERIFY.items.size) { clearInterval(VERIFY.timer); VERIFY.timer = null; softRefreshMedia(); }
+}
+function softRefreshMedia() { if (/^#\/media\//.test(location.hash)) softRefresh(); }
+
 // 링크로 가져오기: 서버가 받는 상황을 1.5초마다 받아 업로드 창에 같이 보여 준다
 async function fetchLinks(kind, folder, text) {
   const r = await api("POST", `/api/media/${kind}/${encodeURIComponent(folder)}/fetch`, { urls: text });
@@ -932,7 +967,7 @@ async function fetchPoll() {
       it.txt.textContent = `${j.total ? pct.toFixed(0) + "% · " : fmt.bytes(j.got) + " · "}${fmt.bytes(j.speed)}/s`;
       active++;
     } else if (j.state === "wait") { active++; }
-    else if (j.state === "done") { it.bar.style.width = "100%"; upMark(it, "done", "완료 · 검증 중"); }
+    else if (j.state === "done") { it.bar.style.width = "100%"; upMark(it, "done", "받기 완료 · 검증 대기"); it.file = { name: j.name }; upVerify(it); }
     else if (j.state === "cancel") upMark(it, "cancel", "취소됨");
     else if (j.state === "err") upMark(it, "err", "실패: " + j.error);
   }
@@ -1013,7 +1048,7 @@ async function upOne(it) {
       return;
     }
     await api("POST", `/api/uploads/${id}/complete`);
-    it.bar.style.width = "100%"; upMark(it, "done", "완료 · 검증 중");
+    it.bar.style.width = "100%"; upMark(it, "done", "올리기 완료 · 검증 대기"); upVerify(it);
   } catch (e) { upMark(it, "err", "실패: " + e.message); }
   finally { uploading--; }
 }

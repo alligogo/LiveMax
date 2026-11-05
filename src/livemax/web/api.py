@@ -186,6 +186,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "speed": speed, "bitrate_kbps": s.get("bitrate"), "out_time": s.get("out_time"),
             "started_at": s.get("ffmpeg_started_at") if state == "running" else None,
             "transport": s.get("transport"), "clip": s.get("clip"), "clip_folder": s.get("clip_folder"),
+            "planned": bool(s.get("planned")),
             "song_title": np_.get("title") or (Path(np_.get("file", "")).stem if np_.get("file") else ""),
             "song_artist": np_.get("artist") or "",
             "song_folder": Path(np_["file"]).parent.name if np_.get("file") else "", "restarts_hour": s.get("restarts_hour", 0),
@@ -423,6 +424,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lv.norepeat_count = int(b.get("norepeat_count", lv.norepeat_count))
         lv.crossfade = float(b.get("crossfade", lv.crossfade) or 0)
         lv.fast_relay = bool(b.get("fast_relay", lv.fast_relay))
+        if b.get("video_order") in ("sequential", "random"):
+            lv.video_order = b["video_order"]
         lv.timer_mode = str(b.get("timer_mode", lv.timer_mode))
         lv.timer_minutes = int(b.get("timer_minutes", lv.timer_minutes))
         lv.timer_until = float(b.get("timer_until", lv.timer_until) or 0)
@@ -478,6 +481,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         db.add_event(request.state.conn, "info", "web", "설정 변경" + (" (스트림 키 교체)" if key else ""), lv.id)
         audio_changed = any(before[k] != after[k] for k in ("audio_mode", "norepeat_count", "crossfade"))
         video_changed = (bool(key) or before["video_folders"] != after["video_folders"]
+                         or before.get("video_order") != after.get("video_order")
                          or before.get("fast_relay") != after.get("fast_relay"))  # 송출 경로 변경 → 영상만 재시작
         running = sup.proc(lv.id).desired
         if running and before["audio_folders"] != after["audio_folders"]:
@@ -591,6 +595,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             out.append({"name": p.name, "size": p.stat().st_size, "duration": r["duration"] if r else None,
                         "bitrate": r["bitrate_kbps"] if r else None, "thumb": bool(r and r["thumb"]),
                         "added_at": r["added_at"] if r else p.stat().st_mtime,
+                        "v": int(p.stat().st_mtime),  # 썸네일 주소에 붙여 같은 이름을 다시 올려도 새 그림이 보이게
                         "playing": [_who(lv) for lv, st in states if st == "playing"],
                         "next": [_who(lv) for lv, st in states if st == "next"]})
         pend_dir = paths.incoming / kind / folder
@@ -747,13 +752,16 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return None
 
     @app.get("/api/thumbs/{folder}/{name}")
-    def thumb(folder: str, name: str):
+    def thumb(request: Request, folder: str, name: str):
         if not config.valid_folder_name(folder) or "/" in name or name.startswith("."):
             return err("bad", 400)
         p = paths.thumbs_dir / "video" / folder / f"{name}.jpg"
         if not p.is_file():
             return err("not found", 404)
-        return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
+        # 주소에 판(v)이 붙어 있으면 그림이 바뀌면 주소도 바뀌므로 오래 기억해도 되고,
+        # 판이 없으면(라이브 미리보기) 매번 바뀌었는지만 확인한다 — 같은 이름을 다시 올려도 옛 그림이 안 남게
+        cc = "private, max-age=604800, immutable" if request.query_params.get("v") else "private, no-cache"
+        return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": cc})
 
     # ------------------------------------------------------------------ 이어 올리기 업로드
     def _upload_id(kind: str, folder: str, name: str, size: int) -> str:
