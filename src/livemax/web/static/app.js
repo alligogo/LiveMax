@@ -661,10 +661,9 @@ async function renderFolder(kind, root, data) {
   const info = data.folders.find((f) => f.name === folder);
   const detail = await api("GET", `/api/media/${kind}/${encodeURIComponent(folder)}`);
   const input = h("input", { type: "file", multiple: true, hidden: true, accept: kind === "video" ? ".mp4,.mkv" : ".m4a,.aac" });
-  const list = h("div", { class: "uploads" });
   const drop = h("div", { class: "drop" }, h("div", {}, h("b", {}, "파일을 여기로 끌어다 놓거나 "), h("a", { style: "color:var(--green);cursor:pointer", onclick: () => input.click() }, "선택"), input),
-    h("div", { class: "small faint", style: "margin-top:6px" }, "큰 파일도 끊기면 이어서 올라갑니다 · 올린 뒤 자동으로 규격 검증"));
-  const go = (files) => uploadFiles(kind, folder, files, list);
+    h("div", { class: "small faint", style: "margin-top:6px" }, "큰 파일도 끊기면 이어서 올라갑니다 · 다른 폴더·메뉴로 옮겨도 계속 올라가요 (오른쪽 아래 업로드 창)"));
+  const go = (files) => uploadFiles(kind, folder, files);
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("over"));
   drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); go(e.dataTransfer.files); });
@@ -709,7 +708,7 @@ async function renderFolder(kind, root, data) {
         info?.used_by?.length ? h("span", { class: "pill g", style: "text-transform:none" }, `사용 중: ${info.used_by.map(liveName).join(", ")}`) : null,
         h("button", { class: "btn sm ghost", onclick: () => renameFolder(kind, folder) }, "이름 변경"),
         h("button", { class: "btn sm danger", onclick: () => deleteFolder(kind, folder, info) }, "폴더 삭제")),
-      h("div", { class: "card-body" }, drop, list,
+      h("div", { class: "card-body" }, drop,
         detail.pending.length ? h("div", { class: "small", style: "margin-top:12px" }, h("span", { class: "pill y" }, "규격 검증 중"), " ", detail.pending.join(", ")) : null,
         h("div", { class: "small muted", style: "margin-top:14px" }, `${detail.files.length}개 · ${fmt.bytes(info?.size || 0)}`,
           inUse ? h("span", { class: "faint" }, kind === "video" ? " · 라이브에서 쓰는 폴더라 파일을 지울 수 없습니다 (추가는 가능)"
@@ -757,47 +756,149 @@ async function deleteFolder(kind, folder, info) {
   setTimeout(() => typed.focus(), 50);
 }
 
-// 이어 올리기: 8MB 조각, 끊기면 서버가 가진 지점부터 다시. 동시에 3개 파일.
+// 이어 올리기: 8MB 조각, 끊기면 서버가 가진 지점부터 다시.
+// 업로드는 화면과 따로 돈다: 폴더·메뉴를 옮겨도 계속 올라가고, 오른쪽 아래 '업로드' 창에서 모든 폴더 것을 함께 본다.
+// 여러 폴더에 끌어다 놓아도 한 줄로 세워 한 번에 한 파일씩 (서버 부담을 고르게 — 속도 상한은 서버가 건다).
 const CHUNK = 8 * 1024 * 1024;
-async function uploadFiles(kind, folder, fileList, listEl) {
+const UP = { queue: [], items: [], running: false, panel: null, body: null, head: null, min: false };
+const KIND_LABEL = { video: "비디오", audio: "음악" };
+
+function upPanel() {
+  if (UP.panel) return UP.panel;
+  UP.head = h("div", { class: "up-head" });
+  UP.body = h("div", { class: "up-body" });
+  UP.panel = h("div", { class: "up-panel" }, UP.head, UP.body);
+  document.body.append(UP.panel);
+  return UP.panel;
+}
+function upHead() {
+  const left = UP.queue.length + (UP.running ? 1 : 0);
+  const done = UP.items.filter((x) => x.state === "done").length, fail = UP.items.filter((x) => x.state === "err").length;
+  const canceled = UP.items.filter((x) => x.state === "cancel").length;
+  UP.head.replaceChildren(
+    h("b", {}, left ? `업로드 중 · 남은 ${left}개` : `업로드 끝 · 완료 ${done}${fail ? ` · 실패 ${fail}` : ""}${canceled ? ` · 취소 ${canceled}` : ""}`),
+    h("span", { class: "spacer" }),
+    left ? h("button", { class: "btn sm danger", onclick: () => { if (confirm(`남은 ${left}개 업로드를 모두 취소할까요?`)) upCancelAll(); } }, "모두 취소")
+      : h("button", { class: "btn sm", onclick: () => { UP.items = []; UP.groups = {}; UP.panel.remove(); UP.panel = null; } }, "닫기"),
+    h("button", { class: "btn sm", title: UP.min ? "펼치기" : "접기", onclick: () => { UP.min = !UP.min; UP.panel.classList.toggle("min", UP.min); upHead(); } }, UP.min ? "▲" : "▼"));
+  for (const g of Object.values(UP.groups || {})) upGroupHead(g);
+}
+// 폴더별 묶음: [음악 · 재즈] 2/5 ─ 파일들
+function upGroup(kind, folder) {
+  UP.groups = UP.groups || {};
+  const key = `${kind}/${folder}`;
+  if (!UP.groups[key]) {
+    const g = { kind, folder, head: h("div", { class: "up-ghead" }), list: h("div", { class: "up-glist" }) };
+    g.el = h("div", { class: "up-group" }, g.head, g.list);
+    UP.groups[key] = g; UP.body.append(g.el);
+  }
+  return UP.groups[key];
+}
+function upGroupHead(g) {
+  const its = UP.items.filter((x) => x.kind === g.kind && x.folder === g.folder);
+  const fin = its.filter((x) => ["done", "err", "cancel"].includes(x.state)).length;
+  g.head.replaceChildren(h("span", {}, `${KIND_LABEL[g.kind]} · ${g.folder}`), h("span", { class: "faint" }, `${fin}/${its.length}`));
+}
+function upRow(it) {
+  it.bar = h("i", { style: "width:0%" });
+  it.txt = h("span", { class: "st" }, "대기");
+  it.x = h("button", { class: "up-x", title: "이 파일 업로드 취소", onclick: () => upCancel(it) }, "✕");
+  it.row = h("div", { class: "up" },
+    h("div", { class: "row" }, h("span", { class: "nm", title: it.file.name }, it.file.name), it.txt, it.x),
+    h("div", { class: "bar" }, it.bar));
+  return it.row;
+}
+function upCancel(it) {
+  if (it.state === "wait") {
+    UP.queue = UP.queue.filter((x) => x !== it);
+    upMark(it, "cancel", "취소됨");
+  } else if (it.state === "run") {
+    it.cancel = true; it.txt.textContent = "취소 중…";  // 지금 보내는 조각(최대 8MB)이 끝나면 멈추고 서버의 조각도 지운다
+  }
+  upHead();
+}
+function upCancelAll() {
+  for (const it of [...UP.queue]) upCancel(it);
+  for (const it of UP.items.filter((x) => x.state === "run")) upCancel(it);
+}
+function upMark(it, state, text) {
+  it.state = state; it.txt.textContent = text;
+  it.row.classList.add(state === "done" ? "ok" : state === "err" ? "err" : "cancel");
+  it.x.remove();
+}
+
+function uploadFiles(kind, folder, fileList) {
   const ext = kind === "video" ? [".mp4", ".mkv"] : [".m4a", ".aac"];
-  const queue = [...fileList].filter((f) => {
+  const files = [...fileList].filter((f) => {
     if (ext.some((e) => f.name.toLowerCase().endsWith(e))) return true;
     toast(`${f.name}: ${ext.join(", ")} 파일만 올릴 수 있습니다`, true); return false;
   });
-  const one = async (file) => {
-    const bar = h("i", { style: "width:0%" });
-    const txt = h("span", {}, "준비 중");
-    const row = h("div", { class: "up" }, h("div", { class: "row" }, h("span", { style: "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, file.name), txt), h("div", { class: "bar" }, bar));
-    listEl.prepend(row);
-    uploading++;
-    try {
-      let { id, offset } = await api("POST", "/api/uploads", { kind, folder, name: file.name, size: file.size });
-      let fails = 0; const t0 = Date.now(); const start = offset;
-      while (offset < file.size) {
-        try {
-          const r = await api("PUT", `/api/uploads/${id}?offset=${offset}`, file.slice(offset, offset + CHUNK));
-          offset = r.offset; fails = 0;
-          const pct = (offset / file.size) * 100, sec = (Date.now() - t0) / 1000;
-          bar.style.width = pct.toFixed(1) + "%";
-          txt.textContent = `${pct.toFixed(0)}% · ${fmt.bytes((offset - start) / Math.max(sec, 0.1))}/s`;
-        } catch (e) {
-          if (++fails > 8) throw e;
-          txt.textContent = `연결 끊김 — ${fails}회째 다시 시도`;
-          await new Promise((r) => setTimeout(r, Math.min(30000, 1000 * 2 ** fails)));
-          const again = await api("POST", "/api/uploads", { kind, folder, name: file.name, size: file.size });
-          offset = again.offset;
-        }
-      }
-      await api("POST", `/api/uploads/${id}/complete`);
-      bar.style.width = "100%"; txt.textContent = "완료 · 규격 검증 중";
-    } catch (e) { row.classList.add("err"); txt.textContent = "실패: " + e.message; }
-    finally { uploading--; }
-  };
-  // 한 번에 한 파일씩 (서버 부담을 고르게 — 속도 상한은 서버가 건다)
-  while (queue.length) await one(queue.shift());
-  setTimeout(() => showMedia(kind), 4000);
+  if (!files.length) return;
+  upPanel();
+  const g = upGroup(kind, folder);
+  for (const file of files) {
+    const it = { file, kind, folder, state: "wait" };
+    UP.items.push(it); UP.queue.push(it);
+    g.list.append(upRow(it));
+  }
+  upHead();
+  if (!UP.running) upWorker();
 }
+
+async function upWorker() {
+  UP.running = true;
+  while (UP.queue.length) {
+    const it = UP.queue.shift();
+    upHead();
+    await upOne(it);
+    upHead();
+    // 지금 보고 있는 곳이 그 폴더면 목록만 새로 (다른 메뉴로 끌고 가지 않는다)
+    if (it.state === "done" && location.hash.startsWith(`#/media/${it.kind}`) && mediaFolder[it.kind] === it.folder && !UP.queue.length) {
+      setTimeout(() => { if (location.hash.startsWith(`#/media/${it.kind}`) && !UP.running) showMedia(it.kind); }, 4000);
+    }
+  }
+  UP.running = false;
+  upHead();
+}
+
+async function upOne(it) {
+  const { file, kind, folder } = it;
+  it.state = "run"; uploading++;
+  let id = null;
+  try {
+    let offset;
+    ({ id, offset } = await api("POST", "/api/uploads", { kind, folder, name: file.name, size: file.size }));
+    let fails = 0; const t0 = Date.now(); const start = offset;
+    while (offset < file.size) {
+      if (it.cancel) break;
+      try {
+        const r = await api("PUT", `/api/uploads/${id}?offset=${offset}`, file.slice(offset, offset + CHUNK));
+        offset = r.offset; fails = 0;
+        const pct = (offset / file.size) * 100, sec = (Date.now() - t0) / 1000;
+        it.bar.style.width = pct.toFixed(1) + "%";
+        if (!it.cancel) it.txt.textContent = `${pct.toFixed(0)}% · ${fmt.bytes((offset - start) / Math.max(sec, 0.1))}/s`;
+      } catch (e) {
+        if (it.cancel) break;
+        if (++fails > 8) throw e;
+        it.txt.textContent = `연결 끊김 — ${fails}회째 다시 시도`;
+        await new Promise((r) => setTimeout(r, Math.min(30000, 1000 * 2 ** fails)));
+        const again = await api("POST", "/api/uploads", { kind, folder, name: file.name, size: file.size });
+        offset = again.offset;
+      }
+    }
+    if (it.cancel) {
+      try { await api("DELETE", `/api/uploads/${id}`); } catch (e) { /* 남은 조각은 자동 정리가 지운다 */ }
+      upMark(it, "cancel", "취소됨");
+      return;
+    }
+    await api("POST", `/api/uploads/${id}/complete`);
+    it.bar.style.width = "100%"; upMark(it, "done", "완료 · 검증 중");
+  } catch (e) { upMark(it, "err", "실패: " + e.message); }
+  finally { uploading--; }
+}
+
+// 올리는 중에 창을 닫거나 새로고침하면 끊긴다 → 한 번 묻는다 (끊겨도 다음에 같은 파일을 올리면 이어서 올라감)
+window.addEventListener("beforeunload", (e) => { if (UP.running || UP.queue.length) { e.preventDefault(); e.returnValue = ""; } });
 
 // ------------------------------------------------------------------ 채널
 async function showChannels() {

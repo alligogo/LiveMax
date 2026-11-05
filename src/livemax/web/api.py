@@ -806,6 +806,15 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err("크기 초과 — 다시 올려 주세요")
         return {"ok": True, "offset": new}
 
+    @app.delete("/api/uploads/{uid}")
+    def upload_cancel(uid: str):
+        """올리다 만 조각을 지운다 (웹의 '취소'). 이미 완료되어 검증 대기로 넘어간 파일은 건드리지 않는다."""
+        if not uid.isalnum():
+            return err("bad id")
+        (paths.uploads / f"{uid}.part").unlink(missing_ok=True)
+        (paths.uploads / f"{uid}.json").unlink(missing_ok=True)
+        return {"ok": True}
+
     @app.post("/api/uploads/{uid}/complete")
     def upload_complete(uid: str):
         if not uid.isalnum():
