@@ -71,7 +71,7 @@ DEFAULTS: dict[str, Any] = {
         # 라이브별 stunnel 이 TLS 를 큰 레코드로 처리 → 송출 트래픽 약 25% 절감 (v1 live1 실측 8.0→5.9 Mbps)
         # ipv4: v1 live1 에서 유튜브행 IPv6 경로가 약 10분마다 끊겨 송출이 멈췄다 → IPv4 고정.
         "tls_relay": {"enabled": True, "verify": True, "ipv4": True},
-        "lm_relay": {"enabled": True},  # 라이브별 fast_relay 를 켠 라이브만. 끄면 모두 기존 방식
+        "lm_relay": {"enabled": True},  # 새 중계기 전체 스위치 (끄면 모든 라이브가 기존 방식)
         "audio_connect_timeout": 60,
     },
     "concat": {"hours": 24, "margin_minutes": 45},
@@ -185,7 +185,7 @@ class Live:
     restart_slot: int = 0
     youtube_video_id: str = ""
     output_url: str = ""
-    fast_relay: bool = False  # 새 송출 중계기(lmrelay) 사용 — CPU 절약 (시험 기능, 라이브별로 켬)
+    fast_relay: bool = True  # 새 송출 중계기(lmrelay) — 기본. 끄면 기존 방식(stunnel, 문제 해결용)
     channel_id: str = ""   # 채널 (v2.4)
     key_id: str = ""       # 그 채널에 등록된 스트림 키
     created_at: float = 0.0

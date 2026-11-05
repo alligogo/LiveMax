@@ -255,7 +255,9 @@ function renderLives(grid, ov) {
         lv.desired ? armBtn(lv, "restart", "btn", "재시작") : h("button", { class: "btn", disabled: true }, "재시작")),
       links: h("div", { class: "links" },
         reconnects(lv),
-        lv.transport === "lm-relay" ? h("span", { class: "faint", title: "새 송출 중계기로 송출 중" }, "새 중계기") : null,
+        // 새 중계기가 기본이라 평소엔 표시 없음 — 기존 방식으로 나가고 있을 때만 (켜 둔 경우·자동 전환)
+        lv.state === "running" && lv.transport && lv.transport !== "lm-relay"
+          ? h("span", { class: "warnline", title: lv.fast_relay === false ? "설정에서 기존 방식을 켜 둠" : "새 중계기 연속 실패로 30분간 자동 전환" }, "기존 방식 송출") : null,
         lv.youtube_video_id ? h("a", { onclick: () => openPreview(lv) }, "유튜브 미리보기") : null,
         h("a", { onclick: () => openLog(lv) }, "로그"),
         h("span", { class: "faint" }, lv.timer_mode !== "off" ? "타이머 방송 — 일일 재시작 안 함" : `다음 자동 재시작 ${fmt.time(lv.next_restart)}`)),
@@ -491,7 +493,7 @@ async function openLiveEditor(lv) {
       Promise.all([api("GET", "/api/media/video"), api("GET", "/api/media/audio")]).then(([v, a]) => ({ video: v, audio: a })),
       api("GET", "/api/channels").then((r) => r.channels)]);
   } catch (e) { toast(e.message, true); return; }
-  const cur = lv || { name: "", video_folders: [], audio_folders: [], audio_mode: "random_norepeat", norepeat_count: 30, crossfade: 0, youtube_video_id: "",
+  const cur = lv || { name: "", video_folders: [], audio_folders: [], audio_mode: "random_norepeat", norepeat_count: 30, crossfade: 0, youtube_video_id: "", fast_relay: true,
     timer_mode: "off", timer_minutes: 710, timer_until: 0, timer_repeat: false, timer_gap_minutes: 2 };
   const name = h("input", { class: "input", value: cur.name, placeholder: "예: 재즈 색소폰 24/7", maxlength: 80 });
   // 채널 → 그 채널의 스트림 키 (키는 채널 메뉴에서만 등록). 다른 라이브가 쓰는 키는 고를 수 없다
@@ -549,10 +551,11 @@ async function openLiveEditor(lv) {
   const norep = h("input", { class: "input", type: "number", min: 0, max: 1000, value: cur.norepeat_count });
   const xfade = h("input", { class: "input", type: "number", min: 0, max: 10, step: 0.5, value: cur.crossfade });
   const vid = h("input", { class: "input", value: cur.youtube_video_id || "", placeholder: "선택 — youtu.be/ 뒤의 영상 ID" });
-  const fast = h("input", { type: "checkbox" }); fast.checked = !!cur.fast_relay;
-  const fastLab = h("label", { class: "check" + (fast.checked ? " on" : ""), style: "max-width:420px" }, fast,
-    h("span", { class: "nm" }, h("b", {}, "새 송출 중계기 (시험)"), h("span", { class: "desc" }, "CPU 를 줄이는 새 송출 방식. 문제가 생기면 끄면 바로 기존 방식으로 돌아갑니다.")));
-  fast.addEventListener("change", () => fastLab.classList.toggle("on", fast.checked));
+  // 새 중계기가 기본. 체크하면 이 라이브만 기존 방식(stunnel) — 문제 해결·비교용
+  const legacy = h("input", { type: "checkbox" }); legacy.checked = cur.fast_relay === false;
+  const fastLab = h("label", { class: "check" + (legacy.checked ? " on" : ""), style: "max-width:420px" }, legacy,
+    h("span", { class: "nm" }, h("b", {}, "기존 송출 방식 사용 (문제 해결용)"), h("span", { class: "desc" }, "평소엔 끄세요. 이 라이브만 예전 방식(stunnel)으로 송출합니다 — 새 방식에 문제가 있을 때 비교용.")));
+  legacy.addEventListener("change", () => fastLab.classList.toggle("on", legacy.checked));
   const msg = h("div", { class: "msg err" });
   const adv = h("div", { class: "adv" }, h("div", { class: "section-title", style: "margin:18px 0 12px" }, "추가 설정"),
     h("label", { class: "field" }, h("span", {}, "중복방지 곡 수"), norep),
@@ -586,7 +589,7 @@ async function openLiveEditor(lv) {
   showPane();
 
   const payload = (apply) => ({ name: name.value, channel_id: chId, key_id: keyId, video_folders: vbox.values(), audio_folders: abox.values(),
-    audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, fast_relay: fast.checked, apply,
+    audio_mode: mode, norepeat_count: Number(norep.value), crossfade: Number(xfade.value), youtube_video_id: vid.value, fast_relay: !legacy.checked, apply,
     timer_mode: tmode, timer_minutes: Number(tH.value || 0) * 60 + Number(tM.value || 0),
     timer_until: tU.value ? new Date(tU.value).getTime() / 1000 : 0, timer_repeat: tRep.checked, timer_gap_minutes: Number(tGap.value || 2) });
   const save = async (apply) => {
