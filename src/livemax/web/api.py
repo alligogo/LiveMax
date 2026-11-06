@@ -241,14 +241,16 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lives = [live_view(lv, snap) for lv in store.all()]
         sysd = dict(core.collector.latest)
         planned = [lv for lv in lives if lv["enabled"]]  # 송출 중이거나 켜 둔 라이브만 (대기중은 제외)
+        on_air = [lv for lv in planned if lv["state"] == "running"]
         cap = capacity.compute(settings["capacity"], [_video_kbps(conn, lv) for lv in planned],
                                sysd.get("month_tx_bytes"), sysd.get("net_tx_mbps"), sysd.get("cpu_pct"),
                                sysd.get("mem_used_mb"), sysd.get("mem_total_mb"),
-                               live_cpu=[lv["cpu"] for lv in planned if lv["state"] == "running" and lv.get("cpu")])
+                               live_cpu=[lv["cpu"] for lv in on_air if lv.get("cpu")], running=len(on_air))
         # 안전장치: 설정한 최대 개수까지 남은 칸보다 많이 '추가 가능'으로 보이지 않게
         left = max(0, _max_lives() - len(lives))
         if left < cap.can_add:
             cap.can_add, cap.limiting = left, "max"
+            cap.usage_ratio = len(lives) / max(1, _max_lives())
         alerts = []
         for lv in lives:
             if lv["status"] in ("warn", "down"):
@@ -256,7 +258,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                                "live": lv["id"], "message": lv["message"] or ("speed 저하" if lv["status"] == "warn" else "중단")})
         if sysd.get("disk_pct") and sysd["disk_pct"] >= settings["cleanup"]["disk_warn_percent"]:
             alerts.append({"level": "warn", "ts": time.time(), "live": None, "message": f"디스크 {sysd['disk_pct']:.0f}% 사용 중"})
-        if cap.projected_tb > cap.limit_tb:
+        if cap.limit_tb > 0 and cap.projected_tb > cap.limit_tb:
             alerts.append({"level": "error", "ts": time.time(), "live": None,
                            "message": f"이번 달 트래픽이 {cap.projected_tb:.1f}TB 로 예상돼 한계선 {cap.limit_tb:.0f}TB 를 넘습니다 — 라이브를 줄이세요"})
         if REBOOT_FLAG.exists():
@@ -270,7 +272,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "lives": lives, "system": sysd, "channels": [_channel_brief(c) for c in chstore.all()],
             "capacity": {"can_add": cap.can_add, "limiting": cap.limiting, "projected_tb": cap.projected_tb,
                          "limit_tb": cap.limit_tb, "target_tb": cap.target_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb,
-                         "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps, "lives": len(planned)},
+                         "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps, "lives": len(planned),
+                         "mem_per_live_mb": cap.mem_per_live_mb, "cpu_per_live_pct": cap.cpu_per_live_pct,
+                         "port_mbit": cap.port_mbit, "traffic_unlimited": cap.traffic_unlimited,
+                         "options": cap.options, "usage": cap.usage},
             "max_lives": _max_lives(),
             "alerts": alerts[:30], "reboot_required": REBOOT_FLAG.exists(),
         }
@@ -404,7 +409,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     _ov_cache = {"t": 0.0, "data": None}
 
     def _max_lives() -> int:
-        return int(settings.get("max_lives") or 15)
+        return int(settings.get("max_lives") or 30)
 
     @app.get("/api/overview")
     def overview(request: Request):
@@ -910,7 +915,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "reboot_required": REBOOT_FLAG.exists(),
             "reboot_packages": REBOOT_FLAG.with_suffix(".pkgs").read_text().split() if REBOOT_FLAG.with_suffix(".pkgs").exists() else [],
             "settings": {"restart_base_utc": settings["restart"]["base_utc"], "server_name": config.server_name(settings),
-                         "max_lives": _max_lives(), "tls_relay": settings["output"]["tls_relay"]["enabled"]},
+                         "max_lives": _max_lives(), "tls_relay": settings["output"]["tls_relay"]["enabled"],
+                         "port_mbit": settings["capacity"].get("port_mbit", 1000),
+                         "monthly_traffic_tb": settings["capacity"].get("monthly_traffic_tb", 0)},
             "sessions": [{"id": r["token_hash"], "ip": r["ip"], "ua": r["user_agent"], "last_seen": r["last_seen"],
                           "current": r["token_hash"] == sess["token_hash"]}
                          for r in conn.execute("SELECT * FROM sessions ORDER BY last_seen DESC").fetchall()],
@@ -1028,6 +1035,18 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return err("라이브 최대 개수는 1~100 사이로 입력하세요")
             config.save_settings_override(paths, ["max_lives"], n)
             settings["max_lives"] = n
+        # 용량 계산 기준 (업체마다 다름): 회선 속도(Mbps), 월 트래픽 한도(TB, 0 = 무제한)
+        for key, lo, hi, label in (("port_mbit", 10, 100000, "회선 속도(Mbps)"), ("monthly_traffic_tb", 0, 10000, "월 트래픽 한도(TB)")):
+            if key in b:
+                try:
+                    v = float(b[key])
+                except (TypeError, ValueError):
+                    return err(f"{label}는 숫자로 입력하세요")
+                if not lo <= v <= hi:
+                    return err(f"{label}는 {lo}~{hi} 사이로 입력하세요 (트래픽 0 = 무제한)")
+                v = int(v) if v == int(v) else v
+                config.save_settings_override(paths, ["capacity", key], v)
+                settings["capacity"][key] = v
         if b.get("lives_view") in ("grid", "list"):
             config.save_settings_override(paths, ["ui", "lives_view"], b["lives_view"])
             settings.setdefault("ui", {})["lives_view"] = b["lives_view"]

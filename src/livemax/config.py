@@ -89,15 +89,18 @@ DEFAULTS: dict[str, Any] = {
     "cleanup": {"interval_minutes": 60, "rejected_days": 7, "incoming_stale_hours": 24, "log_days": 14,
                 "metrics_raw_days": 3, "log_max_mb": 10, "log_keep_mb": 2, "logs_total_mb": 300, "db_max_mb": 200,
                 "disk_warn_percent": 80, "disk_emergency_percent": 90},
-    "capacity": {"monthly_traffic_tb": 32, "traffic_target_tb": 28, "port_mbit": 200, "safety_ratio": 0.85, "audio_kbps": 128,
-                 "overhead_ratio": 0.03, "cpu_percent_total": 400, "ram_mb_per_live": 300},
+    # 용량 계산 (DESIGN 11-D). 회선 속도·월 트래픽 한도는 업체마다 달라 설정 > 서버에서 바꾼다 (트래픽 0 = 무제한).
+    # 안전 기준: 메모리 여유 700MB · CPU 평균 50% · 회선 80%. 라이브당 값은 서버 실측, 송출 중인 라이브가 없을 때만 아래 기본값.
+    "capacity": {"monthly_traffic_tb": 0, "traffic_target_tb": 0, "port_mbit": 1000, "port_use_ratio": 0.8,
+                 "cpu_target_pct": 50, "mem_reserve_mb": 700, "mem_base_mb": 550, "mem_per_live_mb": 150,
+                 "cpu_per_live_core_pct": 2.0, "audio_kbps": 128, "overhead_ratio": 0.03},
     "dashboard": {"username": "admin", "bind": "127.0.0.1", "port": 8080, "session_hours": 168,
                   "login_max_failures": 5, "login_block_minutes": 15, "max_upload_mb": 20000,
                   "upload_mb_per_s": 10},  # 웹 업로드 속도 상한 (서버 부담 줄이기, 모든 업로드 합산)
     "fetch": {"mb_per_s": 20, "allow_private": False},  # 링크로 가져오기: 받는 속도 상한, 내부 주소 허용(테스트용)
     "harbor_port_base": 8101,
     "ui": {"lives_view": "grid"},  # 라이브 화면 보기 방식: grid(블록) | list(목록)
-    "max_lives": 15,  # 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
+    "max_lives": 30,  # 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
     "server_name": "",  # 예: LIVE 1 — 서버가 여러 대일 때 구분 (화면·알림)
 }
 

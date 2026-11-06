@@ -42,6 +42,9 @@ from .state import read_json, write_json_atomic
 log = logging.getLogger("livemax.supervisor")
 PLANNED = ("일일 재시작", "설정 적용", "사용자 재시작")  # 일부러 한 재시작 (끊김·경고로 세지 않음)
 LIQUIDSOAP = "liquidsoap"
+# 켤 때 표준 라이브러리 전체 검사를 건너뛴다: 시작 CPU 약 5.9초 → 1.0초 (4코어 서버 순간 15% → 3%),
+# 쓰지 않는 옛 함수 묶음은 안 읽어 메모리 약 -9MB (DESIGN 11-C A안). 스크립트 자체 검사는 테스트(--check)에서 정식으로 한다.
+LIQUIDSOAP_ARGS = ("--unsafe", "--no-deprecated")
 
 
 def _parse_out_time(v: str) -> float | None:
@@ -105,6 +108,8 @@ class LiveProc:
         d["desired"] = self.desired
         d["video_pid"] = self.video.pid if self.video and self.video.poll() is None else None
         d["audio_pid"] = self.audio.pid if self.audio and self.audio.poll() is None else None
+        rp = getattr(self.relay, "proc", None)  # 중계기(새 방식·stunnel)도 라이브 몫 CPU·메모리에 넣는다
+        d["relay_pid"] = rp.pid if rp is not None and rp.poll() is None else None
         now = time.time()
         # 경고 판정용: 일부러 한 재시작(설정 적용·매일 자동·재시작 버튼)은 세지 않는다 — 진짜 문제만
         d["restarts_hour"] = sum(1 for t, r in self.restarts if now - t < 3600 and not r.startswith(PLANNED))
@@ -207,7 +212,7 @@ class LiveProc:
                     return
                 continue
             self.log.info("Liquidsoap 시작 (port %d)", live.harbor_port)
-            self.audio = subprocess.Popen([LIQUIDSOAP, str(liq)], stdin=subprocess.DEVNULL,
+            self.audio = subprocess.Popen([LIQUIDSOAP, *LIQUIDSOAP_ARGS, str(liq)], stdin=subprocess.DEVNULL,
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.set(audio_started_at=time.time())
             started = time.time()

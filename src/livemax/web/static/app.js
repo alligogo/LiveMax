@@ -20,6 +20,7 @@ function h(tag, attrs, ...kids) {
 }
 const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
+const LIMIT_LABEL = { ram: "메모리", cpu: "CPU", bandwidth: "회선 속도", traffic: "월 트래픽", max: "최대 개수 설정" };
 const fmt = {
   time(ts) { if (!ts) return "-"; const d = new Date(ts * 1000); return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; },
   clock(ts) { if (!ts) return "-"; const d = new Date(ts * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; },
@@ -27,6 +28,12 @@ const fmt = {
     if (sec == null || sec < 0) return "-";
     sec = Math.floor(sec); const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
     if (d) return `${d}일 ${hh}시간`; if (hh) return `${hh}:${pad(m)}:${pad(s)}`; return `${m}:${pad(s)}`;
+  },
+  // 라이브 카드 '방송 시간' 칸용: 어떤 값이어도 한 줄 (10일 넘으면 일 단위만 — 150일도 넘치지 않게)
+  age(sec) {
+    if (sec == null || sec < 0) return "-";
+    sec = Math.floor(sec); const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (d >= 10) return `${d}일`; if (d) return `${d}일 ${hh}시간`; if (hh) return `${hh}:${pad(m)}:${pad(s)}`; return `${m}:${pad(s)}`;
   },
   bytes(b) { if (b == null) return "-"; const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return `${b.toFixed(i ? 1 : 0)} ${u[i]}`; },
   num(v, d = 1, unit = "") { return v == null ? "-" : `${Number(v).toFixed(d)}${unit}`; },
@@ -255,7 +262,7 @@ function renderLives(grid, ov) {
       keytag: lv.key_label ? h("span", { class: "keytag", title: `스트림 키: ${lv.key_label} (${lv.key_masked})` }, ico("key"), lv.key_label) : null,
       edit: h("button", { class: "iconbtn", style: "width:30px;height:30px;background:transparent", title: "설정", html: ICON.edit, onclick: () => openLiveEditor(lv) }),
       tiles: h("div", { class: "tiles" },
-        tile(running && (lv.session_started_at || lv.started_at) ? fmt.dur(now - (lv.session_started_at || lv.started_at)) : "-", "방송 시간"),
+        tile(running && (lv.session_started_at || lv.started_at) ? fmt.age(now - (lv.session_started_at || lv.started_at)) : "-", "방송 시간"),
         tile(running && lv.bitrate_kbps ? Math.round(lv.bitrate_kbps).toLocaleString() : "-", "kbit/s"),
         tile(lv.speed != null ? lv.speed.toFixed(2) + "x" : "-", "speed", speedCls)),
       lines: [
@@ -309,6 +316,7 @@ function renderLives(grid, ov) {
   const sections = groups.map((g) => h("section", { class: "ch-group" },
     h("div", { class: "ch-head" },
       g.ch ? chLink(g.ch, "ch-name", chLogo(g.ch, 40), h("span", {}, g.ch.name)) : h("span", { class: "ch-name muted" }, "채널 미지정"),
+      h("span", { class: "ch-count", title: "이 채널의 라이브 수 (유튜브는 채널당 동시 송출 10개까지)" }, `${g.lives.length}개`),
       h("span", { class: "ch-rule" }),
       g.ch && g.ch.description ? h("span", { class: "ch-desc" }, g.ch.description) : null),
     list ? h("div", { class: "rows" }, g.lives.map(row)) : h("div", { class: "grid" }, g.lives.map(card))));
@@ -412,18 +420,28 @@ function renderSide(side, ov) {
   const s = ov.system || {}, c = ov.capacity || {};
   const counts = liveCounts(ov);
   const ratio = Math.min(1, c.usage_ratio || 0);
+  // 용량 박스 한 줄: 이름 · 지금 값 · 설명, 가장 먼저 막히는 자원은 강조
+  const capRow = (k, v, note, use, hot) => h("div", { class: "cap-row" + (hot ? " hot" : "") },
+    h("div", { class: "cap-top" }, h("span", { class: "muted" }, k), h("b", {}, v)),
+    h("div", { class: "cap-note" }, note, use != null ? h("span", { class: "cap-use" }, ` · ${Math.round(use * 100)}%`) : null));
   const kv = (k, v) => h("div", { class: "kv" }, h("span", { class: "muted" }, k), h("b", {}, v));
   side.replaceChildren(
     addBtn("d-only"),
     h("div", { class: "card" }, h("div", { class: "card-head" }, "용량"),
       h("div", { class: "card-body" },
         h("div", { class: "big" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "개 더 추가 가능 (안전 기준)")),
-        ov.max_lives ? h("div", { class: "small muted", style: "text-align:center;margin:-2px 0 10px" },
-          "라이브 ", h("b", { style: "color:var(--text)" }, `${ov.lives.length} / ${ov.max_lives}`), " (최대 개수 — 설정 > 서버)") : null,
-        h("div", { class: "meter" }, h("i", { class: (c.projected_tb || 0) > (c.limit_tb || 32) ? "hi" : (c.projected_tb || 0) > (c.target_tb || 28) ? "mid" : "", style: `width:${(ratio * 100).toFixed(0)}%` })),
-        h("div", { class: "small muted", style: "text-align:center" }, `월 예상 ${fmt.num(c.projected_tb, 1)} TB · 목표 ${fmt.num(c.target_tb, 0)} · 한계 ${fmt.num(c.limit_tb, 0)}`),
-        h("div", { class: "small faint", style: "text-align:center;margin-top:4px" },
-          `${({ traffic: "월 트래픽", bandwidth: "회선 속도", cpu: "CPU", ram: "메모리", max: "최대 개수 설정" })[c.limiting] || ""} 기준 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB · 목표 ${fmt.num(c.target_tb, 0)}TB까지`))),
+        h("div", { class: "small muted", style: "text-align:center;margin:-2px 0 10px" },
+          "먼저 막히는 것: ", h("b", { style: "color:var(--text)" }, LIMIT_LABEL[c.limiting] || "-")),
+        h("div", { class: "meter" }, h("i", { class: ratio >= 1 ? "hi" : ratio >= 0.8 ? "mid" : "", style: `width:${(ratio * 100).toFixed(0)}%` })),
+        h("div", { class: "cap-rows" },
+          capRow("메모리", s.mem_total_mb ? `${fmt.num((s.mem_used_mb || 0) / 1024, 1)} / ${fmt.num(s.mem_total_mb / 1024, 1)} GB` : "-",
+            `라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 여유 700MB`, c.usage?.ram, c.limiting === "ram"),
+          capRow("CPU", fmt.num(s.cpu_pct, 1, "%"), `라이브당 약 ${fmt.num(c.cpu_per_live_pct, 1)}% · 평균 50%까지`, c.usage?.cpu, c.limiting === "cpu"),
+          capRow("회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, `라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps · 80%까지`, c.usage?.bandwidth, c.limiting === "bandwidth"),
+          c.traffic_unlimited
+            ? capRow("월 트래픽", "무제한", `이번 달 ${s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"}`, null, false)
+            : capRow("월 트래픽", `예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`, `목표 ${fmt.num(c.target_tb, 0)}TB까지 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB`, c.usage?.traffic, c.limiting === "traffic"),
+          capRow("라이브", ov.max_lives ? `${ov.lives.length} / ${ov.max_lives}` : `${ov.lives.length}`, "최대 개수 — 설정 > 서버", ov.max_lives ? ov.lives.length / ov.max_lives : null, c.limiting === "max")))),
     h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "시스템"),
       h("div", { class: "card-body" },
         h("div", { class: "group" }, "라이브"),
@@ -1252,15 +1270,22 @@ async function showSystem() {
 
 function serverCard(s, card) {
   const name = h("input", { class: "input", value: s.settings.server_name || "", maxlength: 30, placeholder: "예: LIVE 1", style: "max-width:260px" });
-  const maxLives = h("input", { class: "input", type: "number", min: 1, max: 100, value: s.settings.max_lives ?? 15, style: "max-width:120px" });
+  const maxLives = h("input", { class: "input", type: "number", min: 1, max: 100, value: s.settings.max_lives ?? 30, style: "max-width:120px" });
+  const port = h("input", { class: "input", type: "number", min: 10, max: 100000, value: s.settings.port_mbit ?? 1000, style: "max-width:120px" });
+  const traffic = h("input", { class: "input", type: "number", min: 0, max: 10000, step: "any", value: s.settings.monthly_traffic_tb ?? 0, style: "max-width:120px" });
   return card("서버",
     h("label", { class: "field" }, h("span", {}, "서버명"), name,
       h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
     h("label", { class: "field" }, h("span", {}, "라이브 최대 개수"), maxLives,
-      h("div", { class: "hint" }, "안전장치 — 이 서버에 이 개수보다 많은 라이브를 만들 수 없습니다 (기본 15). 서버 사양을 올리면 늘리세요.")),
+      h("div", { class: "hint" }, "안전장치 — 이 서버에 이 개수보다 많은 라이브를 만들 수 없습니다 (기본 30). 서버 사양을 올리면 늘리세요.")),
+    h("label", { class: "field" }, h("span", {}, "회선 속도 (Mbps)"), port,
+      h("div", { class: "hint" }, "서버 업체가 보장하는 속도 (예: OVH VPS-2 = 1000, VPS-1 = 500). 용량 계산에서 이 값의 80%까지 씁니다.")),
+    h("label", { class: "field" }, h("span", {}, "월 트래픽 한도 (TB)"), traffic,
+      h("div", { class: "hint" }, "0 = 무제한 (OVH 북미·유럽). 한도가 있는 업체면 숫자를 넣으세요 (예: Contabo 32) — 한도의 87.5%를 목표로 계산합니다.")),
     h("button", { class: "btn primary", onclick: async () => {
       try {
-        await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value) });
+        await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value),
+          port_mbit: Number(port.value), monthly_traffic_tb: Number(traffic.value) });
         setServerName(name.value); toast("저장했습니다"); showSystem();
       } catch (e) { toast(e.message, true); }
     } }, "저장"));

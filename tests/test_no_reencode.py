@@ -99,6 +99,11 @@ def test_rendered_liq_typechecks(paths, settings, tmp_path, crossfade, folders):
     liq.write_text(liquidsoap.render(make_live(crossfade=crossfade, audio_folders=folders), paths, settings))
     r = subprocess.run(["liquidsoap", "--check", str(liq)], capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    # 실제 실행 옵션(--no-deprecated)으로도 통과해야 한다 — 옛 함수를 쓰면 여기서 걸린다
+    from livemax.supervisor import LIQUIDSOAP_ARGS
+    assert "--no-deprecated" in LIQUIDSOAP_ARGS
+    r = subprocess.run(["liquidsoap", "--no-deprecated", "--check", str(liq)], capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
 
 
 def test_music_runs_on_its_own_clock_with_buffer(paths, settings):

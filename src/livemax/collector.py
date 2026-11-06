@@ -59,7 +59,7 @@ class Collector:
                 for lid, s in snap.items():
                     if s.get("state") == "running":
                         running += 1
-                    pids = [x for x in (s.get("video_pid"), s.get("audio_pid")) if x]
+                    pids = [x for x in (s.get("video_pid"), s.get("audio_pid"), s.get("relay_pid")) if x]
                     self.per_live[lid] = {
                         "cpu": sum(self._cpu(x, dt, 0) for x in pids),
                         "rss_mb": sum(sysmetrics.proc_rss_mb(x) or 0 for x in pids) or None,

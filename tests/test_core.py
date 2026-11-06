@@ -152,13 +152,41 @@ def test_watch_startup_grace(paths, settings):
 
 
 # ---------------------------------------------------------------- 용량 / 비밀
-def test_capacity_traffic_bound(settings):
-    cap = capacity.compute(settings["capacity"], [5500] * 10, None, 58, 10, 3000, 8000,
-                           now=datetime(2026, 11, 15, tzinfo=timezone.utc))
-    assert 17 < cap.projected_tb < 20 and cap.limiting == "traffic"
-    # 목표 28TB 까지: 10개(약 18.9TB) + 라이브당 약 1.9TB → 4개 더
+def test_capacity_traffic_bound_when_limit_set(settings):
+    """한도가 있는 업체(예: Contabo 32TB): 월 트래픽이 먼저 막힌다 — 목표 = 한도의 87.5% (28TB)."""
+    cfg = {**settings["capacity"], "monthly_traffic_tb": 32, "port_mbit": 200}
+    cap = capacity.compute(cfg, [5500] * 10, None, 58, 10, 3000, 8000, now=datetime(2026, 11, 15, tzinfo=timezone.utc),
+                           live_cpu=[3.0] * 10, running=10, cores=4)
+    assert 17 < cap.projected_tb < 20 and cap.limiting == "traffic" and not cap.traffic_unlimited
     assert cap.target_tb == 28 and cap.limit_tb == 32
     assert cap.can_add == int((28 - cap.projected_tb) // cap.per_live_tb)
+
+
+def test_capacity_unlimited_traffic_is_memory_bound(settings):
+    """OVH VPS-2 실측(라이브 5개: 메모리 1286/7751MB, CPU 2.5%, 송신 26Mbps): 트래픽 무제한이면 메모리가 먼저 막힌다."""
+    cap = capacity.compute(settings["capacity"], [5000] * 5, 2.4e9, 26, 2.5, 1286, 7751,
+                           now=datetime(2026, 11, 15, tzinfo=timezone.utc), live_cpu=[2.0] * 5, running=5, cores=4)
+    assert cap.traffic_unlimited and "traffic" not in cap.options
+    assert cap.limiting == "ram"
+    assert 140 < cap.mem_per_live_mb < 160  # (1286 - 550) / 5 ≈ 147
+    assert cap.can_add == int((7751 - 700 - 1286) // cap.mem_per_live_mb)  # 약 39개 더
+    assert cap.options["cpu"] == 95 and cap.options["bandwidth"] > 100  # CPU (50%−2.5%)÷0.5% · 회선 80%=800Mbps — 한참 남음
+    assert abs(cap.cpu_per_live_pct - 0.5) < 1e-9  # 코어 1개 대비 2% ÷ 4코어
+
+
+def test_capacity_counts_lives_not_yet_on_air(settings):
+    """켜 두었지만 아직 안 올라온 라이브(부팅 중)의 몫은 미리 빼고 계산한다."""
+    base = dict(now=datetime(2026, 11, 15, tzinfo=timezone.utc), live_cpu=[2.0] * 5, cores=4)
+    on = capacity.compute(settings["capacity"], [5000] * 5, None, 26, 2.5, 1286, 7751, running=5, **base)
+    more = capacity.compute(settings["capacity"], [5000] * 7, None, 26, 2.5, 1286, 7751, running=5, **base)
+    assert more.can_add == on.can_add - 2
+
+
+def test_capacity_defaults_with_no_lives(settings):
+    cap = capacity.compute(settings["capacity"], [], None, 0.1, 1.2, 540, 7751,
+                           now=datetime(2026, 11, 15, tzinfo=timezone.utc), running=0, cores=4)
+    assert cap.mem_per_live_mb == 150 and cap.limiting == "ram"
+    assert cap.can_add == int((7751 - 700 - 540) // 150)
 
 
 def test_mask_and_redact(caplog):
