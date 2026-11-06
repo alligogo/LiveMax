@@ -92,6 +92,11 @@ systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
 step "4/5 SSH"
 # ---------------------------------------------------------------------------
 CLIENT_IP="${SSH_CLIENT%% *}"
+# ubuntu 로 접속 → sudo -i 하면 SSH_CLIENT 가 지워진다 (OVH 등) → 이 셸의 터미널(pts/N)로 접속한 곳을 찾는다
+if [[ -z "$CLIENT_IP" ]]; then
+  TTY_NOW="$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')"
+  CLIENT_IP="$(who 2>/dev/null | awk -v t="$TTY_NOW" '$2==t {gsub(/[()]/, "", $NF); print $NF; exit}')"
+fi
 if [[ -f /etc/ssh/sshd_config.d/10-livemax.conf ]]; then
   echo "이미 키 인증 전용"
 elif [[ -n "$CLIENT_IP" ]] && journalctl -u ssh -u sshd --since "-12h" 2>/dev/null | grep -q "Accepted publickey for .* from $CLIENT_IP "; then
