@@ -349,3 +349,40 @@ def test_relay_reports_its_own_stall(monkeypatch):
     assert not events
     r._watch_step(w, 6.1)  # 4초 만에 깨어남 → 3초 멈춤
     assert events == [{"event": "stall", "sec": 3.0}]
+
+
+def test_reconnect_gives_up_on_a_hung_server_quickly_and_reresolves(monkeypatch):
+    """유튜브가 끊은 뒤 첫 접속이 응답 없이 멈추면 (예전엔 13.6초 공백) 4초 만에 포기하고
+    수신 서버 주소를 다시 찾아 다음 시도로 넘어간다."""
+    import asyncio
+
+    monkeypatch.setattr(rr, "RECONNECT_TRY_S", 0.3)
+    calls, addrs = [], []
+
+    class P:
+        closed = None
+
+    async def fake_publish(self):
+        calls.append(self.cfg["connect_addr"])
+        if len(calls) == 1:
+            await asyncio.sleep(30)  # 응답 없는 서버
+        return P()
+
+    async def fake_getaddrinfo(host, port, family=0, type=0):
+        addrs.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("2.2.2.2", port))]
+
+    monkeypatch.setattr(rr.Relay, "_publish", fake_publish)
+
+    async def run():
+        asyncio.get_running_loop().getaddrinfo = fake_getaddrinfo
+        r = rr.Relay({"host": "a.rtmps.youtube.com", "port": 443, "connect_addr": "1.1.1.1"})
+        t0 = time.monotonic()
+        pub = await r._reconnect(rr.Feed())
+        return pub, time.monotonic() - t0
+
+    pub, took = asyncio.run(run())
+    assert isinstance(pub, P) and took < 2
+    assert calls == ["1.1.1.1", "2.2.2.2"]  # 두 번째 시도는 다른 서버로
+    assert addrs == ["a.rtmps.youtube.com"]

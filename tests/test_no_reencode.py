@@ -99,3 +99,51 @@ def test_rendered_liq_typechecks(paths, settings, tmp_path, crossfade, folders):
     liq.write_text(liquidsoap.render(make_live(crossfade=crossfade, audio_folders=folders), paths, settings))
     r = subprocess.run(["liquidsoap", "--check", str(liq)], capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+
+
+def test_music_runs_on_its_own_clock_with_buffer(paths, settings):
+    """음악은 따로 도는 시계 + 버퍼 (디스크가 순간 느려도 내보내는 소리가 안 끊기게). 0 이면 끈다."""
+    liq = liquidsoap.render(make_live(), paths, settings)
+    assert 'clock.assign_new(id="live1_music", [radio])' in liq
+    assert 'radio = buffer(id="live1_buf", buffer=2.0, max=6.0, radio)' in liq
+    assert liq.index("buffer(") < liq.index("output.harbor(")
+    off = liquidsoap.render(make_live(), paths, {**settings, "audio_buffer_seconds": 0})
+    assert "buffer(" not in off and "assign_new" not in off
+
+
+@pytest.mark.skipif(not (shutil.which("liquidsoap") and shutil.which("ffmpeg")), reason="liquidsoap/ffmpeg 미설치")
+def test_rendered_liq_streams_audio_continuously(paths, settings):
+    """생성된 실제 스크립트로 곡 2개를 돌려 harbor 에서 받아 본다 — 곡이 바뀌어도 소리가 이어지고, 내보내는 시계는 밀리지 않는다."""
+    import socket
+    import time
+
+    folder = paths.kind_root("audio") / "chill"
+    folder.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate((330, 550)):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=f={f}:sample_rate=44100:duration=5",
+                        "-ac", "2", "-c:a", "aac", "-b:a", "128k", str(folder / f"s{i}.m4a")], check=True)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    live = make_live(harbor_port=port)
+    liq = liquidsoap.write(live, paths, settings)
+    proc = subprocess.Popen(["liquidsoap", str(liq)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    out = paths.root / "got.aac"
+    try:
+        deadline = time.time() + 60
+        while time.time() < deadline:  # 표준 라이브러리 읽는 데 몇 초 걸린다
+            with socket.socket() as c:
+                if c.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.5)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", f"http://127.0.0.1:{port}/live1.aac", "-t", "12", "-c", "copy",
+                        "-f", "adts", str(out)], timeout=40, check=True)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out)],
+                               capture_output=True, text=True, check=True).stdout)
+    assert dur > 11.5  # 곡 경계(5초)를 두 번 넘어도 끊기지 않음
+    log = (paths.logs / "audio-live1.log").read_text(encoding="utf-8", errors="replace")
+    assert "clock.main:2] We must catchup" not in log

@@ -16,7 +16,7 @@ import signal
 import threading
 import time
 
-from . import channels, cleanup, config, cpuwatch, db, fetcher, ingest, logsetup, notify, thumbs, updatecheck
+from . import channels, cleanup, config, cpuwatch, db, fetcher, ingest, logsetup, notify, prefetch, thumbs, updatecheck
 from .collector import Collector
 from .paths import get_paths
 from .supervisor import Supervisor
@@ -150,7 +150,8 @@ class App:
                              ("collector", lambda: self.collector.run(self.stop)), ("cleanup", self._cleanup_loop),
                              ("notify-watch", self._notify_loop), ("updatecheck", lambda: self.updates.run(self.stop)),
                              ("boot", self.supervisor.start_all), ("cpuwatch", lambda: cpuwatch.run(self.stop)),
-                             ("fetch", lambda: self.fetcher.run(self.stop))):
+                             ("fetch", lambda: self.fetcher.run(self.stop)),
+                             ("prefetch", lambda: prefetch.run(self.supervisor, self.stop))):
             threading.Thread(target=target, name=name, daemon=True).start()
         log.info("livemaxd %s 시작 (data=%s)", self.version, self.paths.root)
 

@@ -146,6 +146,13 @@ def render(live: Live, paths: Paths, settings: dict) -> str:
     else:
         enc = '%ffmpeg(format="adts", %audio.copy)'
     w("radio = source.on_track(radio, on_new_track)")
+    # 음악 완충: 곡 읽기·곡 바뀔 때 파일 기록(nowplaying/next)을 '음악 시계'로 따로 돌리고, 내보내기와 사이에 버퍼를 둔다.
+    # → 디스크가 순간 느려져 음악 쪽이 1~2초 밀려도 ffmpeg 로 나가는 소리는 끊기지 않는다
+    #   (실측: 같은 시계면 'clock.main: We must catchup 1.80 seconds' 로 내보내기가 멈추고, 나누면 내보내기 쪽은 0회)
+    buf = float(settings.get("audio_buffer_seconds", 2.0))
+    if buf > 0:
+        w(f"clock.assign_new(id={q(f'{live.id}_music')}, [radio])")
+        w(f"radio = buffer(id={q(f'{live.id}_buf')}, buffer={buf:.1f}, max={max(buf * 3, 6.0):.1f}, radio)")
     w(f"output.harbor({enc}, id={q(f'{live.id}_out')}, port={live.harbor_port}, mount={q(f'{live.id}.aac')},")
     w('  format="audio/aac", fallible=true, radio)')
     return "\n".join(o) + "\n"

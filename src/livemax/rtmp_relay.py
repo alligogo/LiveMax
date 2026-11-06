@@ -48,6 +48,7 @@ OUT_CHUNK = 4096  # 보내는 RTMP 조각 크기 (OBS·nginx 와 같은 값)
 WRITE_TIMEOUT = 10.0  # 유튜브 쪽 쓰기가 이만큼 막히면 끊긴 것으로 보고 다시 접속
 BATCH_S = 0.1  # ffmpeg 쪽에서 이만큼 모아 한 번에 보낸다
 RECONNECT_GIVEUP_S = 30.0  # 유튜브 재접속을 이만큼 시도해도 안 되면 ffmpeg 재시작으로 넘긴다
+RECONNECT_TRY_S = 4.0  # 재접속 한 번에 이만큼만 기다린다 (정상은 0.3~0.8초 — 응답 없는 서버를 15초씩 기다리지 않게)
 KEEP_S = 20  # ffmpeg 가 바뀌는 동안(영상 교체·일일 재시작) 유튜브 연결을 이만큼 살려 둔다
 MAX_BUFFER = 40 * 1024 * 1024  # 재접속 동안 쌓아 둘 최대 크기 (5Mbps 기준 약 60초)
 TS_RENEW_MS = 40 * 86400 * 1000  # RTMP 시각은 32비트(약 49.7일)에서 0으로 돌아간다 → 40일 넘으면 다음 영상 교체 때 새로 접속
@@ -357,6 +358,15 @@ class Publisher:
         if self.w.transport.get_write_buffer_size() > 256 * 1024:
             await asyncio.wait_for(self.w.drain(), WRITE_TIMEOUT)
 
+    def abort(self) -> None:
+        if self.reader_task:
+            self.reader_task.cancel()
+        self.closed.set()
+        try:
+            self.w.transport.abort()
+        except Exception:  # noqa: BLE001
+            pass
+
     async def close(self) -> None:
         try:
             if self.stream_id and not self.closed.is_set():
@@ -634,14 +644,17 @@ class Relay:
             await pub.connect(c["app"], c["tcurl"])
             await pub.publish(c["key"])
         except BaseException:
-            await pub.close()
+            pub.abort()  # 접속 도중 실패·시간 초과: 인사 없이 바로 끊는다 (응답 없는 서버를 더 기다리지 않게)
             raise
         return pub
 
     async def _reconnect(self, feed: "Feed") -> Publisher | None:
-        """유튜브가 끊었을 때: ffmpeg 는 그대로 두고 중계기만 다시 접속 (그동안 들어온 영상은 버퍼에)."""
+        """유튜브가 끊었을 때: ffmpeg 는 그대로 두고 중계기만 다시 접속 (그동안 들어온 영상은 버퍼에).
+
+        한 번 시도는 RECONNECT_TRY_S 까지만 기다리고, 실패하면 유튜브 수신 서버 주소를 다시 찾아
+        (같은 서버가 응답이 없으면 다른 서버로) 곧바로 다시 시도한다."""
         t0 = time.monotonic()
-        for i, delay in enumerate((0, 0.5, 1, 1, 2, 3, 5, 5, 5, 5)):
+        for i, delay in enumerate((0, 0, 0.5, 1, 1, 2, 3, 5, 5, 5)):
             if feed.eof:
                 return None
             if delay:
@@ -649,10 +662,29 @@ class Relay:
             if time.monotonic() - t0 > RECONNECT_GIVEUP_S:
                 break
             try:
-                return await self._publish()
+                return await asyncio.wait_for(self._publish(), RECONNECT_TRY_S)
             except (RtmpError, ssl.SSLError, ConnectionError, OSError, asyncio.TimeoutError) as e:
-                log.warning("유튜브 재접속 %d회째 실패: %s", i + 1, e)
+                log.warning("유튜브 재접속 %d회째 실패: %s", i + 1, type(e).__name__ if isinstance(e, asyncio.TimeoutError) else e)
+                await self._reresolve()
         return None
+
+    async def _reresolve(self) -> None:
+        """IPv4 고정 주소를 쓰는 경우 유튜브 수신 서버 주소를 다시 찾는다 (다른 주소가 있으면 그쪽으로)."""
+        c = self.cfg
+        if not c.get("connect_addr"):
+            return
+        try:
+            infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(
+                c["host"], int(c["port"]), family=socket.AF_INET, type=socket.SOCK_STREAM), 3)
+        except (OSError, asyncio.TimeoutError):
+            return
+        addrs = list(dict.fromkeys(i[4][0] for i in infos))
+        other = [a for a in addrs if a != c["connect_addr"]]
+        if other or addrs:
+            new = (other or addrs)[0]
+            if new != c["connect_addr"]:
+                log.info("유튜브 수신 서버 주소 바꿈 (다시 찾음)")
+            c["connect_addr"] = new
 
     async def _close_idle(self) -> None:
         """ffmpeg 가 끊긴 뒤 KEEP_S 안에 다시 안 오면 (라이브 정지 등) 유튜브 연결을 닫는다."""

@@ -5,7 +5,7 @@
 #
 # 하는 일 (여러 번 실행해도 안전, 데이터는 /opt/livemax/data 에 보존):
 #   1. 패키지 업데이트 + Docker 설치
-#   2. 서버 시계 UTC, IPv4 우선 (v1 운영: 유튜브행 IPv6 경로가 10분마다 끊김)
+#   2. 서버 시계 UTC, IPv4 우선 (v1 운영: 유튜브행 IPv6 경로가 10분마다 끊김), 송출용 TCP 설정(BBR + fq)
 #   3. 방화벽 22·80·443, fail2ban, 자동 보안 업데이트 (자동 재부팅·Docker·커널 자동 업데이트 제외)
 #   4. SSH 키로 접속 중이면 비밀번호 로그인 끄기 (키 없이 끄면 잠기므로 확인될 때만)
 #   5. LiveMax 컨테이너 실행 → 접속 주소와 초기 비밀번호 출력
@@ -33,11 +33,21 @@ apt-get "${APT[@]}" install ca-certificates curl git ufw fail2ban python3-system
 systemctl enable --now docker >/dev/null
 
 # ---------------------------------------------------------------------------
-step "2/5 시계 UTC · IPv4 우선"
+step "2/5 시계 UTC · IPv4 우선 · 송출 TCP(BBR)"
 # ---------------------------------------------------------------------------
 timedatectl set-timezone UTC
 timedatectl set-ntp true || true
 grep -q '^precedence ::ffff:0:0/96  *100' /etc/gai.conf 2>/dev/null || echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
+# 유튜브로 보내는 연결의 속도 조절을 BBR 로: 기본(CUBIC)은 회선에서 패킷 몇 개만 사라져도 10개 라이브가 동시에
+# 속도를 확 줄여 서버 송신이 반토막 났다가 수십 초에 걸쳐 회복한다(live1 실측 52→28Mbps). fq 는 고르게 흘려보낸다.
+# 이미 붙어 있는 연결은 그대로라 새로 맺는 연결부터 적용된다 (설치 직후 라이브가 처음 켜질 때부터).
+if modprobe tcp_bbr 2>/dev/null && grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
+  echo tcp_bbr > /etc/modules-load.d/livemax-bbr.conf
+  printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' > /etc/sysctl.d/99-livemax-bbr.conf
+  sysctl -q -p /etc/sysctl.d/99-livemax-bbr.conf || warn "BBR 설정 적용 실패 — 기본(CUBIC)으로 계속"
+else
+  warn "이 서버 커널은 BBR 을 지원하지 않음 — 기본(CUBIC)으로 계속"
+fi
 
 # ---------------------------------------------------------------------------
 step "3/5 방화벽 · fail2ban · 자동 업데이트 정책"

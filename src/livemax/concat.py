@@ -135,8 +135,8 @@ def current_clip(meta_path: Path | None, out_time_s: float | None) -> dict | Non
             hit = (mt, array("d", (float(e["offset"]) for e in ents)), array("d", (float(e["duration"]) for e in ents)),
                    tuple(str(e["path"]) for e in ents))
             del ents
-            for k in [k for k in _META_CACHE if k.parent == meta_path.parent and k != meta_path]:
-                del _META_CACHE[k]  # 같은 라이브의 지난 목록은 버린다 (라이브마다 폴더가 따로)
+            for k in [k for k in list(_META_CACHE) if k.parent == meta_path.parent and k != meta_path]:
+                _META_CACHE.pop(k, None)  # 여러 스레드가 같이 부르므로 복사본으로 돌고, 없으면 넘어간다  # 같은 라이브의 지난 목록은 버린다 (라이브마다 폴더가 따로)
             _META_CACHE[meta_path] = hit
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
