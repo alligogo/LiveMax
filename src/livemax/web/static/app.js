@@ -447,18 +447,24 @@ function renderSide(side, ov) {
   const s = ov.system || {}, c = ov.capacity || {};
   const counts = liveCounts(ov);
   // 서버 박스 한 줄: 이름 · 지금 값 / 막대(실제 사용 ÷ 전체, 세로 눈금 = 안전선) / 설명. 먼저 막히는 자원은 이름 굵게
+  // 안전선 넘으면 노랑·95% 넘으면 빨강 + 빗금(색만으로 구분하지 않게 — 색약 배려), 값 앞에 ⚠
+  const over = (frac, safe) => (frac || 0) >= 0.95 ? "hi" : safe != null && (frac || 0) > safe ? "mid" : "";
   const bar = (frac, safe, kind) => {
     const f = Math.max(0, Math.min(1, frac || 0));
-    const cls = f >= 0.95 ? "hi" : safe != null && f > safe ? "mid" : "k-" + kind;
+    const cls = over(frac, safe) || "k-" + kind;
     return h("div", { class: "cap-bar" }, h("i", { class: cls, style: `width:${(f * 100).toFixed(1)}%` }),
       safe != null ? h("s", { style: `left:${(Math.min(1, safe) * 100).toFixed(1)}%`, title: "안전선" }) : null);
   };
   const row = (kind, k, v, note, frac, safe, lead) => h("div", { class: "cap-row" + (lead ? " lead" : "") },
-    h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, k), h("b", {}, v)),
+    h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, k), h("b", { class: over(frac, safe) ? "over" : "" }, over(frac, safe) ? ico("warn") : null, v)),
     frac !== undefined ? bar(frac, safe, kind) : null,
     note ? h("div", { class: "cap-note" }, note) : null);
   const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
   const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.8, diskW = c.disk_warn_pct ?? 85;
+  // 지금 송신 속도 그대로 한 달(이번 달 일수) 내내 보낸다면 — 대략 예상
+  const sd = new Date((ov.server_time || Date.now() / 1000) * 1000);
+  const mdays = new Date(sd.getUTCFullYear(), sd.getUTCMonth() + 1, 0).getDate();
+  const monthBytes = s.net_tx_mbps != null ? (s.net_tx_mbps * 1e6 / 8) * mdays * 86400 : null;
   const st = [counts.st ? `시작 중 ${counts.st}` : null, counts.re ? `재시작 중 ${counts.re}` : null].filter(Boolean).join(" · ");
   side.replaceChildren(
     addBtn("d-only"),
@@ -471,7 +477,10 @@ function renderSide(side, ov) {
           h("span", { class: "cap-k" }, "라이브 ", h("b", {}, ov.max_lives ? `${ov.lives.length}/${ov.max_lives}` : `${ov.lives.length}`)),
           h("span", {}, "정상 ", h("b", {}, counts.ok), " · 경고 ", h("b", { class: counts.warn ? "hot" : "" }, counts.warn),
             " · 중단 ", h("b", { class: counts.down ? "hot" : "" }, counts.down)),
-          st ? h("span", { class: "cap-st" }, st) : null),
+          st ? h("span", { class: "cap-st" }, st) : null,
+          // 라이브 개수 막대 (최대 개수 대비) + 남은 개수
+          ov.max_lives ? h("div", { class: "cap-lbar" }, bar(ov.lives.length / ov.max_lives, null, "lives"),
+            h("div", { class: "cap-note" }, `남은 ${Math.max(0, ov.max_lives - ov.lives.length)}개 (최대 ${ov.max_lives}개 — 설정 > 서버)`)) : null),
         h("div", { class: "cap-rows" },
           row("mem", "메모리", memT ? `${fmt.num(memU / 1024, 1)} / ${fmt.num(memT / 1024, 1)} GB` : "-",
             memT ? `라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 남은 여유분 ${Math.max(0, Math.round(memT - reserve - memU)).toLocaleString()}MB` : null,
@@ -484,7 +493,8 @@ function renderSide(side, ov) {
             s.disk_total_gb ? (s.disk_used_gb || 0) / s.disk_total_gb : 0, diskW / 100, false)),
         h("div", { class: "cap-traffic" + (c.limiting === "traffic" ? " lead" : "") }, c.traffic_unlimited
           ? [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, "무제한")),
-             h("div", { class: "cap-note" }, `이번 달 ${s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"}`)]
+             h("div", { class: "cap-note" }, `이번 달 ${s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"}`),
+             monthBytes != null ? h("div", { class: "cap-note" }, `지금 속도로 한 달 쓰면 약 ${fmt.bytes(monthBytes)}`) : null]
           : [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, `예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`)),
              bar(c.limit_tb ? c.projected_tb / c.limit_tb : 0, c.limit_tb ? c.target_tb / c.limit_tb : null, "traffic"),
              h("div", { class: "cap-note" }, `이번 달 ${fmt.num(c.month_tx_tb, 2)}TB · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB`)]),
@@ -614,7 +624,7 @@ async function openLiveEditor(lv) {
   chSel.addEventListener("change", () => { chId = chSel.value; keyId = ""; drawKeys(); });
   drawKeys();
   const checks = (kind, selected) => {
-    const box = h("div", { class: "checks " + kind });  // 음악은 진한 분홍 — 비디오(초록)와 구분
+    const box = h("div", { class: "checks " + kind });  // 음악은 하늘색 — 비디오와 구분
     if (!media[kind].folders.length) box.append(h("div", { class: "muted small" }, `${kind === "video" ? "비디오" : "음악"} 폴더가 없습니다. 먼저 '${kind === "video" ? "비디오" : "음악"}' 메뉴에서 폴더를 만들고 파일을 올리세요.`));
     media[kind].folders.forEach((f) => {
       const cb = h("input", { type: "checkbox", value: f.name });

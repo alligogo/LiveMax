@@ -159,3 +159,14 @@ def test_max_lives_limit(client):
     assert len(client.get("/api/overview").json()["lives"]) == 2
     cap = client.get("/api/overview").json()["capacity"]
     assert cap["can_add"] == 0 and cap["limiting"] == "max"
+
+
+def test_keys_listed_in_name_order(client):
+    """스트림 키는 만든 순서가 아니라 이름순(숫자는 크기로: 1, 2, …, 10 · 글자는 가나다)으로 보인다."""
+    _ready(client)
+    for i, lab in enumerate(["10", "2", "다", "1", "가"]):
+        r = client.post("/api/channels/ch1/keys", headers=ORIGIN, json={"label": lab, "key": f"fake-{i}{i}{i}{i}-0000-0000-ord{i}"})
+        assert r.status_code == 200, r.text
+    labels = [k["label"] for k in client.get("/api/channels").json()["channels"][0]["keys"]]
+    mine = [x for x in labels if x in ("10", "2", "다", "1", "가")]
+    assert mine == ["1", "2", "10", "가", "다"]

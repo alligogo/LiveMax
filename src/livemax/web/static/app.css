@@ -298,8 +298,12 @@ a.ch-name:hover span { text-decoration: underline; }
 .cap-bar { position: relative; height: 6px; background: #333; border-radius: 3px; margin-top: 5px; }
 .cap-bar i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
 /* 자원마다 색 (안전선 넘으면 노랑, 95% 넘으면 빨강) */
-.cap-bar i.k-mem { background: #a78bfa; } .cap-bar i.k-cpu { background: #38bdf8; } .cap-bar i.k-net { background: #34d399; }
-.cap-bar i.k-disk { background: #f472b6; } .cap-bar i.k-traffic { background: #2dd4bf; }
+.cap-bar i.k-mem { background: #fb923c; } .cap-bar i.k-cpu { background: #38bdf8; } .cap-bar i.k-net { background: #f472b6; }
+.cap-bar i.k-disk { background: #9ca3af; } .cap-bar i.k-traffic { background: #2dd4bf; } .cap-bar i.k-lives { background: #22c55e; }
+.cap-bar i.mid, .cap-bar i.hi { background-image: repeating-linear-gradient(135deg, rgba(0,0,0,.35) 0 4px, transparent 4px 8px); }
+.cap-top b.over { display: inline-flex; align-items: center; gap: 5px; color: #fde68a; }
+.cap-top b.over .ico svg { width: 13px; height: 13px; }
+.cap-lbar { flex-basis: 100%; margin-top: 2px; }
 .cap-bar i.mid { background: var(--yellow); } .cap-bar i.hi { background: var(--red); }
 .cap-bar s, .cap-legend s { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #d4d4d4; border-radius: 1px; }
 .cap-live { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; font-size: 13px;
@@ -510,9 +514,9 @@ tr.locked td:first-child { color: #fff; }
   .link-btn .lk-ico { width: 30px; height: 30px; }
 }
 
-/* 라이브 설정: 음악 폴더 선택은 진한 분홍 (비디오 초록과 구분) */
-.checks.audio .check.on { background: #9d174d; border-color: #be185d; }
-.checks.audio .check.on:hover { background: #a8195a; }
+/* 라이브 설정: 음악 폴더 선택은 하늘색 (비디오와 구분 · 적록 색약에도 잘 보이게) */
+.checks.audio .check.on { background: #0369a1; border-color: #0ea5e9; }
+.checks.audio .check.on:hover { background: #0477b3; }
 /* 썸네일 위 '송출중·다음 곡' 표시: 검정 80% 바탕으로 잘 보이게 */
 .on-th .pill { background: rgba(0,0,0,.8); color: #ff9b9b; font-weight: 700; backdrop-filter: blur(2px); }
 .on-th .pill.y { color: #fde68a; }
@@ -532,7 +536,7 @@ tr.locked td:first-child { color: #fff; }
 .cam-view .ph { color: var(--faint); font-size: clamp(9px, 6cqw, 12px); }
 .cam-view .idle-tag { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); white-space: nowrap;
   padding: 2px 8px; border-radius: 999px; background: rgba(0,0,0,.6); color: #ddd; font-size: clamp(8px, 5.5cqw, 11px); }
-.cam-view .badge-live { position: absolute; top: 5%; left: 4%; z-index: 2; display: inline-flex; align-items: center; gap: 3px;
+.cam-view .badge-live { position: absolute; top: 5%; left: 3.5%; z-index: 2; display: inline-flex; align-items: center; gap: 3px;
   background: var(--red); color: #fff; font-weight: 800; letter-spacing: .4px; line-height: 1.25; border-radius: 3px;
   font-size: clamp(7px, 4.6cqw, 10px); padding: .15em .55em; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
 .cam-view .badge-live .ico svg { width: 1em; height: 1em; }
@@ -540,7 +544,7 @@ tr.locked td:first-child { color: #fff; }
 .cam-view .badge-live.re { background: #38bdf8; color: #04202e; }
 .cam-view .badge-live.down { background: rgba(10,10,10,.85); color: #ff8a8a; box-shadow: inset 0 0 0 1.5px var(--red); }
 .cam-time { position: absolute; right: 4%; bottom: 6%; z-index: 2; background: rgba(0,0,0,.6); color: #fff; border-radius: 3px;
-  font-size: clamp(8px, 5.2cqw, 12px); font-weight: 600; font-variant-numeric: tabular-nums; padding: .1em .5em; white-space: nowrap; }
+  font-size: clamp(10px, 6.2cqw, 17px); font-weight: 700; font-variant-numeric: tabular-nums; padding: .12em .5em; white-space: nowrap; }
 /* 문제(경고·중단): 빨간 반투명이 덮고 천천히 깜빡인다. 중단은 더 진하게 */
 .cam-alert { position: absolute; inset: 0; z-index: 1; background: rgba(239,68,68,.32); animation: camAlert 1.6s ease-in-out infinite; pointer-events: none; }
 .cam.down .cam-alert { background: rgba(239,68,68,.5); }
@@ -548,12 +552,12 @@ tr.locked td:first-child { color: #fff; }
 @keyframes camAlert { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
 @media (prefers-reduced-motion: reduce) { .cam-alert { animation: none; } }
 .cam-cap { padding: 6px 2px 0; min-width: 0; }
-.cam-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; font-weight: 700; }
+.cam-name { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; font-size: 12.5px; font-weight: 700; }
 .cam-name .lv-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cam-name .keytag { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; padding: 1px 6px; }
 /* 오른쪽 위 상태: 검은 바탕이라 밝은 그림 위에서도 잘 보인다 */
 .cam-st { position: absolute; top: 5%; right: 4%; z-index: 2; display: inline-flex; align-items: center;
-  background: rgba(0,0,0,.72); border-radius: 3px; padding: .2em .55em; font-size: clamp(7px, 4.6cqw, 10.5px); line-height: 1.25; }
+  background: rgba(0,0,0,.72); border-radius: 4px; padding: .2em .55em; font-size: clamp(9px, 5.4cqw, 15px); line-height: 1.25; }
 .cam-st .status { font-size: 1em; gap: .35em; }
 .cam-st .status::before { width: .7em; height: .7em; box-shadow: none; }
 .cam-st .status .ico svg { width: 1.05em; height: 1.05em; }

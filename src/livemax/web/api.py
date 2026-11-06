@@ -292,7 +292,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     def _channel_full(c, lives, snap) -> dict:
         users = channels.key_users(lives)
         keys = []
-        for k in c.keys:
+        for k in sorted(c.keys, key=lambda k: catalog.natural_key(k["label"])):  # 이름순 1,2,…,10 · 가나다 (만든 순서 X)
             lv = users.get((c.id, k["id"]))
             live_now = bool(lv and snap.get(lv.id, {}).get("desired"))
             keys.append({"id": k["id"], "label": k["label"], "masked": chstore.masked(c.id, k["id"]),
