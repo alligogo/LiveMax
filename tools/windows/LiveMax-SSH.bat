@@ -16,12 +16,14 @@ exit /b
 #
 #  ▼ 아래 $Servers 에 서버를 적는다 (메모장으로 이 파일을 열어 수정 → 저장).
 #    한 줄에 서버 하나. Name 은 아무 이름, Host 는 서버 IP.
+#    User 는 접속 아이디: Contabo 는 root (생략 가능), OVH 는 ubuntu.
+#    root 가 아니면 서버 명령 앞에 sudo 를 자동으로 붙인다 (비밀번호는 그 계정 비밀번호).
 #    GitHub 에 있는 이 파일은 예시만 들어 있다. 진짜 IP 는 내 PC 의 사본에만 적는다.
 # ============================================================================
 
 $Servers = @(
     @{ Name = "LIVE 1"; Host = "서버IP를_여기에" }
-    # @{ Name = "LIVE 2"; Host = "1.2.3.4" }
+    # @{ Name = "LIVE 2"; Host = "1.2.3.4"; User = "ubuntu" }   # OVH 서버 예시
     # @{ Name = "LIVE 3"; Host = "5.6.7.8" }
 )
 $User = "root"
@@ -34,13 +36,20 @@ function Line { Write-Host ("-" * 60) -ForegroundColor DarkGray }
 function Ask($q) { Write-Host ""; return (Read-Host $q).Trim() }
 function Pause-Key { Write-Host ""; Read-Host "Enter 를 누르면 메뉴로 돌아갑니다" | Out-Null }
 
+function UserOf($srv) { if ($srv.User) { return $srv.User } else { return $User } }
+
 function Run-Remote($srv, $cmd) {
     # -t: 비밀번호 재설정처럼 화면 입출력이 필요한 명령도 그대로 보이게
+    $u = UserOf $srv
     Write-Host ""
     Write-Host "  > $($srv.Name) 에서 실행: $cmd" -ForegroundColor DarkGray
-    Write-Host "  (비밀번호를 물으면 root 비밀번호 입력 — 화면에 안 보이는 게 정상)" -ForegroundColor DarkGray
+    Write-Host "  (비밀번호를 물으면 $u 비밀번호 입력 — 화면에 안 보이는 게 정상)" -ForegroundColor DarkGray
+    if ($u -ne "root") {
+        # root 가 아닌 계정(OVH 의 ubuntu): 관리자 권한으로 실행 — 명령 안의 ' 는 셸 규칙대로 감싼다
+        $cmd = "sudo -- sh -c '" + $cmd.Replace("'", "'\''") + "'"
+    }
     Line
-    ssh -t "$User@$($srv.Host)" $cmd
+    ssh -t "$u@$($srv.Host)" $cmd
     Line
     if ($LASTEXITCODE -eq 255) {
         Write-Host "  접속 실패. IP 가 맞는지, 서버가 켜져 있는지 확인하세요." -ForegroundColor Yellow
@@ -107,7 +116,11 @@ while ($true) {
         Write-Host "   0) 서버 목록으로"
         $c = (Ask "  번호").ToUpper()
         switch ($c) {
-            "1" { Write-Host ""; ssh "$User@$($srv.Host)"; Pause-Key }
+            "1" {
+                Write-Host ""
+                if ((UserOf $srv) -ne "root") { Write-Host "  접속 후 관리자 권한이 필요하면: sudo -i" -ForegroundColor DarkGray }
+                ssh "$(UserOf $srv)@$($srv.Host)"; Pause-Key
+            }
             "2" { Start-Process "https://$($srv.Host)" }
             "3" { Run-Remote $srv "livemax status; echo; df -h / | tail -1; echo; uptime"; Pause-Key }
             "4" { Run-Remote $srv "livemax logs"; Pause-Key }
