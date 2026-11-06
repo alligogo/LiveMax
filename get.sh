@@ -91,7 +91,7 @@ systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
 # ---------------------------------------------------------------------------
 step "4/5 SSH"
 # ---------------------------------------------------------------------------
-CLIENT_IP="${SSH_CLIENT%% *}"
+CLIENT_IP="${SSH_CLIENT:-}"; CLIENT_IP="${CLIENT_IP%% *}"
 # ubuntu 로 접속 → sudo -i 하면 SSH_CLIENT 가 지워진다 (OVH 등) → 이 셸의 터미널(pts/N)로 접속한 곳을 찾는다
 if [[ -z "$CLIENT_IP" ]]; then
   TTY_NOW="$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')"
