@@ -413,7 +413,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     _ov_cache = {"t": 0.0, "data": None}
 
     def _max_lives() -> int:
-        return int(settings.get("max_lives") or 30)
+        return int(settings.get("max_lives") or 40)
 
     @app.get("/api/overview")
     def overview(request: Request):

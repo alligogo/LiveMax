@@ -100,7 +100,7 @@ DEFAULTS: dict[str, Any] = {
     "fetch": {"mb_per_s": 20, "allow_private": False},  # 링크로 가져오기: 받는 속도 상한, 내부 주소 허용(테스트용)
     "harbor_port_base": 8101,
     "ui": {"lives_view": "grid"},  # 라이브 화면 보기 방식: grid(블록) | list(목록) | cctv(관제)
-    "max_lives": 30,  # 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
+    "max_lives": 40,  # 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
     "server_name": "",  # 예: LIVE 1 — 서버가 여러 대일 때 구분 (화면·알림)
 }
 

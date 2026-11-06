@@ -297,6 +297,9 @@ a.ch-name:hover span { text-decoration: underline; }
 .cap-note { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
 .cap-bar { position: relative; height: 6px; background: #333; border-radius: 3px; margin-top: 5px; }
 .cap-bar i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
+/* 자원마다 색 (안전선 넘으면 노랑, 95% 넘으면 빨강) */
+.cap-bar i.k-mem { background: #a78bfa; } .cap-bar i.k-cpu { background: #38bdf8; } .cap-bar i.k-net { background: #34d399; }
+.cap-bar i.k-disk { background: #f472b6; } .cap-bar i.k-traffic { background: #2dd4bf; }
 .cap-bar i.mid { background: var(--yellow); } .cap-bar i.hi { background: var(--red); }
 .cap-bar s, .cap-legend s { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #d4d4d4; border-radius: 1px; }
 .cap-live { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; font-size: 13px;
@@ -548,8 +551,12 @@ tr.locked td:first-child { color: #fff; }
 .cam-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; font-weight: 700; }
 .cam-name .lv-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cam-name .keytag { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; padding: 1px 6px; }
-.cam-cap .status { font-size: 11px; margin-top: 2px; }
-.cam-cap .status::before { width: 7px; height: 7px; box-shadow: none; }
+/* 오른쪽 위 상태: 검은 바탕이라 밝은 그림 위에서도 잘 보인다 */
+.cam-st { position: absolute; top: 5%; right: 4%; z-index: 2; display: inline-flex; align-items: center;
+  background: rgba(0,0,0,.72); border-radius: 3px; padding: .2em .55em; font-size: clamp(7px, 4.6cqw, 10.5px); line-height: 1.25; }
+.cam-st .status { font-size: 1em; gap: .35em; }
+.cam-st .status::before { width: .7em; height: .7em; box-shadow: none; }
+.cam-st .status .ico svg { width: 1.05em; height: 1.05em; }
 .cam.off .cam-name { color: var(--muted); }
 
 /* 설정 > 서버 > 안전선: 4칸 (좁으면 2칸) */
