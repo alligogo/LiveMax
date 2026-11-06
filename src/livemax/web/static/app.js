@@ -51,6 +51,7 @@ const ICON = {
   key: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M17 6l3 3M14.5 8.5l2 2"/></svg>',
   warn: '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/></svg>',
   grid: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
+  cctv: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="6" height="4" rx=".8"/><rect x="9" y="4" width="6" height="4" rx=".8"/><rect x="16" y="4" width="6" height="4" rx=".8"/><rect x="2" y="10" width="6" height="4" rx=".8"/><rect x="9" y="10" width="6" height="4" rx=".8"/><rect x="16" y="10" width="6" height="4" rx=".8"/><path d="M5 18h14"/></svg>',
   list: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="5" height="4" rx="1"/><rect x="3" y="10" width="5" height="4" rx="1"/><rect x="3" y="16" width="5" height="4" rx="1"/><path d="M11 6h10M11 12h10M11 18h10"/></svg>',
   link: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>',
   sun: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2" fill="currentColor" fill-opacity=".25"/><path d="M12 2v2.5M12 19.5V22M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2 12h2.5M19.5 12H22M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>',
@@ -233,7 +234,7 @@ function chLink(ch, cls, ...kids) {
     : h("span", { class: cls }, kids);
 }
 
-// 라이브 보기 방식: grid(블록, 기본) | list(목록, 쇼핑몰처럼). 서버 설정에 저장되어 PC·휴대폰 어디서나 같게
+// 라이브 보기 방식: grid(블록, 기본) | list(목록, 쇼핑몰처럼) | cctv(관제 — 썸네일만 작게 한 줄 5개). 서버 설정에 저장되어 PC·휴대폰 어디서나 같게
 let LIVES_VIEW = "grid";
 
 function renderLives(grid, ov) {
@@ -245,16 +246,19 @@ function renderLives(grid, ov) {
     const bad = lv.status === "warn" || lv.status === "down";
     const tile = (val, label, cls) => h("div", { class: "tile " + (cls || "") }, h("b", {}, val), h("span", {}, label));
     const speedCls = lv.speed == null ? "" : lv.speed >= 0.97 ? "good" : "bad";
+    // 썸네일 그림 (블록·목록·관제 보기가 같이 씀). key 는 보기마다 <img> 를 따로 두려고
+    const pic = (key, short) => running && lv.clip && lv.clip_folder
+        ? cimg(`/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}?v=${lv.clip_v || 0}`, null, lv.id + key)
+        : !running && lv.idle_thumb  // 송출 전: 고른 비디오의 첫 클립을 반투명으로
+          ? [cimg(`/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}?v=${lv.idle_thumb.v || 0}`, "idle", lv.id + key),
+             lv.desired ? null : h("span", { class: "idle-tag" }, "송출 전")]  // 송출하려는데 끊긴 라이브는 왼쪽 위 '중단' 표시로
+          : h("div", { class: "ph" }, running ? (short ? "준비 중" : "미리보기 준비 중") : (short ? "꺼짐" : "송출 중이 아닙니다"));
     return {
       running, ch,
-      preview: (withBadge) => h("div", { class: "preview" },
-        running && lv.clip && lv.clip_folder
-          ? cimg(`/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}?v=${lv.clip_v || 0}`, null, lv.id + (withBadge ? "g" : "l"))
-          : !running && lv.idle_thumb  // 송출 전: 고른 비디오의 첫 클립을 반투명으로
-            ? [cimg(`/api/thumbs/${encodeURIComponent(lv.idle_thumb.folder)}/${encodeURIComponent(lv.idle_thumb.name)}?v=${lv.idle_thumb.v || 0}`, "idle", lv.id + (withBadge ? "g" : "l")),
-               lv.desired ? null : h("span", { class: "idle-tag" }, "송출 전")]  // 송출하려는데 끊긴 라이브는 왼쪽 위 '중단' 표시로
-            : h("div", { class: "ph" }, running ? "미리보기 준비 중" : "송출 중이 아닙니다"),
-        liveBadge(lv, running),
+      pic,
+      age: running && (lv.session_started_at || lv.started_at) ? fmt.age(now - (lv.session_started_at || lv.started_at)) : null,
+      bad,
+      preview: (withBadge) => h("div", { class: "preview" }, pic(withBadge ? "g" : "l"), liveBadge(lv, running),
         withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 24), h("span", {}, ch.name)) : null),
       status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null,
         lv.status === "restarting" ? reLabel(lv) : (STATUS[lv.status] || lv.status)),
@@ -307,19 +311,34 @@ function renderLives(grid, ov) {
         p.lines, p.links),
       h("div", { class: "rl-side" }, p.tiles, p.actions));
   };
+  // 관제 보기(CCTV): 썸네일 위주로 한눈에. 그림 안 = 상태 표시(작게) + 오른쪽 아래 방송 시간, 그림 아래 = 이름·키·상태.
+  // 문제(경고·중단)면 그림 위에 빨간 반투명이 깜빡인다. 시작 중·재시작 중은 정상 과정이라 빨갛게 하지 않는다
+  const cam = (lv) => {
+    const p = parts(lv);
+    return h("article", { class: "cam" + (p.bad ? " bad " + lv.status : "") + (lv.desired ? "" : " off"),
+        title: `${lv.name}${lv.message ? "\n" + lv.message : ""}` },
+      h("div", { class: "cam-view" }, p.pic("c", true), liveBadge(lv, p.running),
+        p.age ? h("span", { class: "cam-time" }, p.age) : null,
+        p.bad ? h("span", { class: "cam-alert" }) : null),
+      h("div", { class: "cam-cap" },
+        h("div", { class: "cam-name" }, h("span", { class: "lv-title" }, lv.name), p.keytag),
+        p.status));
+  };
   // 채널별로 묶어서: 채널 머리줄(로고·이름 ──── 설명) 아래에 그 채널의 라이브들
   const groups = (ov.channels || []).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id) }))
     .filter((g) => g.lives.length);
   const orphan = ov.lives.filter((l) => !chById[l.channel_id]);
   if (orphan.length) groups.push({ ch: null, lives: orphan });
-  const list = LIVES_VIEW === "list";
+  const body = (lives) => LIVES_VIEW === "list" ? h("div", { class: "rows" }, lives.map(row))
+    : LIVES_VIEW === "cctv" ? h("div", { class: "cams" }, h("div", { class: "cam-grid" }, lives.map(cam)))
+    : h("div", { class: "grid" }, lives.map(card));
   const sections = groups.map((g) => h("section", { class: "ch-group" },
     h("div", { class: "ch-head" },
       g.ch ? chLink(g.ch, "ch-name", chLogo(g.ch, 40), h("span", {}, g.ch.name)) : h("span", { class: "ch-name muted" }, "채널 미지정"),
       h("span", { class: "ch-count", title: "이 채널의 라이브 수 (유튜브는 채널당 동시 송출 10개까지)" }, `${g.lives.length}개`),
       h("span", { class: "ch-rule" }),
       g.ch && g.ch.description ? h("span", { class: "ch-desc" }, g.ch.description) : null),
-    list ? h("div", { class: "rows" }, g.lives.map(row)) : h("div", { class: "grid" }, g.lives.map(card))));
+    body(g.lives)));
   if (!sections.length) sections.push(h("div", { class: "card empty" }, h("div", { class: "card-body" },
     h("b", {}, "아직 라이브가 없습니다"), h("p", { class: "muted" }, "① 채널 메뉴에서 채널과 스트림 키 등록 → ② 비디오·음악 올리기 → ③ '라이브 추가'"))));
   const viewBtn = (v, label) => h("button", { type: "button", class: LIVES_VIEW === v ? "on" : "", title: label, "aria-label": label, html: ICON[v],
@@ -331,7 +350,7 @@ function renderLives(grid, ov) {
   // 맨 위 한 줄: [미니 관제 | 보기 전환]. 좁은 화면에서는 관제 → 라이브 추가 → (라이브 N개 · 보기 전환) 순서로 쌓인다
   const bar = ov.lives.length ? h("div", { class: "viewbar" }, pulseBox(ov), addBtn("m-only"),
     h("span", { class: "vb-count muted small" }, `라이브 ${ov.lives.length}개`), h("span", { class: "spacer" }),
-    h("div", { class: "seg" }, viewBtn("grid", "블록 보기"), viewBtn("list", "목록 보기"))) : addBtn("m-only");
+    h("div", { class: "seg" }, viewBtn("grid", "블록 보기"), viewBtn("list", "목록 보기"), viewBtn("cctv", "관제 보기 (CCTV)"))) : addBtn("m-only");
   grid.replaceChildren(bar, ...sections);
 }
 const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => {
@@ -381,11 +400,17 @@ function pulseBox(ov) {
   const pct = active.length ? Math.floor((n.ok / active.length) * 100) : null;
   const icon = { good: "sun", warn: "cloud", bad: "storm", idle: "idle" }[level];
   const cpu = ov.system?.cpu_pct;
+  const mt = ov.system?.mem_total_mb, mu = ov.system?.mem_used_mb;
+  const mem = mt && mu != null ? (mu / mt) * 100 : null;
+  const memHot = mem != null && mu > mt - (ov.capacity?.mem_reserve_mb ?? 700);  // 안전선(남길 여유)을 넘으면 강조
   const stat = (k, v, cls, title) => h("span", { class: "ps " + (cls || ""), title: title || null }, k, " ", h("b", {}, v));
   return h("div", { class: "pulse " + level, role: "status" },
     h("span", { class: "p-ico", html: ICON[icon] }),
     h("div", { class: "p-title" }, pct == null ? "준비중" : ["가동률 ", h("b", {}, `${pct}%`)]),
-    cpu != null ? h("span", { class: "p-cpu" + (cpu >= 85 ? " hot" : ""), title: "서버 전체 CPU 사용량" }, "CPU ", h("b", {}, `${Math.round(cpu)}%`)) : null,
+    cpu != null || mem != null ? h("span", { class: "p-res" },
+      cpu != null ? h("span", { class: "p-cpu" + (cpu >= 85 ? " hot" : ""), title: "서버 전체 CPU 사용량" }, "CPU ", h("b", {}, `${Math.round(cpu)}%`)) : null,
+      mem != null ? h("span", { class: "p-cpu" + (memHot ? " hot" : ""), title: `메모리 점유율 (${fmt.num(ov.system.mem_used_mb / 1024, 1)} / ${fmt.num(ov.system.mem_total_mb / 1024, 1)} GB)` },
+        "메모리 ", h("b", {}, `${Math.round(mem)}%`)) : null) : null,
     h("div", { class: "p-stats" },
       stat("라이브", active.length), stat("정상", n.ok), stat("경고", n.warn, n.warn ? "hot" : ""), stat("중단", n.down, n.down ? "hot" : ""),
       stat("끊김", dropCnt, dropCnt ? "hot" : "", "최근 10분 안의 끊김 (지난 기록은 각 라이브 카드에)"),
@@ -419,43 +444,49 @@ function fmtHM(min) { const hh = Math.floor(min / 60), mm = min % 60; return hh 
 function renderSide(side, ov) {
   const s = ov.system || {}, c = ov.capacity || {};
   const counts = liveCounts(ov);
-  const ratio = Math.min(1, c.usage_ratio || 0);
-  // 용량 박스 한 줄: 이름 · 지금 값 · 설명, 가장 먼저 막히는 자원은 강조
-  const capRow = (k, v, note, use, hot) => h("div", { class: "cap-row" + (hot ? " hot" : "") },
-    h("div", { class: "cap-top" }, h("span", { class: "muted" }, k), h("b", {}, v)),
-    h("div", { class: "cap-note" }, note, use != null ? h("span", { class: "cap-use" }, ` · ${Math.round(use * 100)}%`) : null));
-  const kv = (k, v) => h("div", { class: "kv" }, h("span", { class: "muted" }, k), h("b", {}, v));
+  // 서버 박스 한 줄: 이름 · 지금 값 / 막대(실제 사용 ÷ 전체, 세로 눈금 = 안전선) / 설명. 먼저 막히는 자원은 이름 굵게
+  const bar = (frac, safe) => {
+    const f = Math.max(0, Math.min(1, frac || 0));
+    const cls = f >= 0.95 ? "hi" : safe != null && f > safe ? "mid" : "";
+    return h("div", { class: "cap-bar" }, h("i", { class: cls, style: `width:${(f * 100).toFixed(1)}%` }),
+      safe != null ? h("s", { style: `left:${(Math.min(1, safe) * 100).toFixed(1)}%`, title: "안전선" }) : null);
+  };
+  const row = (k, v, note, frac, safe, lead) => h("div", { class: "cap-row" + (lead ? " lead" : "") },
+    h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, k), h("b", {}, v)),
+    frac !== undefined ? bar(frac, safe) : null,
+    note ? h("div", { class: "cap-note" }, note) : null);
+  const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
+  const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.8, diskW = c.disk_warn_pct ?? 85;
+  const st = [counts.st ? `시작 중 ${counts.st}` : null, counts.re ? `재시작 중 ${counts.re}` : null].filter(Boolean).join(" · ");
   side.replaceChildren(
     addBtn("d-only"),
-    h("div", { class: "card" }, h("div", { class: "card-head" }, "용량"),
+    h("div", { class: "card" }, h("div", { class: "card-head" }, "서버"),
       h("div", { class: "card-body" },
         h("div", { class: "big" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "개 더 추가 가능 (안전 기준)")),
         h("div", { class: "small muted", style: "text-align:center;margin:-2px 0 10px" },
           "먼저 막히는 것: ", h("b", { style: "color:var(--text)" }, LIMIT_LABEL[c.limiting] || "-")),
-        h("div", { class: "meter" }, h("i", { class: ratio >= 1 ? "hi" : ratio >= 0.8 ? "mid" : "", style: `width:${(ratio * 100).toFixed(0)}%` })),
+        h("div", { class: "cap-live" + (c.limiting === "max" ? " lead" : "") },
+          h("span", { class: "cap-k" }, "라이브 ", h("b", {}, ov.max_lives ? `${ov.lives.length}/${ov.max_lives}` : `${ov.lives.length}`)),
+          h("span", {}, "정상 ", h("b", {}, counts.ok), " · 경고 ", h("b", { class: counts.warn ? "hot" : "" }, counts.warn),
+            " · 중단 ", h("b", { class: counts.down ? "hot" : "" }, counts.down)),
+          st ? h("span", { class: "cap-st" }, st) : null),
         h("div", { class: "cap-rows" },
-          capRow("메모리", s.mem_total_mb ? `${fmt.num((s.mem_used_mb || 0) / 1024, 1)} / ${fmt.num(s.mem_total_mb / 1024, 1)} GB` : "-",
-            `라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 여유 700MB`, c.usage?.ram, c.limiting === "ram"),
-          capRow("CPU", fmt.num(s.cpu_pct, 1, "%"), `라이브당 약 ${fmt.num(c.cpu_per_live_pct, 1)}% · 평균 50%까지`, c.usage?.cpu, c.limiting === "cpu"),
-          capRow("회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, `라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps · 80%까지`, c.usage?.bandwidth, c.limiting === "bandwidth"),
-          c.traffic_unlimited
-            ? capRow("월 트래픽", "무제한", `이번 달 ${s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"}`, null, false)
-            : capRow("월 트래픽", `예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`, `목표 ${fmt.num(c.target_tb, 0)}TB까지 · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB`, c.usage?.traffic, c.limiting === "traffic"),
-          capRow("라이브", ov.max_lives ? `${ov.lives.length} / ${ov.max_lives}` : `${ov.lives.length}`, "최대 개수 — 설정 > 서버", ov.max_lives ? ov.lives.length / ov.max_lives : null, c.limiting === "max")))),
-    h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "시스템"),
-      h("div", { class: "card-body" },
-        h("div", { class: "group" }, "라이브"),
-        kv("정상 / 경고 / 중단", `${counts.ok} / ${counts.warn} / ${counts.down}`),
-        counts.st ? kv("시작 중", `${counts.st}`) : null,
-        counts.re ? kv("재시작 중", `${counts.re}`) : null,
-        h("div", { class: "group" }, "서버"),
-        kv("CPU", fmt.num(s.cpu_pct, 1, "%")), kv("steal time", fmt.num(s.steal_pct, 2, "%")),
-        kv("메모리", s.mem_total_mb ? `${Math.round(s.mem_used_mb)} / ${Math.round(s.mem_total_mb)} MB` : "-"),
-        kv("디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-"),
-        h("div", { class: "group" }, "트래픽"),
-        kv("현재 송신", fmt.num(s.net_tx_mbps, 1, " Mbps")),
-        kv("이번 달 누적", s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"),
-        kv("라이브당", `${fmt.num(c.per_live_mbps, 1)} Mbps`))),
+          row("메모리", memT ? `${fmt.num(memU / 1024, 1)} / ${fmt.num(memT / 1024, 1)} GB` : "-",
+            memT ? `라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 남은 여유분 ${Math.max(0, Math.round(memT - reserve - memU)).toLocaleString()}MB` : null,
+            memT ? memU / memT : 0, memT ? (memT - reserve) / memT : null, c.limiting === "ram"),
+          row("CPU", fmt.num(s.cpu_pct, 1, "%"), `라이브당 약 ${fmt.num(c.cpu_per_live_pct, 1)}% · steal ${fmt.num(s.steal_pct, 2, "%")}`,
+            (s.cpu_pct || 0) / 100, cpuT / 100, c.limiting === "cpu"),
+          row("회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, `라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps`,
+            c.port_mbit ? (s.net_tx_mbps || 0) / c.port_mbit : 0, portR, c.limiting === "bandwidth"),
+          row("디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-", null,
+            s.disk_total_gb ? (s.disk_used_gb || 0) / s.disk_total_gb : 0, diskW / 100, false)),
+        h("div", { class: "cap-traffic" + (c.limiting === "traffic" ? " lead" : "") }, c.traffic_unlimited
+          ? [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, "무제한")),
+             h("div", { class: "cap-note" }, `이번 달 ${s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"}`)]
+          : [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, `예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`)),
+             bar(c.limit_tb ? c.projected_tb / c.limit_tb : 0, c.limit_tb ? c.target_tb / c.limit_tb : null),
+             h("div", { class: "cap-note" }, `이번 달 ${fmt.num(c.month_tx_tb, 2)}TB · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB`)]),
+        h("div", { class: "cap-legend" }, h("s"), `안전선(설정 > 서버) — 메모리 ${reserve}MB 남김 · CPU ${cpuT}% · 회선 ${Math.round(portR * 100)}% · 디스크 ${diskW}%`))),
     h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "알림", h("span", { class: "spacer" }),
         ov.alerts.some((a) => a.id) ? h("button", { class: "linkbtn", onclick: () => clearAlerts() }, "모두 지우기") : null),
       h("div", { class: "card-body" }, ov.alerts.length
@@ -1273,19 +1304,32 @@ function serverCard(s, card) {
   const maxLives = h("input", { class: "input", type: "number", min: 1, max: 100, value: s.settings.max_lives ?? 30, style: "max-width:120px" });
   const port = h("input", { class: "input", type: "number", min: 10, max: 100000, value: s.settings.port_mbit ?? 1000, style: "max-width:120px" });
   const traffic = h("input", { class: "input", type: "number", min: 0, max: 10000, step: "any", value: s.settings.monthly_traffic_tb ?? 0, style: "max-width:120px" });
+  // 안전선: 용량 계산("N개 더 추가 가능")과 서버 박스 막대의 세로 눈금 기준
+  const safe = (label, unit, v, min, max, def) => {
+    const el = h("input", { class: "input", type: "number", min, max, value: v ?? def });
+    return [el, h("label", { class: "safe-f" }, h("span", {}, label), h("div", { class: "safe-in" }, el, h("i", {}, unit)), h("em", {}, `기본 ${def}${unit}`))];
+  };
+  const [memR, memF] = safe("메모리 남길 여유", "MB", s.settings.mem_reserve_mb, 100, 100000, 700);
+  const [cpuT, cpuF] = safe("CPU 평균", "%", s.settings.cpu_target_pct, 10, 95, 50);
+  const [portU, portF] = safe("회선 사용", "%", s.settings.port_use_pct, 10, 100, 80);
+  const [diskW, diskF] = safe("디스크", "%", s.settings.disk_warn_pct, 50, 99, 85);
   return card("서버",
     h("label", { class: "field" }, h("span", {}, "서버명"), name,
       h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
     h("label", { class: "field" }, h("span", {}, "라이브 최대 개수"), maxLives,
       h("div", { class: "hint" }, "안전장치 — 이 서버에 이 개수보다 많은 라이브를 만들 수 없습니다 (기본 30). 서버 사양을 올리면 늘리세요.")),
     h("label", { class: "field" }, h("span", {}, "회선 속도 (Mbps)"), port,
-      h("div", { class: "hint" }, "서버 업체가 보장하는 속도 (예: OVH VPS-2 = 1000, VPS-1 = 500). 용량 계산에서 이 값의 80%까지 씁니다.")),
+      h("div", { class: "hint" }, "서버 업체가 보장하는 속도 (예: OVH VPS-2 = 1000, VPS-1 = 500). 용량 계산에서 아래 '회선 사용' 안전선까지 씁니다.")),
     h("label", { class: "field" }, h("span", {}, "월 트래픽 한도 (TB)"), traffic,
       h("div", { class: "hint" }, "0 = 무제한 (OVH 북미·유럽). 한도가 있는 업체면 숫자를 넣으세요 (예: Contabo 32) — 한도의 87.5%를 목표로 계산합니다.")),
+    h("div", { class: "field" }, h("span", {}, "안전선"),
+      h("div", { class: "safe-grid" }, memF, cpuF, portF, diskF),
+      h("div", { class: "hint" }, "'몇 개 더 추가 가능'은 메모리·CPU·회선이 이 선을 넘지 않는 만큼으로 계산합니다. 라이브 화면 서버 박스 막대의 세로 눈금이 이 선이에요. 디스크는 계산에 안 넣고 넘으면 색만 바뀝니다.")),
     h("button", { class: "btn primary", onclick: async () => {
       try {
         await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value),
-          port_mbit: Number(port.value), monthly_traffic_tb: Number(traffic.value) });
+          port_mbit: Number(port.value), monthly_traffic_tb: Number(traffic.value),
+          mem_reserve_mb: Number(memR.value), cpu_target_pct: Number(cpuT.value), port_use_pct: Number(portU.value), disk_warn_pct: Number(diskW.value) });
         setServerName(name.value); toast("저장했습니다"); showSystem();
       } catch (e) { toast(e.message, true); }
     } }, "저장"));
@@ -1337,7 +1381,7 @@ async function route() {
   let sess;
   try { sess = await api("GET", "/api/session"); } catch (e) { return; }
   setServerName(sess.server_name);
-  LIVES_VIEW = sess.lives_view === "list" ? "list" : "grid";
+  LIVES_VIEW = ["list", "cctv"].includes(sess.lives_view) ? sess.lives_view : "grid";
   if (!sess.authenticated) { showLogin(); return; }
   if (sess.must_change) { mount(shell("lives")); showChangePassword(true); return; }
   const r = location.hash.replace(/^#\/?/, "");

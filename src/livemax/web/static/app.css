@@ -166,7 +166,7 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .btn.ghost { background: transparent; }
 .btn.sm { padding: 5px 10px; font-size: 11.5px; }
 label.field { display: block; margin-bottom: 14px; }
-label.field > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
+label.field > span, div.field > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
 .input, select.input, textarea.input { width: 100%; background: #1b1b1b; border: 1px solid #3a3a3a; border-radius: 6px; padding: 10px 12px; }
 .input:focus { outline: none; border-color: #5a5a5a; background: #202020; }
 .hint { font-size: 11.5px; color: var(--faint); margin-top: 5px; }
@@ -288,13 +288,24 @@ pre.log { margin: 0; background: #0d0d0d; border-radius: 8px; padding: 12px; fon
 .ch-name { display: inline-flex; align-items: center; gap: 9px; font-weight: 700; font-size: 18px; color: #fff; white-space: nowrap; text-transform: none; letter-spacing: 0; }
 a.ch-name:hover span { text-decoration: underline; }
 .ch-count { flex: none; font-size: 12.5px; font-weight: 700; color: #cfcfcf; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 999px; padding: 2px 9px; font-variant-numeric: tabular-nums; }
-.cap-rows { display: grid; gap: 9px; margin-top: 12px; }
-.cap-row { padding: 8px 10px; border-radius: 8px; background: #262626; border: 1px solid transparent; }
-.cap-row.hot { border-color: #6b5a2a; background: #2b2718; }
+.cap-rows { display: grid; gap: 12px; margin-top: 12px; }
+.cap-row, .cap-traffic { min-width: 0; }
 .cap-top { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
 .cap-top b { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.cap-note { font-size: 11.5px; color: var(--faint); margin-top: 2px; }
-.cap-use { color: var(--muted); }
+.cap-k { color: var(--muted); }
+.lead .cap-k, .cap-live.lead .cap-k { color: var(--text); font-weight: 800; }
+.cap-note { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
+.cap-bar { position: relative; height: 6px; background: #333; border-radius: 3px; margin-top: 5px; }
+.cap-bar i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
+.cap-bar i.mid { background: var(--yellow); } .cap-bar i.hi { background: var(--red); }
+.cap-bar s, .cap-legend s { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #d4d4d4; border-radius: 1px; }
+.cap-live { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; font-size: 13px;
+  padding: 8px 10px; border-radius: 8px; background: #262626; }
+.cap-live b { font-variant-numeric: tabular-nums; } .cap-live b.hot { color: var(--red); }
+.cap-live .cap-st { flex-basis: 100%; font-size: 11.5px; color: var(--muted); }
+.cap-traffic { margin-top: 14px; padding-top: 12px; border-top: 1px solid #2c2c2c; }
+.cap-legend { position: relative; margin-top: 12px; padding-left: 10px; font-size: 11px; color: var(--faint); line-height: 1.4; }
+.cap-legend s { left: 1px; top: 1px; }
 .ch-rule { flex: 1; height: 1px; background: linear-gradient(90deg, #3a3a3a, transparent); min-width: 30px; }
 .ch-desc { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
 .ch-logo { border-radius: 50%; object-fit: cover; flex: none; background: #2a2a2a; }
@@ -435,6 +446,7 @@ tr.locked td:first-child { color: #fff; }
 .pulse .p-cpu { flex: none; padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,.16); font-size: 12px; font-weight: 600;
   color: rgba(255,255,255,.9); white-space: nowrap; }
 .pulse .p-cpu b { color: #fff; font-weight: 800; }
+.pulse .p-res { flex: none; display: inline-flex; gap: 6px; }
 .pulse .p-cpu.hot { background: rgba(0,0,0,.28); box-shadow: inset 0 0 0 1px rgba(255,255,255,.5); }
 .pulse .p-stats { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; row-gap: 2px; font-size: 13px; color: rgba(255,255,255,.88); }
 .pulse .ps { white-space: nowrap; }
@@ -456,7 +468,8 @@ tr.locked td:first-child { color: #fff; }
   /* 휴대폰: 접속하자마자 한눈에 — 큰 가동률 한 줄 + 숫자 한 줄 */
   .pulse { display: grid; grid-template-columns: auto 1fr auto; column-gap: 12px; row-gap: 6px; padding: 14px 16px; border-radius: 12px; }
   .pulse .p-ico { grid-row: 1; }
-  .pulse .p-cpu { grid-row: 1; grid-column: 3; align-self: center; font-size: 12.5px; padding: 4px 10px; }
+  .pulse .p-res { grid-row: 1; grid-column: 3; align-self: center; flex-direction: column; gap: 4px; align-items: flex-end; }
+  .pulse .p-cpu { font-size: 12px; padding: 3px 9px; }
   .pulse .p-ico svg { width: 30px; height: 30px; }
   .pulse .p-title { font-size: 19px; }
   .pulse .p-title b { font-size: 27px; }
@@ -501,3 +514,50 @@ tr.locked td:first-child { color: #fff; }
 .on-th .pill { background: rgba(0,0,0,.8); color: #ff9b9b; font-weight: 700; backdrop-filter: blur(2px); }
 .on-th .pill.y { color: #fde68a; }
 .on-th .pill:not(.r):not(.y) { color: #e5e5e5; }
+
+/* ---------- 관제 보기 (CCTV): 썸네일 위주, 화면 폭에 맞춰 한 줄 5 → 3 → 2개 ---------- */
+.cams { container-type: inline-size; }
+.cam-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+@container (max-width: 640px) { .cam-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; } }
+@container (max-width: 420px) { .cam-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.cam { min-width: 0; }
+/* 그림 안 표시들은 칸 크기에 맞춰 같이 커지고 작아진다 (cqw = 칸 폭의 1%) */
+.cam-view { position: relative; aspect-ratio: 16/9; background: #0b0b0b; border-radius: 6px; overflow: hidden;
+  display: grid; place-items: center; container-type: inline-size; box-shadow: 0 0 0 1px #2c2c2c; }
+.cam-view img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cam-view img.idle { opacity: .35; filter: grayscale(.5); }
+.cam-view .ph { color: var(--faint); font-size: clamp(9px, 6cqw, 12px); }
+.cam-view .idle-tag { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); white-space: nowrap;
+  padding: 2px 8px; border-radius: 999px; background: rgba(0,0,0,.6); color: #ddd; font-size: clamp(8px, 5.5cqw, 11px); }
+.cam-view .badge-live { position: absolute; top: 5%; left: 4%; z-index: 2; display: inline-flex; align-items: center; gap: 3px;
+  background: var(--red); color: #fff; font-weight: 800; letter-spacing: .4px; line-height: 1.25; border-radius: 3px;
+  font-size: clamp(7px, 4.6cqw, 10px); padding: .15em .55em; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+.cam-view .badge-live .ico svg { width: 1em; height: 1em; }
+.cam-view .badge-live.warn { background: #f59e0b; color: #1c1300; }
+.cam-view .badge-live.re { background: #38bdf8; color: #04202e; }
+.cam-view .badge-live.down { background: rgba(10,10,10,.85); color: #ff8a8a; box-shadow: inset 0 0 0 1.5px var(--red); }
+.cam-time { position: absolute; right: 4%; bottom: 6%; z-index: 2; background: rgba(0,0,0,.6); color: #fff; border-radius: 3px;
+  font-size: clamp(8px, 5.2cqw, 12px); font-weight: 600; font-variant-numeric: tabular-nums; padding: .1em .5em; white-space: nowrap; }
+/* 문제(경고·중단): 빨간 반투명이 덮고 천천히 깜빡인다. 중단은 더 진하게 */
+.cam-alert { position: absolute; inset: 0; z-index: 1; background: rgba(239,68,68,.32); animation: camAlert 1.6s ease-in-out infinite; pointer-events: none; }
+.cam.down .cam-alert { background: rgba(239,68,68,.5); }
+.cam.bad .cam-view { box-shadow: 0 0 0 2px var(--red); }
+@keyframes camAlert { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
+@media (prefers-reduced-motion: reduce) { .cam-alert { animation: none; } }
+.cam-cap { padding: 6px 2px 0; min-width: 0; }
+.cam-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; font-weight: 700; }
+.cam-name .lv-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cam-name .keytag { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; padding: 1px 6px; }
+.cam-cap .status { font-size: 11px; margin-top: 2px; }
+.cam-cap .status::before { width: 7px; height: 7px; box-shadow: none; }
+.cam.off .cam-name { color: var(--muted); }
+
+/* 설정 > 서버 > 안전선: 4칸 (좁으면 2칸) */
+.safe-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; max-width: 560px; }
+@media (max-width: 560px) { .safe-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.safe-f { display: grid; gap: 4px; min-width: 0; }
+.safe-f > span { font-size: 12px; color: var(--muted); font-weight: 600; }
+.safe-in { display: flex; align-items: center; gap: 6px; }
+.safe-in .input { min-width: 0; width: 100%; }
+.safe-in i { font-style: normal; font-size: 12px; color: var(--muted); }
+.safe-f em { font-style: normal; font-size: 11px; color: var(--faint); }

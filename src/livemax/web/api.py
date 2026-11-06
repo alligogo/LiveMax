@@ -275,6 +275,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps, "lives": len(planned),
                          "mem_per_live_mb": cap.mem_per_live_mb, "cpu_per_live_pct": cap.cpu_per_live_pct,
                          "port_mbit": cap.port_mbit, "traffic_unlimited": cap.traffic_unlimited,
+                         "mem_reserve_mb": settings["capacity"].get("mem_reserve_mb", 700),
+                         "cpu_target_pct": settings["capacity"].get("cpu_target_pct", 50),
+                         "port_use_ratio": settings["capacity"].get("port_use_ratio", 0.8),
+                         "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85),
                          "options": cap.options, "usage": cap.usage},
             "max_lives": _max_lives(),
             "alerts": alerts[:30], "reboot_required": REBOOT_FLAG.exists(),
@@ -917,7 +921,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "settings": {"restart_base_utc": settings["restart"]["base_utc"], "server_name": config.server_name(settings),
                          "max_lives": _max_lives(), "tls_relay": settings["output"]["tls_relay"]["enabled"],
                          "port_mbit": settings["capacity"].get("port_mbit", 1000),
-                         "monthly_traffic_tb": settings["capacity"].get("monthly_traffic_tb", 0)},
+                         "monthly_traffic_tb": settings["capacity"].get("monthly_traffic_tb", 0),
+                         # 안전선 (용량 계산·서버 박스 막대 눈금)
+                         "mem_reserve_mb": settings["capacity"].get("mem_reserve_mb", 700),
+                         "cpu_target_pct": settings["capacity"].get("cpu_target_pct", 50),
+                         "port_use_pct": round(float(settings["capacity"].get("port_use_ratio", 0.8)) * 100),
+                         "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85)},
             "sessions": [{"id": r["token_hash"], "ip": r["ip"], "ua": r["user_agent"], "last_seen": r["last_seen"],
                           "current": r["token_hash"] == sess["token_hash"]}
                          for r in conn.execute("SELECT * FROM sessions ORDER BY last_seen DESC").fetchall()],
@@ -1036,7 +1045,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             config.save_settings_override(paths, ["max_lives"], n)
             settings["max_lives"] = n
         # 용량 계산 기준 (업체마다 다름): 회선 속도(Mbps), 월 트래픽 한도(TB, 0 = 무제한)
-        for key, lo, hi, label in (("port_mbit", 10, 100000, "회선 속도(Mbps)"), ("monthly_traffic_tb", 0, 10000, "월 트래픽 한도(TB)")):
+        # + 안전선: 메모리 남길 여유(MB) · CPU 평균(%) · 회선 사용(%) · 디스크 경고(%)
+        for key, lo, hi, label in (("port_mbit", 10, 100000, "회선 속도(Mbps)"), ("monthly_traffic_tb", 0, 10000, "월 트래픽 한도(TB)"),
+                                   ("mem_reserve_mb", 100, 100000, "메모리 남길 여유(MB)"), ("cpu_target_pct", 10, 95, "CPU 안전선(%)"),
+                                   ("port_use_pct", 10, 100, "회선 안전선(%)"), ("disk_warn_pct", 50, 99, "디스크 안전선(%)")):
             if key in b:
                 try:
                     v = float(b[key])
@@ -1045,9 +1057,11 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 if not lo <= v <= hi:
                     return err(f"{label}는 {lo}~{hi} 사이로 입력하세요 (트래픽 0 = 무제한)")
                 v = int(v) if v == int(v) else v
+                if key == "port_use_pct":  # 화면은 %, 저장은 비율
+                    key, v = "port_use_ratio", round(v / 100, 3)
                 config.save_settings_override(paths, ["capacity", key], v)
                 settings["capacity"][key] = v
-        if b.get("lives_view") in ("grid", "list"):
+        if b.get("lives_view") in ("grid", "list", "cctv"):
             config.save_settings_override(paths, ["ui", "lives_view"], b["lives_view"])
             settings.setdefault("ui", {})["lives_view"] = b["lives_view"]
         if "tls_relay" in b:
