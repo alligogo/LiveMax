@@ -577,3 +577,8 @@ tr.locked td:first-child { color: #fff; }
 .safe-in .input { min-width: 0; width: 100%; }
 .safe-in i { font-style: normal; font-size: 12px; color: var(--muted); }
 .safe-f em { font-style: normal; font-size: 11px; color: var(--faint); }
+
+/* 눌러서 로그 보기: 문제 표시들 (상태·재연결·밀림·관제 빨간 칸·알림) */
+.logclick { cursor: pointer; }
+span.logclick:hover, .alerts .logclick:hover { text-decoration: underline; text-underline-offset: 3px; }
+.cam.logclick:hover .cam-view { box-shadow: 0 0 0 3px var(--red); }

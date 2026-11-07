@@ -259,8 +259,11 @@ function renderLives(grid, ov) {
       bad,
       preview: (withBadge) => h("div", { class: "preview" }, pic(withBadge ? "g" : "l"), liveBadge(lv, running),
         withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 24), h("span", {}, ch.name)) : null),
-      status: h("span", { class: "status " + lv.status }, bad ? ico("warn") : null,
-        lv.status === "restarting" ? reLabel(lv) : (STATUS[lv.status] || lv.status)),
+      status: (() => {
+        const el = h("span", { class: "status " + lv.status }, bad ? ico("warn") : null,
+          lv.status === "restarting" ? reLabel(lv) : (STATUS[lv.status] || lv.status));
+        return bad || lv.status === "restarting" ? logClick(lv, el) : el;
+      })(),
       title: h("span", { class: "lv-title" }, lv.name),
       keytag: lv.key_label ? h("span", { class: "keytag", title: `스트림 키: ${lv.key_label} (${lv.key_masked})` }, ico("key"), lv.key_label) : null,
       edit: h("button", { class: "iconbtn", style: "width:30px;height:30px;background:transparent", title: "설정", html: ICON.edit, onclick: () => openLiveEditor(lv) }),
@@ -314,7 +317,7 @@ function renderLives(grid, ov) {
   // 문제(경고·중단)면 그림 위에 빨간 반투명이 깜빡인다. 시작 중·재시작 중은 정상 과정이라 빨갛게 하지 않는다
   const cam = (lv) => {
     const p = parts(lv);
-    return h("article", { class: "cam" + (p.bad ? " bad " + lv.status : "") + (lv.desired ? "" : " off"),
+    const art = h("article", { class: "cam" + (p.bad ? " bad " + lv.status : "") + (lv.desired ? "" : " off"),
         title: `${lv.name}${lv.message ? "\n" + lv.message : ""}` },
       // 그림 안: 왼쪽 위 LIVE(정상 송출일 때만) · 오른쪽 위 상태(검은 바탕) · 오른쪽 아래 방송 시간. 그림 아래는 이름·키만
       h("div", { class: "cam-view" }, p.pic("c", true),
@@ -324,6 +327,7 @@ function renderLives(grid, ov) {
         p.bad ? h("span", { class: "cam-alert" }) : null),
       h("div", { class: "cam-cap" },
         h("div", { class: "cam-name" }, h("span", { class: "lv-title" }, lv.name), p.keytag)));
+    return p.bad ? logClick(lv, art) : art;  // 빨간 칸은 어디를 눌러도 로그
   };
   // 채널별로 묶어서: 채널 머리줄(로고·이름 ──── 설명) 아래에 그 채널의 라이브들
   const groups = (ov.channels || []).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id) }))
@@ -432,11 +436,11 @@ function reconnects(lv) {
   const out = [];
   if (list.length) {
     const last = list[list.length - 1];
-    out.push(h("span", { class: "warnline", title: tip(list) }, `재연결 ${list.length}회 (최근 ${fmt.clock(last.ts)})`));
+    out.push(logClick(lv, h("span", { class: "warnline", title: tip(list) }, `재연결 ${list.length}회 (최근 ${fmt.clock(last.ts)})`)));
   }
   // 아래 둘은 알림 없이 회색으로만 — 시청자가 못 느끼는 수준 (유튜브 쪽 출렁임)
-  if (quiet.length) out.push(h("span", { class: "faint", title: tip(quiet) + "\n(5초 안에 다시 붙음 — 시청자 영향 없음)" }, `유튜브 재연결 ${quiet.length}회`));
-  if (b && b.n) out.push(h("span", { class: "faint", title: "최근 24시간 동안 1초 넘게 밀린 횟수 (유튜브 쪽 출렁임 — 알림 없음)" }, `24시간 밀림 ${b.n}회 · 최대 ${fmt.num(b.max, 1)}초`));
+  if (quiet.length) out.push(logClick(lv, h("span", { class: "faint", title: tip(quiet) + "\n(5초 안에 다시 붙음 — 시청자 영향 없음)" }, `유튜브 재연결 ${quiet.length}회`)));
+  if (b && b.n) out.push(logClick(lv, h("span", { class: "faint", title: "최근 24시간 동안 1초 넘게 밀린 횟수 (유튜브 쪽 출렁임 — 알림 없음)" }, `24시간 밀림 ${b.n}회 · 최대 ${fmt.num(b.max, 1)}초`)));
   if (!out.length) return h("span", { class: "faint" }, "끊김 없음");
   return h("span", { class: "drops" }, out);
 }
@@ -522,7 +526,11 @@ function renderSide(side, ov) {
         ov.alerts.some((a) => a.id) ? h("button", { class: "linkbtn", onclick: () => clearAlerts() }, "모두 지우기") : null),
       h("div", { class: "card-body" }, ov.alerts.length
         ? h("ul", { class: "alerts" }, ov.alerts.slice(0, 12).map((a) => h("li", { class: a.level }, h("span", { class: "ic" }),
-            h("span", {}, h("time", {}, fmt.time(a.ts)), a.live ? h("b", {}, liveName(a.live) + " ") : null, a.message),
+            (() => {
+              const body = h("span", {}, h("time", {}, fmt.time(a.ts)), a.live ? h("b", {}, liveName(a.live) + " ") : null, a.message);
+              const lv = a.live && ov.lives.find((x) => x.id === a.live);
+              return lv ? logClick(lv, body) : body;
+            })(),
             a.id ? h("button", { class: "x", title: "확인 — 지우기", "aria-label": "지우기", onclick: () => dismissAlert(a.id) }, "✕")
                  : h("span", { class: "x-ph", title: "지금 상태 — 해결되면 저절로 사라집니다" }))))
         : h("div", { class: "muted small" }, "알림 없음"))));
@@ -589,6 +597,15 @@ function tzSeg(pre) {
       [...seg.children].forEach((b) => b.classList.toggle("on", b === e.currentTarget)); pre.show(pre.raw);
     } }, l)));
   return seg;
+}
+
+// 문제 표시(경고·중단 상태, 재연결·밀림 횟수, 관제의 빨간 칸, 알림)를 누르면 그 라이브의 로그를 바로 연다
+function logClick(lv, el) {
+  if (!el || !lv) return el;
+  el.classList.add("logclick");
+  el.title = (el.title ? el.title + "\n" : "") + "눌러서 로그 보기";
+  el.addEventListener("click", (e) => { e.stopPropagation(); e.preventDefault(); openLog(lv); });
+  return el;
 }
 
 async function openLog(lv) {
