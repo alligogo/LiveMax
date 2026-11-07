@@ -20,7 +20,7 @@ import os
 import time
 from pathlib import Path
 
-from . import catalog, config, db, probe, thumbs
+from . import catalog, config, db, filenames, probe, thumbs
 from .paths import Paths
 
 log = logging.getLogger("livemax.ingest")
@@ -90,6 +90,21 @@ def process_file(paths: Paths, server: dict, conn, kind: str, folder: str, src: 
         reasons = [f"대상 폴더 {kind}/{folder} 가 없음 — 대시보드에서 먼저 폴더를 만드세요"]
         reject(paths, conn, kind, folder, src, reasons)
         return False, reasons
+
+    bad = filenames.problems(src.name, kind)
+    if bad:
+        reject(paths, conn, kind, folder, src, bad)
+        return False, bad
+    nfc = filenames.normalize(src.name)
+    if nfc != src.name:  # 맥에서 올린 한글(NFD) → 합친 이름으로. 대기 폴더 안에서만 바꾼다
+        if (src.parent / nfc).exists():
+            reasons = [f"같은 이름의 파일 '{nfc}' 이 이미 검증 대기 중입니다"]
+            reject(paths, conn, kind, folder, src, reasons)
+            return False, reasons
+        new = src.parent / nfc
+        os.rename(src, new)
+        log.info("이름을 NFC 로 합침: %r → %r", src.name, nfc)
+        src = new
 
     dup = collision(src, target_dir)
     if dup:

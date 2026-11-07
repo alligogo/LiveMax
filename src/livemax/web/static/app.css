@@ -116,7 +116,10 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .msg.err { color: var(--red); }
 .actions { display: flex; gap: 8px; margin-top: 14px; }
 .actions .btn { flex: 1; }
-.links { display: flex; gap: 14px; justify-content: flex-end; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.links { display: flex; flex-wrap: wrap; gap: 4px 14px; justify-content: flex-end; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.links > * { white-space: nowrap; }
+.links .drops { margin-right: auto; display: inline-flex; flex-wrap: wrap; gap: 2px 10px; }
+.links .drops > * { margin-right: 0 !important; }
 .links .warnline { color: var(--yellow); cursor: help; margin-right: auto; }
 .links .faint:first-child { margin-right: auto; }
 .links a:hover { color: var(--text); text-decoration: underline; cursor: pointer; }
@@ -293,6 +296,7 @@ a.ch-name:hover span { text-decoration: underline; }
 .cap-top { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
 .cap-top b { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cap-k { color: var(--muted); }
+.cap-safe { margin-left: 7px; font-size: 11px; font-weight: 500; color: var(--faint); }
 .lead .cap-k, .cap-live.lead .cap-k { color: var(--text); font-weight: 800; }
 .cap-note { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
 .cap-bar { position: relative; height: 6px; background: #333; border-radius: 3px; margin-top: 5px; }
@@ -305,14 +309,12 @@ a.ch-name:hover span { text-decoration: underline; }
 .cap-top b.over .ico svg { width: 13px; height: 13px; }
 .cap-lbar { flex-basis: 100%; margin-top: 2px; }
 .cap-bar i.mid { background: var(--yellow); } .cap-bar i.hi { background: var(--red); }
-.cap-bar s, .cap-legend s { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #d4d4d4; border-radius: 1px; }
+.cap-bar s { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #d4d4d4; border-radius: 1px; }
 .cap-live { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; font-size: 13px;
   padding: 8px 10px; border-radius: 8px; background: #262626; }
 .cap-live b { font-variant-numeric: tabular-nums; } .cap-live b.hot { color: var(--red); }
 .cap-live .cap-st { flex-basis: 100%; font-size: 11.5px; color: var(--muted); }
 .cap-traffic { margin-top: 14px; padding-top: 12px; border-top: 1px solid #2c2c2c; }
-.cap-legend { position: relative; margin-top: 12px; padding-left: 10px; font-size: 11px; color: var(--faint); line-height: 1.4; }
-.cap-legend s { left: 1px; top: 1px; }
 .ch-rule { flex: 1; height: 1px; background: linear-gradient(90deg, #3a3a3a, transparent); min-width: 30px; }
 .ch-desc { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
 .ch-logo { border-radius: 50%; object-fit: cover; flex: none; background: #2a2a2a; }

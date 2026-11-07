@@ -45,6 +45,32 @@ run_container() {
     "$IMAGE" >/dev/null
 }
 
+# 비상 스왑 (DESIGN 11-D 8): 메모리가 순간 꽉 차면 리눅스가 ffmpeg·관리 프로그램을 강제 종료(OOM)한다.
+# 스왑이 하나도 없을 때만 /swapfile 2GB 를 만들고 평소엔 거의 안 쓰게(swappiness 10) 한다. 이미 스왑이 있으면 손대지 않음.
+# 설치·업데이트·tick(30초) 때 확인 — 업데이트로 이 명령이 새로 바뀐 직후에도 다음 tick 에서 적용된다.
+SWAP_MB="${LIVEMAX_SWAP_MB:-2048}"
+ensure_swap() {
+  [[ "$SWAP_MB" -gt 0 ]] || return 0
+  [[ -n "$(swapon --noheadings --show 2>/dev/null)" ]] && return 0
+  local f=/swapfile mark="$DATA/state/host/swap-unavailable" free_mb
+  [[ -f "$mark" ]] && return 0          # 스왑을 못 쓰는 서버(일부 컨테이너형 VPS) — 매번 다시 시도하지 않음
+  if [[ ! -f "$f" ]]; then
+    free_mb="$(df -Pm / | awk 'NR==2 {print $4}')"
+    if (( free_mb < SWAP_MB + 3072 )); then echo "디스크 여유가 부족해 비상 스왑을 만들지 않았습니다"; return 0; fi
+    fallocate -l "${SWAP_MB}M" "$f" 2>/dev/null || dd if=/dev/zero of="$f" bs=1M count="$SWAP_MB" status=none || { rm -f "$f"; return 0; }
+  fi
+  chmod 600 "$f"
+  if mkswap "$f" >/dev/null 2>&1 && swapon "$f" 2>/dev/null; then
+    grep -qE '^/swapfile[[:space:]]' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    echo 'vm.swappiness=10' > /etc/sysctl.d/99-livemax-swap.conf
+    sysctl -q -w vm.swappiness=10 || true
+    echo "비상 스왑 ${SWAP_MB}MB 를 만들었습니다 (평소엔 거의 안 씀 — 메모리가 꽉 찰 때만)"
+  else
+    rm -f "$f"; mkdir -p "$(dirname "$mark")"; touch "$mark"
+    echo "이 서버는 스왑을 쓸 수 없어 건너뜁니다"
+  fi
+}
+
 public_ip() { cat "$DATA/state/public_ip" 2>/dev/null || hostname -I | awk '{print $1}'; }
 
 cmd="${1:-status}"
@@ -52,6 +78,7 @@ case "$cmd" in
   update|install)
     need_root "$cmd"
     [[ "$cmd" == update ]] && self_update
+    ensure_swap || true
     pull_image
     run_container
     # 업데이트마다 이전 이미지(약 500MB)가 남는다 → 쓰지 않는 이미지 정리
@@ -76,6 +103,8 @@ case "$cmd" in
     echo "https://$(public_ip)"
     ;;
   tick)
+    # 0) 비상 스왑 (없을 때만 한 번 만든다)
+    ensure_swap >> "$DATA/logs/update.log" 2>&1 || true
     # 1) 서버 재부팅 필요 표시를 대시보드가 볼 수 있게 복사
     mkdir -p "$DATA/state/host"
     if [[ -f /var/run/reboot-required ]]; then

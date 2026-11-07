@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from .. import capacity, catalog, channels, config, db, liquidsoap, notify, secrets, thumbs
+from .. import capacity, catalog, channels, config, db, filenames, liquidsoap, notify, secrets, thumbs
 from ..config import ConfigError, Live, live_from_dict
 from ..state import read_json
 from . import auth
@@ -34,7 +34,7 @@ from . import auth
 log = logging.getLogger("livemax.web")
 STATIC = Path(__file__).parent / "static"
 LOOPBACK = {"127.0.0.1", "::1"}
-EXTS = {"video": (".mp4", ".mkv"), "audio": (".m4a", ".aac")}
+EXTS = filenames.EXTS  # 파일 이름 규칙은 한 곳(filenames.py)에서
 
 
 def err(msg: str, code: int = 400) -> JSONResponse:
@@ -190,7 +190,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "planned": bool(s.get("planned")), "starting": bool(s.get("starting")),
             "song_title": np_.get("title") or (Path(np_.get("file", "")).stem if np_.get("file") else ""),
             "song_artist": np_.get("artist") or "",
-            "song_folder": Path(np_["file"]).parent.name if np_.get("file") else "", "restarts_hour": s.get("restarts_hour", 0),
+            "song_folder": Path(np_["file"]).parent.name if np_.get("file") else "", "restarts_hour": s.get("restarts_hour", 0), "blips_day": s.get("blips_day"),
             "restarts": s.get("restarts", []), "next_restart": lv.next_restart(settings).timestamp(),
             "key_masked": key_masked, "key_label": _key_label(lv), "desired": desired,
             "idle_thumb": None if state == "running" else _idle_thumb(lv),
@@ -805,11 +805,13 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     @app.post("/api/uploads")
     def upload_begin(request: Request, b: dict = Body(default={})):
-        kind, folder, name, size = str(b.get("kind")), str(b.get("folder")), Path(str(b.get("name", ""))).name, int(b.get("size", 0))
+        kind, folder, size = str(b.get("kind")), str(b.get("folder")), int(b.get("size", 0))
+        name = filenames.normalize(Path(str(b.get("name", "")).replace("\\", "/")).name)
         if not _kind(kind) or not config.valid_folder_name(folder) or not (paths.kind_root(kind) / folder).is_dir():
             return err("폴더 없음")
-        if not name or name.startswith(".") or "#{" in name or not name.lower().endswith(EXTS[kind]):
-            return err(f"허용 확장자: {', '.join(EXTS[kind])}")
+        bad = filenames.problems(name, kind)
+        if bad:
+            return err(f"'{name}' — " + " · ".join(bad))
         if size <= 0 or size > int(settings["dashboard"]["max_upload_mb"]) * 1024 * 1024:
             return err("파일 크기 오류")
         # 같은 이름은 올리기 전에 바로 알려 준다 (덮어쓰지 않음 — 송출 중일 수 있으므로)
@@ -818,7 +820,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 where = "방송 폴더" if d.parent.parent != paths.incoming else "검증 대기"
                 return err(f"'{name}' 과(와) 같은 이름의 파일이 이미 있습니다 ({where}) — 교체하려면 기존 파일을 지운 뒤 올리거나 이름을 바꾸세요")
         uid = _upload_id(kind, folder, name, size)
-        meta = paths.uploads / f"{uid}.json"
+        meta = paths.uploads / f"{uid}.json"  # 저장되는 이름은 NFC 로 합친 이름
         part = paths.uploads / f"{uid}.part"
         if not meta.exists():
             meta.write_text(json.dumps({"kind": kind, "folder": folder, "name": name, "size": size}))

@@ -25,10 +25,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import filenames
 from .paths import Paths
 
 log = logging.getLogger("livemax.fetcher")
-EXTS = {"video": (".mp4", ".mkv"), "audio": (".m4a", ".aac")}
+EXTS = filenames.EXTS
 UA = "Mozilla/5.0 (LiveMax link fetch)"
 
 
@@ -198,9 +199,10 @@ class Fetcher:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             if "text/html" in ctype:
                 raise FetchError("파일이 아니라 웹페이지가 왔습니다 — 공유 설정을 '링크가 있는 모든 사용자'로 했는지 확인하세요")
-            name = _filename(resp, url)
-            if not name or name.startswith(".") or not name.lower().endswith(EXTS[job.kind]):
-                raise FetchError(f"파일 이름 '{name or '?'}' — {', '.join(EXTS[job.kind])} 파일만 됩니다")
+            name = filenames.normalize(_filename(resp, url))
+            bad = filenames.problems(name, job.kind)
+            if bad:
+                raise FetchError(f"파일 이름 '{name or '?'}' — " + " · ".join(bad))
             job.name = name
             total = int(resp.headers.get("Content-Length") or 0)
             job.total = total

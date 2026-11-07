@@ -374,7 +374,11 @@ function liveBadge(lv, running) {
 
 // 일부러 한 재시작(매일 자동·설정 저장·재시작 버튼)은 끊김으로 세지 않는다 — 진짜 문제만
 const PLANNED = /^(일일 재시작|설정 적용|사용자 재시작)/;
-const drops = (lv) => (lv.session_started_at ? (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at && !PLANNED.test(r.reason || "")) : []);
+// 유튜브가 끊고 5초 안에 다시 붙은 것(유튜브 정비 등) — 시청자 영향 없음: 끊김으로 세지 않고 카드에 회색으로만 (DESIGN 11-D 11)
+const QUIET = /^유튜브 짧은 재연결/;
+const sessionR = (lv) => (lv.session_started_at ? (lv.restarts || []).filter((r) => r.ts >= lv.session_started_at) : []);
+const drops = (lv) => sessionR(lv).filter((r) => !PLANNED.test(r.reason || "") && !QUIET.test(r.reason || ""));
+const quietDrops = (lv) => sessionR(lv).filter((r) => QUIET.test(r.reason || ""));
 
 // 라이브 화면 맨 위 미니 관제: 가동률(송출하려는 라이브 중 정상 비율)과 상태 수. 맑음(파랑)/주의(보라)/심각(빨강)
 // 미니 관제·시스템 칸이 같은 기준으로 센다.
@@ -424,11 +428,18 @@ function pulseBox(ov) {
 // 이번 방송(세션) 동안 자동 재연결·재시작 횟수 — 가동 시간 대신 "몇 번 끊겼다 붙었나"를 보여준다
 function reconnects(lv) {
   if (!lv.session_started_at) return null;
-  const list = drops(lv);
-  if (!list.length) return h("span", { class: "faint" }, "끊김 없음");
-  const last = list[list.length - 1];
-  return h("span", { class: "warnline", title: list.map((r) => `${fmt.time(r.ts)} ${r.reason}`).join("\n") },
-    `재연결 ${list.length}회 (최근 ${fmt.clock(last.ts)})`);
+  const list = drops(lv), quiet = quietDrops(lv), b = lv.blips_day;
+  const tip = (rs) => rs.map((r) => `${fmt.time(r.ts)} ${r.reason}`).join("\n");
+  const out = [];
+  if (list.length) {
+    const last = list[list.length - 1];
+    out.push(h("span", { class: "warnline", title: tip(list) }, `재연결 ${list.length}회 (최근 ${fmt.clock(last.ts)})`));
+  }
+  // 아래 둘은 알림 없이 회색으로만 — 시청자가 못 느끼는 수준 (유튜브 쪽 출렁임)
+  if (quiet.length) out.push(h("span", { class: "faint", title: tip(quiet) + "\n(5초 안에 다시 붙음 — 시청자 영향 없음)" }, `유튜브 재연결 ${quiet.length}회`));
+  if (b && b.n) out.push(h("span", { class: "faint", title: "최근 24시간 동안 1초 넘게 밀린 횟수 (유튜브 쪽 출렁임 — 알림 없음)" }, `24시간 밀림 ${b.n}회 · 최대 ${fmt.num(b.max, 1)}초`));
+  if (!out.length) return h("span", { class: "faint" }, "끊김 없음");
+  return h("span", { class: "drops" }, out);
 }
 
 function timerLine(lv, now) {
@@ -455,8 +466,10 @@ function renderSide(side, ov) {
     return h("div", { class: "cap-bar" }, h("i", { class: cls, style: `width:${(f * 100).toFixed(1)}%` }),
       safe != null ? h("s", { style: `left:${(Math.min(1, safe) * 100).toFixed(1)}%`, title: "안전선" }) : null);
   };
+  // 제목 옆 작은 회색 글씨 '안전 N%' = 막대의 세로 눈금 (설정 > 서버 > 안전선)
   const row = (kind, k, v, note, frac, safe, lead) => h("div", { class: "cap-row" + (lead ? " lead" : "") },
-    h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, k), h("b", { class: over(frac, safe) ? "over" : "" }, over(frac, safe) ? ico("warn") : null, v)),
+    h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, k,
+      safe != null ? h("small", { class: "cap-safe" }, `안전 ${Math.round(safe * 100)}%`) : null), h("b", { class: over(frac, safe) ? "over" : "" }, over(frac, safe) ? ico("warn") : null, v)),
     frac !== undefined ? bar(frac, safe, kind) : null,
     note ? h("div", { class: "cap-note" }, note) : null);
   const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
@@ -465,6 +478,10 @@ function renderSide(side, ov) {
   const sd = new Date((ov.server_time || Date.now() / 1000) * 1000);
   const mdays = new Date(sd.getUTCFullYear(), sd.getUTCMonth() + 1, 0).getDate();
   const monthBytes = s.net_tx_mbps != null ? (s.net_tx_mbps * 1e6 / 8) * mdays * 86400 : null;
+  // 예상 최대 라이브 수: 메모리·CPU·회선·(한도 있으면)트래픽 안전선 중 가장 먼저 막히는 것 기준 — '최대 개수 설정'은 빼고
+  const SHORT = { ram: "메모리", cpu: "CPU", bandwidth: "회선", traffic: "월 트래픽" };
+  const opt = Object.entries(c.options || {}).filter(([k]) => SHORT[k]).sort((a, b) => a[1] - b[1])[0];
+  const maxGuess = opt ? { n: (c.lives ?? ov.lives.length) + Math.max(0, opt[1]), by: SHORT[opt[0]] } : null;
   const st = [counts.st ? `시작 중 ${counts.st}` : null, counts.re ? `재시작 중 ${counts.re}` : null].filter(Boolean).join(" · ");
   side.replaceChildren(
     addBtn("d-only"),
@@ -478,9 +495,9 @@ function renderSide(side, ov) {
           h("span", {}, "정상 ", h("b", {}, counts.ok), " · 경고 ", h("b", { class: counts.warn ? "hot" : "" }, counts.warn),
             " · 중단 ", h("b", { class: counts.down ? "hot" : "" }, counts.down)),
           st ? h("span", { class: "cap-st" }, st) : null,
-          // 라이브 개수 막대 (최대 개수 대비) + 남은 개수
+          // 라이브 개수 막대 (최대 개수 대비) + 안전 기준으로 이 서버가 버틸 수 있는 총 라이브 수
           ov.max_lives ? h("div", { class: "cap-lbar" }, bar(ov.lives.length / ov.max_lives, null, "lives"),
-            h("div", { class: "cap-note" }, `남은 ${Math.max(0, ov.max_lives - ov.lives.length)}개 (최대 ${ov.max_lives}개 — 설정 > 서버)`)) : null),
+            maxGuess ? h("div", { class: "cap-note" }, `예상 최대 ${maxGuess.n}개 (${maxGuess.by})`) : null) : null),
         h("div", { class: "cap-rows" },
           row("mem", "메모리", memT ? `${fmt.num(memU / 1024, 1)} / ${fmt.num(memT / 1024, 1)} GB` : "-",
             memT ? `라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 남은 여유분 ${Math.max(0, Math.round(memT - reserve - memU)).toLocaleString()}MB` : null,
@@ -497,8 +514,7 @@ function renderSide(side, ov) {
              monthBytes != null ? h("div", { class: "cap-note" }, `지금 속도로 한 달 쓰면 약 ${fmt.bytes(monthBytes)}`) : null]
           : [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, `예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`)),
              bar(c.limit_tb ? c.projected_tb / c.limit_tb : 0, c.limit_tb ? c.target_tb / c.limit_tb : null, "traffic"),
-             h("div", { class: "cap-note" }, `이번 달 ${fmt.num(c.month_tx_tb, 2)}TB · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB`)]),
-        h("div", { class: "cap-legend" }, h("s"), `안전선(설정 > 서버) — 메모리 ${reserve}MB 남김 · CPU ${cpuT}% · 회선 ${Math.round(portR * 100)}% · 디스크 ${diskW}%`))),
+             h("div", { class: "cap-note" }, `이번 달 ${fmt.num(c.month_tx_tb, 2)}TB · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB`)]))),
     h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "card-head" }, "알림", h("span", { class: "spacer" }),
         ov.alerts.some((a) => a.id) ? h("button", { class: "linkbtn", onclick: () => clearAlerts() }, "모두 지우기") : null),
       h("div", { class: "card-body" }, ov.alerts.length
@@ -999,7 +1015,7 @@ async function upVerifyPoll() {
     try { d = await api("GET", `/api/media/${kind}/${encodeURIComponent(folder)}`); } catch (e) { continue; }
     const have = new Set(d.files.map((f) => f.name)), wait = new Set(d.pending || []);
     for (const it of its) {
-      const name = it.file.name;
+      const name = it.file.name.normalize("NFC").trim();  // 서버는 맥(NFD) 한글 이름을 NFC 로 합쳐 저장한다
       if (have.has(name)) { it.txt.textContent = "등록 완료 ✓"; VERIFY.items.delete(it); }
       else if (!wait.has(name) && Date.now() - it.verifyStart > 4000) {
         it.txt.textContent = "검증 실패 — 폴더 화면 '검증 실패' 목록 확인"; it.row.classList.remove("ok"); it.row.classList.add("err"); VERIFY.items.delete(it);

@@ -33,14 +33,39 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import channels, concat, db, ffmpeg_cmd, liquidsoap, rtmp_relay, secrets, tls_relay
+from . import channels, concat, config, db, ffmpeg_cmd, liquidsoap, rtmp_relay, secrets, tls_relay
 from .config import ConfigError, LiveStore
 from .logsetup import UTCFormatter, FMT
 from .paths import Paths
 from .state import read_json, write_json_atomic
 
 log = logging.getLogger("livemax.supervisor")
+
+
+class _LiveName(logging.Filter):
+    """라이브 로그 줄의 [이름] 칸을 사람이 읽는 이름으로: [서버명 · 라이브명 (채널명) · live13] (DESIGN 11-D 10).
+    번호는 이름을 바꾸거나 같은 이름이 생겨도 기록을 추적할 수 있게 맨 끝에 남긴다."""
+
+    def __init__(self, label) -> None:
+        super().__init__()
+        self.label = label
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.name = self.label()
+        except Exception:  # noqa: BLE001 — 이름을 못 구해도 로그는 남긴다
+            pass
+        return True
 PLANNED = ("일일 재시작", "설정 적용", "사용자 재시작")  # 일부러 한 재시작 (끊김·경고로 세지 않음)
+# 유튜브가 끊고 중계기가 5초 안에 다시 붙은 것 — 시청자 영향 없음. 카드에 회색으로만, 끊김·경고·재시작 한도엔 안 셈 (DESIGN 11-D 11)
+QUIET_RECONNECT = "유튜브 짧은 재연결"
+NOT_COUNTED = PLANNED + (QUIET_RECONNECT,)
+# 밀림·재연결 알림 기준 (DESIGN 11-D 11) — '우리 문제'일 때만 눈에 띄게
+SLOW_LOG_S = 10        # 밀림 요약을 로그에 남기는 기준 (최대 밀림 또는 지속 시간)
+SLOW_ALERT_DUR_S = 30  # 라이브 1개가 이만큼 넘게 밀리면 알림 박스
+SLOW_REPEAT_N = 3      # 같은 라이브가 1시간에 이만큼 밀리면 알림 박스
+QUIET_GAP_S = 5.0      # 유튜브 재연결이 이 안에 붙으면 조용히
+MASS_SLOW_N = 3        # 라이브 이만큼이 같은 순간 밀리면 서버·회선 문제 → 휴대폰 알림
 LIQUIDSOAP = "liquidsoap"
 # 켤 때 표준 라이브러리 전체 검사를 건너뛴다: 시작 CPU 약 5.9초 → 1.0초 (4코어 서버 순간 15% → 3%),
 # 쓰지 않는 옛 함수 묶음은 안 읽어 메모리 약 -9MB (DESIGN 11-C A안). 스크립트 자체 검사는 테스트(--check)에서 정식으로 한다.
@@ -74,6 +99,10 @@ class LiveProc:
         self.relay: tls_relay.Relay | rtmp_relay.RelayProc | None = None
         self.threads: list[threading.Thread] = []
         self.restarts: deque[tuple[float, str]] = deque(maxlen=50)
+        self.blips: deque[tuple[float, float]] = deque(maxlen=500)  # 1초 넘는 밀림 (시각, 최대 초) — 카드의 '최근 24시간 밀림'
+        self.blip_open: list | None = None   # 지금 진행 중인 1초 넘는 밀림 [시작, 최대]
+        self.slow_eps: deque[float] = deque(maxlen=20)  # 2초·5초 넘는 밀림이 끝난 시각 — '1시간에 3번' 판정
+        self.slow_alert_at = 0.0
         self.relay_fails = 0
         self.relay_block_until = 0.0
         self.lm_fails = 0
@@ -94,6 +123,7 @@ class LiveProc:
             fh = logging.handlers.WatchedFileHandler(sup.paths.logs / f"live-{live_id}.log", encoding="utf-8")
             fh.setFormatter(UTCFormatter(FMT))
             fh.addFilter(secrets.Redactor())
+            fh.addFilter(_LiveName(lambda: sup.live_label(live_id)))
             self.log.addHandler(fh)
             self.log.setLevel(logging.INFO)
 
@@ -112,7 +142,9 @@ class LiveProc:
         d["relay_pid"] = rp.pid if rp is not None and rp.poll() is None else None
         now = time.time()
         # 경고 판정용: 일부러 한 재시작(설정 적용·매일 자동·재시작 버튼)은 세지 않는다 — 진짜 문제만
-        d["restarts_hour"] = sum(1 for t, r in self.restarts if now - t < 3600 and not r.startswith(PLANNED))
+        d["restarts_hour"] = sum(1 for t, r in self.restarts if now - t < 3600 and not r.startswith(NOT_COUNTED))
+        day = [m for t, m in self.blips if now - t < 86400]
+        d["blips_day"] = {"n": len(day), "max": round(max(day), 1) if day else 0}
         d["restarts"] = [{"ts": t, "reason": r} for t, r in list(self.restarts)[-10:]]
         # 일부러 한 재시작(폴더 변경·재시작 버튼·매일 자동) 중인지 — 화면에 '영상 교체 중'으로 차분하게
         d["planned"] = bool(self.pending_reason) or (bool(self.intentional) and d.get("state") in ("starting", "restarting"))
@@ -346,9 +378,10 @@ class LiveProc:
         kind = ev.get("event")
         if kind == "stats":  # 15초마다: 유튜브로 실제 나간 양·밀린 시간 (DB 기록용, 로그 없음)
             self.set(kbps_in=ev.get("kbps_in"), kbps_out=ev.get("kbps_out"), delay_s=ev.get("delay"), relay_at=time.time())
+            self._track_blip(float(ev.get("delay") or 0))
             return
-        if kind == "slow_start":
-            self.log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %s초 쌓임 (연결은 유지)", ev.get("delay"))
+        if kind == "slow_start":  # 2초 넘게 5초 이상 밀림 — 로그는 끝날 때 한 번만, 동시 밀림 판정에만 쓴다
+            self.sup.note_slow(self.id, True)
             return
         if kind == "stall":
             msg = f"중계기가 {ev.get('sec')}초 멈춤 — 그동안 유튜브로 못 보냄 (서버 처리 지연, 회선 아님)"
@@ -358,20 +391,43 @@ class LiveProc:
                 self.log.warning(msg)
             return
         if kind == "slow_end":
+            self.sup.note_slow(self.id, False)
+            now = time.time()
+            dur, mx = float(ev.get("dur") or 0), float(ev.get("max_delay") or 0)
             where = {"network": "서버→유튜브 회선", "server": "서버 처리 지연"}.get(ev.get("where"), "")
             msg = (f"유튜브 전송 밀림 {ev.get('dur')}초 — 최대 {ev.get('max_delay')}초 밀림, "
                    f"유튜브로 {ev.get('kbps_out')}kbps (보낼 양 {ev.get('kbps_in')}kbps)"
                    + (f", 막힌 곳: {where}" if where else "") + ". 연결은 유지됨")
-            # 짧고 작은 밀림(5초 미만·15초 미만)은 로그에만 — 알림 목록은 눈여겨볼 것만
-            if float(ev.get("max_delay") or 0) >= 5 or float(ev.get("dur") or 0) >= 15:
+            self.slow_eps.append(now)
+            recent = sum(1 for t in self.slow_eps if now - t < 3600)
+            if dur >= SLOW_ALERT_DUR_S:
                 self.event("warn", msg)
-            else:
+            elif recent >= SLOW_REPEAT_N and now - self.slow_alert_at > 3600:
+                self.slow_alert_at = now
+                self.event("warn", f"1시간에 밀림 {recent}번 — 이 라이브의 파일·설정을 확인해 보세요 (마지막: {msg})")
+            elif dur >= SLOW_LOG_S or mx >= SLOW_LOG_S:  # 짧은 밀림은 숫자 기록(DB)과 카드 '최근 24시간 밀림'에만
                 self.log.warning(msg + f" (커널 대기 {ev.get('kern_kb')}KB · 중계기 {ev.get('app_kb')}KB · 멈칫 {ev.get('lag')}초)")
             return
         if kind == "reconnect":
+            self.sup.note_slow(self.id, False)
             gap = float(ev.get("gap") or 0)
+            if gap <= QUIET_GAP_S:  # 유튜브 정비 등으로 끊겼다가 바로 붙음 — 시청자 영향 없음
+                self.restarts.append((time.time(), f"{QUIET_RECONNECT} {gap:.1f}초"))
+                self.log.info("유튜브가 연결을 끊음 → 중계기가 %.1f초 만에 다시 접속 (송출 프로그램은 계속)", gap)
+                return
             self.restarts.append((time.time(), f"유튜브 재접속 {gap:.1f}초"))
             self.event("warn", f"유튜브가 연결을 끊음 → 중계기가 {gap:.1f}초 만에 다시 접속 (송출 프로그램은 계속)")
+
+    def _track_blip(self, delay: float) -> None:
+        """15초 숫자로 '1초 넘는 밀림' 횟수·최대를 센다 (카드에 회색으로, 알림 없음)."""
+        if delay >= 1.0:
+            if self.blip_open is None:
+                self.blip_open = [time.time(), delay]
+            else:
+                self.blip_open[1] = max(self.blip_open[1], delay)
+        elif self.blip_open is not None:
+            self.blips.append((self.blip_open[0], self.blip_open[1]))
+            self.blip_open = None
 
     def _read_progress(self, p: subprocess.Popen) -> None:
         block: dict[str, str] = {}
@@ -442,6 +498,9 @@ class Supervisor:
         self.settings = settings
         self.store = LiveStore(paths, settings)
         self.procs: dict[str, LiveProc] = {}
+        self._labels: dict[str, tuple[float, str]] = {}
+        self._slow_now: dict[str, float] = {}  # 지금 밀리는 중인 라이브 → 시작 시각
+        self._mass_slow_at = 0.0
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.done_today: dict[str, str] = {}
@@ -449,6 +508,52 @@ class Supervisor:
         self.last_timer_start = 0.0
         self.last_m3u = 0.0
         self.notify = lambda *a, **k: False  # daemon 이 Notifier.send 로 바꿔 끼운다
+
+    def note_slow(self, live_id: str, on: bool) -> None:
+        """라이브 여러 개가 같은 순간 밀리면 서버·회선(우리) 문제 → 휴대폰 알림 (DESIGN 11-D 11).
+        라이브 하나만 밀리는 건 유튜브 쪽 출렁임이라 알리지 않는다. 막 켜진(1분 안) 라이브는 세지 않음."""
+        now = time.time()
+        with self.lock:
+            if not on:
+                self._slow_now.pop(live_id, None)
+                return
+            p = self.procs.get(live_id)
+            if p is not None and now - float(p.st.get("ffmpeg_started_at") or 0) < 60:
+                return
+            self._slow_now[live_id] = now
+            for lid in [k for k, t in self._slow_now.items() if now - t > 600]:  # 끝 소식이 안 온 오래된 것
+                self._slow_now.pop(lid, None)
+            n = len(self._slow_now)
+            if n < MASS_SLOW_N or now - self._mass_slow_at < 600:
+                return
+            self._mass_slow_at = now
+            names = ", ".join(sorted(self.live_label(k).split(" · ")[-2] if " · " in self.live_label(k) else k for k in self._slow_now))
+        msg = f"라이브 {n}개가 동시에 유튜브 전송 밀림 — 서버나 회선 문제일 수 있습니다 ({names})"
+        log.warning(msg)
+        try:
+            with db.session(self.paths.db) as c:
+                db.add_event(c, "error", "supervisor", msg)
+        except Exception:  # noqa: BLE001
+            pass
+        self.notify("down", f"동시 밀림 {n}개", msg, dedupe_s=600)
+
+    def live_label(self, live_id: str) -> str:
+        """로그·알림에 쓰는 이름: '서버명 · 라이브명 (채널명) · live13'. 1분 동안 기억 (로그 줄마다 파일을 읽지 않게)."""
+        now = time.monotonic()
+        hit = self._labels.get(live_id)
+        if hit and now - hit[0] < 60:
+            return hit[1]
+        lv = self.store.get(live_id)
+        name = lv.name if lv else live_id
+        ch = None
+        if lv and lv.channel_id:
+            try:
+                ch = channels.ChannelStore(self.paths).get(lv.channel_id)
+            except Exception:  # noqa: BLE001
+                ch = None
+        label = " · ".join(x for x in (config.server_name(self.settings), f"{name} ({ch.name})" if ch else name, live_id) if x)
+        self._labels[live_id] = (now, label)
+        return label
 
     def proc(self, live_id: str) -> LiveProc:
         with self.lock:
@@ -658,7 +763,7 @@ class Supervisor:
                 try:
                     reason = p.watch(now)
                     if reason:
-                        recent = sum(1 for t, r in p.restarts if now - t < 3600 and not r.startswith(PLANNED))
+                        recent = sum(1 for t, r in p.restarts if now - t < 3600 and not r.startswith(NOT_COUNTED))
                         lv_ = self.store.get(lid)
                         name = lv_.name if lv_ else lid
                         if recent >= int(wd["max_restarts_per_hour"]):
