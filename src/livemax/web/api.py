@@ -236,12 +236,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return float(r["k"])
         return 5000.0
 
-    _MEDIA_TOT: dict = {"t": 0.0, "v": {}}
+    _MEDIA_TOT: dict = {"t": None, "v": {}}  # t=None: 아직 한 번도 안 셈 (켜진 지 1분 안 된 서버에서도 바로 세게)
 
     def _media_totals(conn) -> dict:
         """서버 박스 디스크 아래 '현재 비디오 N개 (용량)·음악 N개' — 1분 동안 기억 (5초마다 DB 를 훑지 않게)."""
         now = time.monotonic()
-        if now - _MEDIA_TOT["t"] > 60:
+        if _MEDIA_TOT["t"] is None or now - _MEDIA_TOT["t"] > 60:
             v = {k: {"n": 0, "bytes": 0} for k in ("video", "audio")}
             for r in conn.execute("SELECT kind, COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM media_files GROUP BY kind"):
                 if r["kind"] in v:
