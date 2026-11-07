@@ -20,7 +20,6 @@ function h(tag, attrs, ...kids) {
 }
 const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
-const LIMIT_LABEL = { ram: "메모리", cpu: "CPU", bandwidth: "회선 속도", traffic: "월 트래픽", max: "최대 개수 설정" };
 const fmt = {
   time(ts) { if (!ts) return "-"; const d = new Date(ts * 1000); return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; },
   clock(ts) { if (!ts) return "-"; const d = new Date(ts * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; },
@@ -466,10 +465,10 @@ function renderSide(side, ov) {
     return h("div", { class: "cap-bar" }, h("i", { class: cls, style: `width:${(f * 100).toFixed(1)}%` }),
       safe != null ? h("s", { style: `left:${(Math.min(1, safe) * 100).toFixed(1)}%`, title: "안전선" }) : null);
   };
-  // 제목 옆 작은 회색 글씨 '안전 N%' = 막대의 세로 눈금 (설정 > 서버 > 안전선)
+  // 제목 옆 작은 회색 글씨 = 지금 사용률 % (CPU 는 값 자체가 % 라 생략)
   const row = (kind, k, v, note, frac, safe, lead) => h("div", { class: "cap-row" + (lead ? " lead" : "") },
     h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, k,
-      safe != null ? h("small", { class: "cap-safe" }, `안전 ${Math.round(safe * 100)}%`) : null), h("b", { class: over(frac, safe) ? "over" : "" }, over(frac, safe) ? ico("warn") : null, v)),
+      kind !== "cpu" && frac != null ? h("small", { class: "cap-safe" }, `${Math.round(Math.max(0, frac) * 100)}%`) : null), h("b", { class: over(frac, safe) ? "over" : "" }, over(frac, safe) ? ico("warn") : null, v)),
     frac !== undefined ? bar(frac, safe, kind) : null,
     note ? h("div", { class: "cap-note" }, note) : null);
   const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
@@ -487,9 +486,7 @@ function renderSide(side, ov) {
     addBtn("d-only"),
     h("div", { class: "card" }, h("div", { class: "card-head" }, "서버"),
       h("div", { class: "card-body" },
-        h("div", { class: "big" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "개 더 추가 가능 (안전 기준)")),
-        h("div", { class: "small muted", style: "text-align:center;margin:-2px 0 10px" },
-          "먼저 막히는 것: ", h("b", { style: "color:var(--text)" }, LIMIT_LABEL[c.limiting] || "-")),
+        h("div", { class: "big", style: "margin-bottom:10px" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "추가 가능 (안전기준)")),
         h("div", { class: "cap-live" + (c.limiting === "max" ? " lead" : "") },
           h("span", { class: "cap-k" }, "라이브 ", h("b", {}, ov.max_lives ? `${ov.lives.length}/${ov.max_lives}` : `${ov.lives.length}`)),
           h("span", {}, "정상 ", h("b", {}, counts.ok), " · 경고 ", h("b", { class: counts.warn ? "hot" : "" }, counts.warn),
