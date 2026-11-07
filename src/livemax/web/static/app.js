@@ -399,8 +399,8 @@ function liveCounts(ov) {
 function pulseBox(ov) {
   const n = liveCounts(ov);
   const active = n.active, idle = n.idle;
-  // 관제는 '지금 상태'만: 끊김은 최근 10분 안의 것만 센다 (지난 기록은 각 카드·로그에 남아 있음)
-  const dropCnt = active.reduce((a, l) => a + drops(l).filter((r) => ov.server_time - r.ts < 600).length, 0);
+  // 끊김은 최근 24시간 동안의 진짜 끊김 (일부러 한 재시작·업데이트·유튜브 짧은 재연결은 제외) — 자고 일어나도 확인되게
+  const dropCnt = active.reduce((a, l) => a + drops(l).filter((r) => ov.server_time - r.ts < 86400).length, 0);
   const level = !active.length ? "idle" : n.down ? "bad" : n.warn ? "warn" : "good";
   const pct = active.length ? Math.floor((n.ok / active.length) * 100) : null;
   const icon = { good: "sun", warn: "cloud", bad: "storm", idle: "idle" }[level];
@@ -418,7 +418,7 @@ function pulseBox(ov) {
         "메모리 ", h("b", {}, `${Math.round(mem)}%`)) : null) : null,
     h("div", { class: "p-stats" },
       stat("라이브", active.length), stat("정상", n.ok), stat("경고", n.warn, n.warn ? "hot" : ""), stat("중단", n.down, n.down ? "hot" : ""),
-      stat("끊김", dropCnt, dropCnt ? "hot" : "", "최근 10분 안의 끊김 (지난 기록은 각 라이브 카드에)"),
+      stat("끊김", dropCnt, dropCnt ? "hot" : "", "최근 24시간 동안의 끊김 (일부러 한 재시작·업데이트·5초 안의 유튜브 재연결 제외) — 어느 라이브인지는 각 카드에"),
       n.st ? stat("시작 중", n.st, "dim", "켜지는 중 (시작 버튼·업데이트 직후 순서대로 — 정상 과정)") : null,
       n.re ? stat("재시작", n.re, "dim", "다시 켜지는 중 (끊겨서 자동으로 다시 켜거나 재시작 버튼)") : null,
       idle ? stat("대기", idle, "dim", "꺼 둔 라이브") : null));
@@ -481,6 +481,12 @@ function renderSide(side, ov) {
   const SHORT = { ram: "메모리", cpu: "CPU", bandwidth: "회선", traffic: "월 트래픽" };
   const opt = Object.entries(c.options || {}).filter(([k]) => SHORT[k]).sort((a, b) => a[1] - b[1])[0];
   const maxGuess = opt ? { n: (c.lives ?? ov.lives.length) + Math.max(0, opt[1]), by: SHORT[opt[0]] } : null;
+  // 디스크 안전선까지 더 올릴 수 있는 양 — 비디오: 5000k + 음악 128k × 5분 ≈ 192MB, 음악: 평균 3.2MB
+  const VIDEO_MB = (5000 + 128) * 300 / 8 / 1000, AUDIO_MB = 3.2;
+  const diskFreeMB = s.disk_total_gb ? Math.max(0, s.disk_total_gb * diskW / 100 - (s.disk_used_gb || 0)) * 1000 : null;
+  const diskFit = diskFreeMB != null ? h("span", { class: "cap-fit", title: "디스크 안전선까지 남은 공간 기준 (비디오 5000kbps · 5분, 음악 평균 3.2MB)" },
+    "더 올릴 수 있는 양 ", h("span", { class: "nw" }, "비디오 약 ", h("b", {}, Math.floor(diskFreeMB / VIDEO_MB).toLocaleString()), "개 (5분)"),
+    " · ", h("span", { class: "nw" }, "음악 약 ", h("b", {}, Math.floor(diskFreeMB / AUDIO_MB).toLocaleString()), "곡")) : null;
   const st = [counts.st ? `시작 중 ${counts.st}` : null, counts.re ? `재시작 중 ${counts.re}` : null].filter(Boolean).join(" · ");
   side.replaceChildren(
     addBtn("d-only"),
@@ -503,7 +509,7 @@ function renderSide(side, ov) {
             (s.cpu_pct || 0) / 100, cpuT / 100, c.limiting === "cpu"),
           row("net", "회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, `라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps`,
             c.port_mbit ? (s.net_tx_mbps || 0) / c.port_mbit : 0, portR, c.limiting === "bandwidth"),
-          row("disk", "디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-", null,
+          row("disk", "디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-", diskFit,
             s.disk_total_gb ? (s.disk_used_gb || 0) / s.disk_total_gb : 0, diskW / 100, false)),
         h("div", { class: "cap-traffic" + (c.limiting === "traffic" ? " lead" : "") }, c.traffic_unlimited
           ? [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, "무제한")),
