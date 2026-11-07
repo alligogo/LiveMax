@@ -90,3 +90,20 @@ def test_live_log_uses_readable_name(paths, settings):
         h.flush()
     line = (paths.logs / "live-live2.log").read_text(encoding="utf-8").strip().splitlines()[-1]
     assert "[OVH1 · LIVE 2 · live2] 테스트 줄" in line
+
+
+def test_day_start_is_last_daily_restart_base(settings):
+    from datetime import datetime, timezone
+    settings["restart"]["base_utc"] = "15:00"  # 한국 자정
+    t = datetime(2026, 11, 7, 3, 0, tzinfo=timezone.utc).timestamp()   # 한국 12:00 → 그날 자정(전날 15:00 UTC)
+    assert config.day_start(settings, t) == datetime(2026, 11, 6, 15, 0, tzinfo=timezone.utc).timestamp()
+    t2 = datetime(2026, 11, 7, 15, 30, tzinfo=timezone.utc).timestamp()  # 한국 00:30 → 30분 전 자정
+    assert config.day_start(settings, t2) == datetime(2026, 11, 7, 15, 0, tzinfo=timezone.utc).timestamp()
+
+
+def test_overview_has_day_start_and_media_totals(client):
+    from test_api import _ready
+    _ready(client)
+    ov = client.get("/api/overview").json()
+    assert ov["day_start"] <= ov["server_time"] < ov["day_start"] + 86400
+    assert set(ov["media"]) == {"video", "audio"} and "n" in ov["media"]["video"]

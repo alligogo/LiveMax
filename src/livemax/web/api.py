@@ -236,6 +236,19 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return float(r["k"])
         return 5000.0
 
+    _MEDIA_TOT: dict = {"t": 0.0, "v": {}}
+
+    def _media_totals(conn) -> dict:
+        """서버 박스 디스크 아래 '현재 비디오 N개 (용량)·음악 N개' — 1분 동안 기억 (5초마다 DB 를 훑지 않게)."""
+        now = time.monotonic()
+        if now - _MEDIA_TOT["t"] > 60:
+            v = {k: {"n": 0, "bytes": 0} for k in ("video", "audio")}
+            for r in conn.execute("SELECT kind, COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM media_files GROUP BY kind"):
+                if r["kind"] in v:
+                    v[r["kind"]] = {"n": r["n"], "bytes": r["b"]}
+            _MEDIA_TOT.update(t=now, v=v)
+        return _MEDIA_TOT["v"]
+
     def overview_data(conn) -> dict:
         snap = sup.snapshot()
         lives = [live_view(lv, snap) for lv in store.all()]
@@ -281,6 +294,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85),
                          "options": cap.options, "usage": cap.usage},
             "max_lives": _max_lives(),
+            "day_start": config.day_start(settings),  # 화면의 '(1일)' 숫자 기준 — 일일 재시작 시각(기본 한국 자정)
+            "media": _media_totals(conn),
             "alerts": alerts[:30], "reboot_required": REBOOT_FLAG.exists(),
         }
 

@@ -143,7 +143,8 @@ class LiveProc:
         now = time.time()
         # 경고 판정용: 일부러 한 재시작(설정 적용·매일 자동·재시작 버튼)은 세지 않는다 — 진짜 문제만
         d["restarts_hour"] = sum(1 for t, r in self.restarts if now - t < 3600 and not r.startswith(NOT_COUNTED))
-        day = [m for t, m in self.blips if now - t < 86400]
+        ds = config.day_start(self.sup.settings, now)  # 하루 = 일일 재시작 기준 시각(기본 한국 자정)부터
+        day = [m for t, m in self.blips if t >= ds]
         d["blips_day"] = {"n": len(day), "max": round(max(day), 1) if day else 0}
         d["restarts"] = [{"ts": t, "reason": r} for t, r in list(self.restarts)[-10:]]
         # 일부러 한 재시작(폴더 변경·재시작 버튼·매일 자동) 중인지 — 화면에 '영상 교체 중'으로 차분하게

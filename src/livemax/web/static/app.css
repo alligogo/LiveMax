@@ -297,7 +297,8 @@ a.ch-name:hover span { text-decoration: underline; }
 .cap-top b { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cap-k { color: var(--muted); }
 .cap-fit { display: block; margin-top: 4px; font-size: 12.5px; color: #c4c4c4; }
-.cap-fit .nw { white-space: nowrap; }
+.cap-fit .fit-li { line-height: 1.55; }
+.ps-sub, .cap-live .ps-sub { margin-left: 4px; font-size: 10px; font-weight: 500; opacity: .75; }
 .cap-fit b { color: #fff; font-weight: 700; font-variant-numeric: tabular-nums; }
 .cap-safe { margin-left: 7px; font-size: 11px; font-weight: 500; color: var(--faint); }
 .lead .cap-k, .cap-live.lead .cap-k { color: var(--text); font-weight: 800; }

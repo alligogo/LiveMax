@@ -155,6 +155,15 @@ def valid_folder_name(name: str) -> bool:
     return bool(FOLDER_RE.fullmatch(name or "")) and ".." not in name
 
 
+def day_start(settings: dict, now: float | None = None) -> float:
+    """'하루'의 시작 = 가장 최근의 하루 재시작 기준 시각 (설정 > 일일 재시작, 기본 UTC 15:00 = 한국 자정).
+    화면의 '(1일)' 숫자(끊김·밀림)는 이 시각에 0 으로 돌아간다 — 사용자가 자정 기준으로 따지기 쉽게."""
+    now = time.time() if now is None else now
+    base = hhmm_to_minutes(settings["restart"]["base_utc"])
+    t = datetime.fromtimestamp(now, timezone.utc).replace(hour=base // 60, minute=base % 60, second=0, microsecond=0).timestamp()
+    return t if t <= now else t - 86400
+
+
 def hhmm_to_minutes(s: str) -> int:
     m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", str(s).strip())
     if not m:
