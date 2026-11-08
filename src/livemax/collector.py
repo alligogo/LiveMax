@@ -57,13 +57,23 @@ class Collector:
                 snap = self.sup.snapshot()
                 running = 0
                 live_rows = []
+                # 음악 묶음 모드: 한 Liquidsoap 을 여러 라이브가 같이 쓴다 → 그 몫을 쓰는 라이브 수로 나눠 붙인다
+                share: dict[int, int] = {}
+                for s_ in snap.values():
+                    for x in (s_.get("video_pid"), s_.get("audio_pid"), s_.get("relay_pid")):
+                        if x:
+                            share[x] = share.get(x, 0) + 1
+                cpu_of: dict[int, float] = {}
                 for lid, s in snap.items():
                     if s.get("state") == "running":
                         running += 1
                     pids = [x for x in (s.get("video_pid"), s.get("audio_pid"), s.get("relay_pid")) if x]
+                    for x in pids:
+                        if x not in cpu_of:
+                            cpu_of[x] = self._cpu(x, dt, 0)  # 같은 pid 를 두 번 재면 두 번째가 0 이 된다
                     self.per_live[lid] = {
-                        "cpu": sum(self._cpu(x, dt, 0) for x in pids),
-                        "rss_mb": sum(sysmetrics.proc_rss_mb(x) or 0 for x in pids) or None,
+                        "cpu": sum(cpu_of[x] / share[x] for x in pids),
+                        "rss_mb": sum((sysmetrics.proc_rss_mb(x) or 0) / share[x] for x in pids) or None,
                     }
                     fresh = now - (s.get("relay_at") or 0) < 40  # 중계기 알림이 최근 것일 때만 (꺼진 라이브의 옛 값 X)
                     live_rows.append((now, lid, s.get("state"), s.get("speed"), self.per_live[lid]["cpu"],

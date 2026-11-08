@@ -1373,6 +1373,14 @@ function serverCard(s, card) {
   const [cpuT, cpuF] = safe("CPU 평균", "%", s.settings.cpu_target_pct, 10, 95, 50);
   const [portU, portF] = safe("회선 사용", "%", s.settings.port_use_pct, 10, 100, 80);
   const [diskW, diskF] = safe("디스크", "%", s.settings.disk_warn_pct, 50, 99, 85);
+  // 음악 프로그램 채널별 묶음 (메모리 절약) — LiveMax 가 다시 켜질 때 적용
+  const shared = h("input", { type: "checkbox" }); shared.checked = !!s.settings.audio_shared;
+  const sharedLab = h("label", { class: "check" + (shared.checked ? " on" : "") }, shared,
+    h("span", { class: "nm" }, h("b", {}, "음악 프로그램을 채널별로 묶기 (메모리 절약)"),
+      h("span", { class: "desc" }, "라이브마다 하나씩 띄우던 음악 프로그램을 채널마다 하나로 — 라이브 10개 기준 약 835MB → 150MB. ",
+        "대신 그 프로그램이 멈추면 그 채널 라이브들의 음악이 같이 다시 켜집니다.")));
+  shared.addEventListener("change", () => sharedLab.classList.toggle("on", shared.checked));
+  const pendingShared = !!s.settings.audio_shared !== !!s.settings.audio_shared_active;
   return card("서버",
     h("label", { class: "field" }, h("span", {}, "서버명"), name,
       h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
@@ -1385,11 +1393,16 @@ function serverCard(s, card) {
     h("div", { class: "field" }, h("span", {}, "안전선"),
       h("div", { class: "safe-grid" }, memF, cpuF, portF, diskF),
       h("div", { class: "hint" }, "'몇 개 더 추가 가능'은 메모리·CPU·회선이 이 선을 넘지 않는 만큼으로 계산합니다. 라이브 화면 서버 박스 막대의 세로 눈금이 이 선이에요. 디스크는 계산에 안 넣고 넘으면 색만 바뀝니다.")),
+    h("div", { class: "field" }, h("span", {}, "음악 프로그램"), sharedLab,
+      h("div", { class: "hint" + (pendingShared ? " warn" : "") }, pendingShared
+        ? `저장됨 — 다음 업데이트(또는 SSH 에서 sudo livemax restart) 때 적용됩니다. 지금은 ${s.settings.audio_shared_active ? "묶음" : "라이브마다 하나"}로 돌고 있어요.`
+        : `지금: ${s.settings.audio_shared_active ? "채널별 묶음" : "라이브마다 하나"}. 바꾸면 다음 업데이트(또는 sudo livemax restart) 때 적용됩니다 — 그때 라이브들이 차례로 다시 켜져요.`)),
     h("button", { class: "btn primary", onclick: async () => {
       try {
         await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value),
           port_mbit: Number(port.value), monthly_traffic_tb: Number(traffic.value),
-          mem_reserve_mb: Number(memR.value), cpu_target_pct: Number(cpuT.value), port_use_pct: Number(portU.value), disk_warn_pct: Number(diskW.value) });
+          mem_reserve_mb: Number(memR.value), cpu_target_pct: Number(cpuT.value), port_use_pct: Number(portU.value), disk_warn_pct: Number(diskW.value),
+          audio_shared: shared.checked });
         setServerName(name.value); toast("저장했습니다"); showSystem();
       } catch (e) { toast(e.message, true); }
     } }, "저장"));

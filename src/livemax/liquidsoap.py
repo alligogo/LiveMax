@@ -166,3 +166,55 @@ def write(live: Live, paths: Paths, settings: dict) -> Path:
     tmp.write_text(render(live, paths, settings), encoding="utf-8")
     tmp.replace(p)
     return p
+
+
+# ---------------------------------------------------------------- 채널별 묶음 (B안, DESIGN 11-D 19)
+# 라이브마다 Liquidsoap 을 하나씩 띄우면 같은 엔진(언어 실행기·라이브러리)이 라이브 수만큼 메모리에 올라간다
+# (실측 10개: 따로 835MB → 묶음 152MB). 같은 채널의 라이브들을 프로그램 하나에 넣되, 라이브마다의 재생 목록·
+# 중복방지·시계·버퍼·출력 포트는 그대로 따로 둔다 → ffmpeg 쪽은 바뀌는 것이 없다 (각자 127.0.0.1:<port>).
+# 위험은 '그 프로그램이 죽으면 그 채널 라이브들 음악이 같이 멈춤' — 그래서 채널 단위(최대 10개)로만 묶는다.
+
+def group_key(live: Live) -> str:
+    """같은 Liquidsoap 에 들어갈 묶음: 같은 채널. 채널이 없으면 혼자."""
+    return f"ch-{live.channel_id}" if live.channel_id else f"solo-{live.id}"
+
+
+def group_log_name(key: str) -> str:
+    return f"audio-g-{key}"
+
+
+def _split(text: str) -> tuple[list[str], list[str]]:
+    lines = text.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("live_id ="))
+    return lines[:i], lines[i:]
+
+
+def render_group(lives: list[Live], paths: Paths, settings: dict, key: str) -> str:
+    """여러 라이브를 Liquidsoap 하나에. 라이브마다 'def setup_<id>() = … end' 안에 기존 스크립트를 그대로 넣어
+    이름이 섞이지 않게 한다 (history·next_path 등은 함수 안 지역 변수)."""
+    lives = sorted(lives, key=lambda lv: lv.id)
+    head, _ = _split(render(lives[0], paths, settings))
+    log_line = f"settings.log.file.path.set({q(paths.logs / (group_log_name(key) + '.log'))})"
+    head = [log_line if ln.startswith("settings.log.file.path.set(") else ln for ln in head]
+    head[0] = f"# 자동 생성 — 직접 수정하지 말 것 (묶음 {key}: {', '.join(lv.id for lv in lives)}, LiveMax)"
+    out = head[:]
+    for lv in lives:
+        _, body = _split(render(lv, paths, settings))
+        fn = "setup_" + "".join(c if c.isalnum() else "_" for c in lv.id)
+        out.append(f"def {fn}() =")
+        out += ["  " + ln if ln else "" for ln in body]
+        out.append("  ()")
+        out.append("end")
+        out.append(f"{fn}()")
+    return "\n".join(out) + "\n"
+
+
+def write_group(lives: list[Live], paths: Paths, settings: dict, key: str, text: str | None = None) -> Path:
+    for lv in lives:
+        write_m3u(lv, paths)
+    p = paths.run_dir / f"{key}.group.liq"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(text if text is not None else render_group(lives, paths, settings, key), encoding="utf-8")
+    tmp.replace(p)
+    return p

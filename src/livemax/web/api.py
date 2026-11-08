@@ -621,6 +621,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if not (name == "livemaxd" or any(name == f"{p}-{lv.id}" for lv in store.all() for p in ("live", "audio", "tls"))):
             return err("로그 없음", 404)
         f = paths.logs / f"{name}.log"
+        if name.startswith("audio-") and getattr(sup, "shared_audio", False):  # 음악 묶음 모드: 채널 묶음 로그를 보여 준다
+            f = paths.logs / f"{sup.audio_log_name(name[len('audio-'):])}.log"
         if not f.exists():
             return {"name": name, "text": "(아직 기록 없음)"}
         lines = max(20, min(int(lines), 2000))
@@ -1002,6 +1004,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "reboot_packages": REBOOT_FLAG.with_suffix(".pkgs").read_text().split() if REBOOT_FLAG.with_suffix(".pkgs").exists() else [],
             "settings": {"restart_base_utc": settings["restart"]["base_utc"], "server_name": config.server_name(settings),
                          "max_lives": _max_lives(), "tls_relay": settings["output"]["tls_relay"]["enabled"],
+                         "audio_shared": bool(settings.get("audio_shared", False)),
+                         "audio_shared_active": bool(getattr(sup, "shared_audio", False)),
                          "port_mbit": settings["capacity"].get("port_mbit", 1000),
                          "monthly_traffic_tb": settings["capacity"].get("monthly_traffic_tb", 0),
                          # 안전선 (용량 계산·서버 박스 막대 눈금)
@@ -1202,6 +1206,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                     key, v = "port_use_ratio", round(v / 100, 3)
                 config.save_settings_override(paths, ["capacity", key], v)
                 settings["capacity"][key] = v
+        if "audio_shared" in b:  # 음악 프로그램 채널별 묶음 — LiveMax 가 다시 켜질 때 적용
+            config.save_settings_override(paths, ["audio_shared"], bool(b["audio_shared"]))
+            settings["audio_shared"] = bool(b["audio_shared"])
         if b.get("lives_view") in ("grid", "list", "cctv"):
             config.save_settings_override(paths, ["ui", "lives_view"], b["lives_view"])
             settings.setdefault("ui", {})["lives_view"] = b["lives_view"]

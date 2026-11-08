@@ -137,7 +137,8 @@ class LiveProc:
             d = dict(self.st)
         d["desired"] = self.desired
         d["video_pid"] = self.video.pid if self.video and self.video.poll() is None else None
-        d["audio_pid"] = self.audio.pid if self.audio and self.audio.poll() is None else None
+        d["audio_pid"] = (self.sup.group_pid(self.id) if self.sup.shared_audio
+                          else (self.audio.pid if self.audio and self.audio.poll() is None else None))
         rp = getattr(self.relay, "proc", None)  # 중계기(새 방식·stunnel)도 라이브 몫 CPU·메모리에 넣는다
         d["relay_pid"] = rp.pid if rp is not None and rp.poll() is None else None
         now = time.time()
@@ -170,7 +171,9 @@ class LiveProc:
             self.first_run = True
             self.set(state="starting", message="시작 중")
         self.event("info", "시작")
-        for target in (self._audio_loop, self._video_loop):
+        if self.sup.shared_audio:
+            self.sup.groups_kick()  # 음악은 채널 묶음 프로그램이 맡는다 (없으면 바로 띄움)
+        for target in ((self._video_loop,) if self.sup.shared_audio else (self._audio_loop, self._video_loop)):
             t = threading.Thread(target=target, name=f"{self.id}-{target.__name__}", daemon=True)
             t.start()
             self.threads.append(t)
@@ -179,7 +182,9 @@ class LiveProc:
         with self.lock:
             self.desired = False
         self._kill_video()
-        self._kill(self.audio)
+        self._kill(self.audio)  # 묶음 모드면 self.audio 는 None — 묶음 프로그램은 다른 라이브가 쓰므로 건드리지 않는다
+        if self.sup.shared_audio:
+            self.sup.groups_kick()  # 그 채널에 송출 중인 라이브가 하나도 없으면 묶음 프로그램도 끈다
         for t in self.threads:
             t.join(timeout=15)
         self.threads = []
@@ -194,10 +199,12 @@ class LiveProc:
         """그 라이브만 재시작. audio_too=False 면 영상(ffmpeg)만 — 음악 흐름 유지."""
         self.restarts.append((time.time(), reason))
         self.event("warn" if "정지" in reason or "speed" in reason else "info", f"재시작: {reason}")
-        if audio_too:
+        if audio_too and not self.sup.shared_audio:
             self.stop(reason)
             self.start()
             return
+        if audio_too:
+            self.sup.groups_kick()  # 묶음 모드: 재생 방식·크로스페이드가 바뀌면 묶음 스크립트가 달라져 그 채널 음악이 다시 켜진다
         self.pending_reason = reason
         self.set(state="restarting", message=reason)
         self._kill_video(keep_relay=True)
@@ -501,6 +508,10 @@ class Supervisor:
         self.procs: dict[str, LiveProc] = {}
         self._labels: dict[str, tuple[float, str]] = {}
         self._slow_now: dict[str, float] = {}  # 지금 밀리는 중인 라이브 → 시작 시각
+        # 음악 프로그램 채널별 묶음 (B안). 켜고 끄기는 LiveMax 가 다시 켜질 때(업데이트·재시작) 적용 — 도중에 바꾸면 꼬인다
+        self.shared_audio = bool(settings.get("audio_shared", False))
+        self.groups: dict[str, dict] = {}  # 묶음 키 → {proc, sig, fails, next_try, started, members}
+        self._glock = threading.Lock()
         self._mass_slow_at = 0.0
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -728,6 +739,77 @@ class Supervisor:
                 p.desired = False
                 p._kill_video()
                 p._kill(p.audio)
+        for g in list(self.groups.values()):
+            LiveProc._kill(g.get("proc"))
+
+    # ---------------------------------------------------------------- 음악 묶음 (B안)
+    def group_pid(self, live_id: str) -> int | None:
+        lv = self.store.get(live_id)
+        g = self.groups.get(liquidsoap.group_key(lv)) if lv else None
+        pr = g and g.get("proc")
+        return pr.pid if pr and pr.poll() is None else None
+
+    def audio_log_name(self, live_id: str) -> str:
+        """사이트 로그 창의 '음악' 탭이 읽을 파일 이름 (묶음 모드면 채널 묶음 로그)."""
+        lv = self.store.get(live_id)
+        return liquidsoap.group_log_name(liquidsoap.group_key(lv)) if (self.shared_audio and lv) else f"audio-{live_id}"
+
+    def groups_kick(self) -> None:
+        """라이브 시작·정지·설정 변경 직후 바로 한 번 맞춘다 (5초 주기를 기다리지 않게)."""
+        threading.Thread(target=self.groups_tick, name="groups-kick", daemon=True).start()
+
+    def groups_tick(self) -> None:
+        """채널마다: 송출 중인 라이브가 하나라도 있으면 묶음 프로그램을 띄우고, 없으면 끈다.
+        묶음에는 그 채널의 모든 라이브(꺼 둔 것도)를 넣는다 — 라이브 하나를 켜고 끌 때마다 같은 채널의 다른 라이브
+        음악을 다시 켜지 않게. 라이브 추가·삭제·채널 변경·재생 방식/크로스페이드 변경으로 스크립트가 달라질 때만 다시 켠다."""
+        if not self._glock.acquire(blocking=False):
+            return
+        try:
+            now = time.time()
+            members: dict[str, list] = {}
+            for lv in self.store.all():
+                if lv.audio_folders:
+                    members.setdefault(liquidsoap.group_key(lv), []).append(lv)
+            for key in list(self.groups):
+                if key not in members:
+                    LiveProc._kill(self.groups.pop(key).get("proc"))
+            for key, lives in members.items():
+                g = self.groups.setdefault(key, {"proc": None, "sig": None, "fails": 0, "next_try": 0.0, "started": 0.0})
+                want = any((self.procs.get(lv.id) and self.procs[lv.id].desired) for lv in lives)
+                pr = g["proc"]
+                if pr is not None and pr.poll() is not None:  # 죽음
+                    rc = pr.returncode
+                    g["fails"] = 0 if now - g["started"] > 120 else g["fails"] + 1
+                    g["next_try"] = now + float(self.settings["supervisor"]["restart_backoff_seconds"][
+                        min(g["fails"], len(self.settings["supervisor"]["restart_backoff_seconds"]) - 1)])
+                    g["proc"] = pr = None
+                    if want:
+                        log.error("음악 묶음 %s 종료 rc=%s — 다시 띄움 (라이브 %s)", key, rc, ", ".join(lv.id for lv in lives))
+                        for lv in lives:
+                            p = self.procs.get(lv.id)
+                            if p and p.desired:
+                                p.event("error", f"오디오(Liquidsoap 묶음 {key}) 종료 rc={rc} — 재기동")
+                if not want:
+                    if pr is not None:
+                        LiveProc._kill(pr)
+                        g["proc"] = None
+                    continue
+                script = liquidsoap.render_group(lives, self.paths, self.settings, key)
+                if pr is not None and g["sig"] == script:
+                    continue
+                if pr is not None:  # 묶음 구성이 바뀜 → 그 채널 음악만 다시
+                    log.info("음악 묶음 %s 구성 변경 — 다시 띄움", key)
+                    LiveProc._kill(pr)
+                    g["proc"] = None
+                elif now < g["next_try"]:
+                    continue
+                path = liquidsoap.write_group(lives, self.paths, self.settings, key, script)
+                g["proc"] = subprocess.Popen([LIQUIDSOAP, *LIQUIDSOAP_ARGS, str(path)], stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                g["sig"], g["started"] = script, now
+                log.info("음악 묶음 %s 시작 (라이브 %d개: %s)", key, len(lives), ", ".join(lv.id for lv in lives))
+        finally:
+            self._glock.release()
 
     # ---------------------------------------------------------------- 타이머
     def _finish_timer(self, lv, p: LiveProc | None) -> None:
@@ -782,6 +864,11 @@ class Supervisor:
     def loop(self) -> None:
         while not self.stop_event.wait(5):
             now = time.time()
+            if self.shared_audio:
+                try:
+                    self.groups_tick()
+                except Exception:  # noqa: BLE001
+                    log.exception("음악 묶음 관리 실패")
             wd = self.settings["watchdog"]
             for lid, p in list(self.procs.items()):
                 try:
