@@ -17,12 +17,13 @@ import signal
 import threading
 import time
 
-from . import channels, cleanup, config, cpuwatch, db, fetcher, ingest, logsetup, notify, prefetch, thumbs, updatecheck
+from . import channels, cleanup, config, cpuwatch, db, fetcher, ingest, logsetup, notify, prefetch, sysmetrics, thumbs, updatecheck
 from .collector import Collector
 from .paths import get_paths
 from .supervisor import Supervisor
 
 log = logging.getLogger("livemax.daemon")
+SWAP_IO_ALERT_PPS = 50  # 스왑 활동 알림 기준: 초당 페이지(4KB) 수, 3분 연속
 
 
 class App:
@@ -129,8 +130,20 @@ class App:
         flag = self.paths.state / "host" / "reboot-required"
         conn = db.connect(self.paths.db)
         last_ev = (conn.execute("SELECT MAX(id) AS m FROM events").fetchone()["m"] or 0)
+        swap_prev, swap_hot = sysmetrics.read_swap_io(), 0
         while not self.stop.wait(60):
             try:
+                # 스왑을 계속 오가는 상태 = 안 쓰던 메모리를 다시 자꾸 꺼내 씀 = 메모리가 정말 모자람 (방송이 느려질 수 있음)
+                # 한 번 옮겨 둔 것(스왑 사용량)은 괜찮고, 계속 오가는 것(활동량)만 본다. 초당 50페이지(약 200KB) 넘게 3분 연속이면 알림
+                cur = sysmetrics.read_swap_io()
+                rate, swap_prev = (cur - swap_prev) / 60.0, cur
+                swap_hot = swap_hot + 1 if rate >= SWAP_IO_ALERT_PPS else 0
+                if swap_hot == 3:
+                    msg = (f"메모리 부족 — 스왑을 계속 쓰는 중 (초당 {rate:.0f}페이지). 방송이 느려질 수 있습니다. "
+                           "라이브 수를 줄이거나 메모리를 많이 쓰는 라이브를 재시작하세요")
+                    log.warning(msg)
+                    db.add_event(conn, "error", "system", msg)
+                    n.send("system", "메모리 부족 (스왑 사용 중)", msg, dedupe_s=3600)
                 pct = self.collector.latest.get("disk_pct")
                 if pct and pct >= float(self.settings["cleanup"]["disk_warn_percent"]):
                     n.send("system", f"디스크 {pct:.0f}% 사용 중", "비디오·음악 파일을 정리하세요", dedupe_s=6 * 3600)

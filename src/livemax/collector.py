@@ -40,6 +40,7 @@ class Collector:
                 cpu, steal, iowait = sysmetrics.cpu_percent(prev_cpu, cur)
                 prev_cpu = cur
                 mem_used, mem_total = sysmetrics.read_mem()
+                swap_used, swap_total = sysmetrics.read_swap()
                 d_used, d_total, d_pct = sysmetrics.disk_usage(self.paths.root)
                 tx = rx = None
                 if iface:
@@ -71,6 +72,7 @@ class Collector:
                                       s.get("delay_s") if fresh else None))
                 self.latest = {"ts": now, "cpu_pct": cpu, "steal_pct": steal, "iowait_pct": iowait,
                                "mem_used_mb": mem_used, "mem_total_mb": mem_total, "disk_used_gb": d_used,
+                               "swap_used_mb": swap_used, "swap_total_mb": swap_total,
                                "disk_total_gb": d_total, "disk_pct": d_pct, "net_tx_mbps": tx, "net_rx_mbps": rx,
                                "month_tx_bytes": month_tx, "lives_running": running, "iface": iface}
                 # 한 번의 짧은 트랜잭션으로 (라이브 15개면 예전엔 쓰기 16번)

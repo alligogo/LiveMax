@@ -478,7 +478,7 @@ function renderSide(side, ov) {
       kind !== "cpu" && frac != null ? h("small", { class: "cap-safe" }, `${Math.round(Math.max(0, frac) * 100)}%`) : null), h("b", { class: over(frac, safe) ? "over" : "" }, over(frac, safe) ? ico("warn") : null, v)),
     frac !== undefined ? bar(frac, safe, kind) : null,
     note ? h("div", { class: "cap-note" }, note) : null);
-  const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
+  const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, swapU = s.swap_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
   const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.8, diskW = c.disk_warn_pct ?? 85;
   // 지금 송신 속도 그대로 한 달(이번 달 일수) 내내 보낸다면 — 대략 예상
   const sd = new Date((ov.server_time || Date.now() / 1000) * 1000);
@@ -516,7 +516,10 @@ function renderSide(side, ov) {
             maxGuess ? h("div", { class: "cap-note" }, `예상 최대 ${maxGuess.n}개 (${maxGuess.by})`) : null) : null),
         h("div", { class: "cap-rows" },
           row("mem", "메모리", memT ? `${fmt.num(memU / 1024, 1)} / ${fmt.num(memT / 1024, 1)} GB` : "-",
-            memT ? `라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 남은 여유분 ${Math.max(0, Math.round(memT - reserve - memU)).toLocaleString()}MB` : null,
+            // 남은 여유분은 스왑으로 옮겨진 몫까지 '쓰는 메모리'로 쳐서 계산 (여유가 부풀려 보이지 않게)
+            memT ? [`라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 남은 여유분 ${Math.max(0, Math.round(memT - reserve - memU - swapU)).toLocaleString()}MB`,
+              swapU >= 50 ? h("span", { class: "swap-note", title: "리눅스가 한동안 안 쓰는 메모리를 비상 스왑으로 옮겨 둔 양 — 계속 오가지만 않으면 괜찮습니다 (오가면 알림)" },
+                ` · 스왑 ${fmt.num(swapU / 1024, 1)}GB`) : null] : null,
             memT ? memU / memT : 0, memT ? (memT - reserve) / memT : null, c.limiting === "ram"),
           row("cpu", "CPU", fmt.num(s.cpu_pct, 1, "%"), `라이브당 약 ${fmt.num(c.cpu_per_live_pct, 1)}% · steal ${fmt.num(s.steal_pct, 2, "%")}`,
             (s.cpu_pct || 0) / 100, cpuT / 100, c.limiting === "cpu"),

@@ -107,3 +107,26 @@ def test_overview_has_day_start_and_media_totals(client):
     ov = client.get("/api/overview").json()
     assert ov["day_start"] <= ov["server_time"] < ov["day_start"] + 86400
     assert set(ov["media"]) == {"video", "audio"} and "n" in ov["media"]["video"]
+
+
+def test_swap_counts_as_used_memory_in_capacity(client):
+    """스왑으로 옮겨진 몫도 '쓰는 메모리'로 쳐서 남은 여유·예상 최대가 부풀려 보이지 않게."""
+    from test_api import _ready
+    _ready(client)
+    base = {"cpu_pct": 10.0, "mem_used_mb": 4600.0, "mem_total_mb": 7751.0, "disk_used_gb": 9, "disk_total_gb": 77,
+            "net_tx_mbps": 200.0, "month_tx_bytes": 0}
+    client.core.collector.latest = {**base, "swap_used_mb": 0.0}
+    no_swap = client.get("/api/overview").json()
+    import time as _t
+    _t.sleep(4.1)  # overview 4초 캐시
+    client.core.collector.latest = {**base, "swap_used_mb": 1400.0}
+    with_swap = client.get("/api/overview").json()
+    assert with_swap["system"]["swap_used_mb"] == 1400.0
+    assert with_swap["capacity"]["options"]["ram"] < no_swap["capacity"]["options"]["ram"]
+
+
+def test_sysmetrics_swap_readers():
+    from livemax import sysmetrics
+    used, total = sysmetrics.read_swap()
+    assert used >= 0 and total >= 0 and used <= total + 1
+    assert isinstance(sysmetrics.read_swap_io(), int)

@@ -591,3 +591,4 @@ span.logclick:hover, .alerts .logclick:hover { text-decoration: underline; text-
 /* 설정 > 휴대폰 알림: 텔레그램 · Pushbullet 묶음 */
 .notify-sec { margin-top: 16px; padding: 14px; border: 1px solid #333; border-radius: 10px; background: #1f1f1f; }
 .notify-h { font-weight: 700; font-size: 14px; margin-bottom: 10px; }
+.swap-note { color: #fbbf24; }

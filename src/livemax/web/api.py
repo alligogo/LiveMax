@@ -258,7 +258,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         on_air = [lv for lv in planned if lv["state"] == "running"]
         cap = capacity.compute(settings["capacity"], [_video_kbps(conn, lv) for lv in planned],
                                sysd.get("month_tx_bytes"), sysd.get("net_tx_mbps"), sysd.get("cpu_pct"),
-                               sysd.get("mem_used_mb"), sysd.get("mem_total_mb"),
+                               (sysd.get("mem_used_mb") + (sysd.get("swap_used_mb") or 0)) if sysd.get("mem_used_mb") is not None else None,
+                               sysd.get("mem_total_mb"),
                                live_cpu=[lv["cpu"] for lv in on_air if lv.get("cpu")], running=len(on_air))
         # 안전장치: 설정한 최대 개수까지 남은 칸보다 많이 '추가 가능'으로 보이지 않게
         left = max(0, _max_lives() - len(lives))
@@ -458,6 +459,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             pct = f"{ok * 100 // len(act)}%" if act else "-"
             sysd, cap = ov.get("system") or {}, ov.get("capacity") or {}
             mem = f"{(sysd.get('mem_used_mb') or 0) / 1024:.1f} / {(sysd.get('mem_total_mb') or 0) / 1024:.1f}GB" if sysd.get("mem_total_mb") else "-"
+            if (sysd.get("swap_used_mb") or 0) >= 50:
+                mem += f" (+스왑 {sysd['swap_used_mb'] / 1024:.1f}GB)"
             bad = [f"  ⚠ {nm(lv)} — {'중단' if lv['status'] == 'down' else '경고'}" for lv in act if lv["status"] in ("warn", "down")]
             return "\n".join([f"[{srv}] 가동률 {pct}",
                               f"라이브 {len(act)} · 정상 {ok} · 경고 {warn} · 중단 {down} · 끊김 {sum(len(drops(lv)) for lv in act)} (1일)",

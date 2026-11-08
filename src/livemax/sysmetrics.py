@@ -57,6 +57,34 @@ def read_mem() -> tuple[float, float]:
     return total - avail, total
 
 
+def read_swap() -> tuple[float, float]:
+    """(스왑 사용 MB, 스왑 전체 MB). 스왑이 없으면 (0, 0)."""
+    info: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":", 1)
+                info[k] = int(v.split()[0])
+    except OSError:
+        return 0.0, 0.0
+    total = info.get("SwapTotal", 0) / 1024
+    return total - info.get("SwapFree", 0) / 1024, total
+
+
+def read_swap_io() -> int:
+    """지금까지 스왑으로 들어가고 나온 페이지 수 합 (pswpin + pswpout). 두 번 읽은 차이 ÷ 시간 = 스왑 활동량."""
+    n = 0
+    try:
+        with open("/proc/vmstat") as f:
+            for line in f:
+                k, _, v = line.partition(" ")
+                if k in ("pswpin", "pswpout"):
+                    n += int(v)
+    except (OSError, ValueError):
+        return 0
+    return n
+
+
 def disk_usage(path: Path) -> tuple[float, float, float]:
     """(사용 GB, 전체 GB, 사용률%)"""
     u = shutil.disk_usage(path)
