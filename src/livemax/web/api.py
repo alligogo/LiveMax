@@ -54,6 +54,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     store = sup.store
     chstore = channels.ChannelStore(paths)
     notifier = getattr(core, "notifier", None) or notify.Notifier(paths, settings)
+    core.notifier = notifier  # 텔레그램 명령 답장(notifier.answer)을 어디서든 같은 객체로
     # 호스트의 /var/run/reboot-required 를 livemax tick(호스트 타이머)이 data/state/host 로 복사해 준다
     REBOOT_FLAG = paths.state / "host" / "reboot-required"
     app = FastAPI(title="LiveMax", docs_url=None, redoc_url=None, openapi_url=None)
@@ -429,6 +430,67 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     def _max_lives() -> int:
         return int(settings.get("max_lives") or 40)
+
+    # ------------------------------------------------------------------ 텔레그램 명령 (읽기 전용)
+    _NOT_DROP = ("일일 재시작", "설정 적용", "사용자 재시작", "유튜브 짧은 재연결")
+
+    def _tg_answer(text: str) -> str | None:
+        """텔레그램 대화방 명령 → 답장. /상태 /오늘 /라이브 N /도움말 (영어 /status /today /live N 도 됨)."""
+        t = text.strip().lstrip("/").split("@")[0]
+        cmd, _, arg = t.partition(" ")
+        cmd = cmd.lower()
+        with db.session(paths.db) as c:
+            ov = overview_data(c)
+        srv = notifier.label()
+        lives, ds = ov["lives"], ov.get("day_start", 0)
+        chn = {ch["id"]: ch["name"] for ch in ov.get("channels", [])}
+        nm = lambda lv: f"{lv['name']}" + (f" ({chn[lv['channel_id']]})" if chn.get(lv.get("channel_id")) else "")
+
+        def drops(lv):
+            st = max(float(lv.get("session_started_at") or 0), ds)
+            return [r for r in lv.get("restarts", []) if r["ts"] >= st and not str(r["reason"]).startswith(_NOT_DROP)]
+
+        if cmd in ("상태", "status"):
+            act = [lv for lv in lives if lv.get("desired")]
+            ok = sum(lv["status"] == "ok" for lv in act)
+            warn = sum(lv["status"] == "warn" for lv in act)
+            down = sum(lv["status"] == "down" for lv in act)
+            pct = f"{ok * 100 // len(act)}%" if act else "-"
+            sysd, cap = ov.get("system") or {}, ov.get("capacity") or {}
+            mem = f"{(sysd.get('mem_used_mb') or 0) / 1024:.1f} / {(sysd.get('mem_total_mb') or 0) / 1024:.1f}GB" if sysd.get("mem_total_mb") else "-"
+            bad = [f"  ⚠ {nm(lv)} — {'중단' if lv['status'] == 'down' else '경고'}" for lv in act if lv["status"] in ("warn", "down")]
+            return "\n".join([f"[{srv}] 가동률 {pct}",
+                              f"라이브 {len(act)} · 정상 {ok} · 경고 {warn} · 중단 {down} · 끊김 {sum(len(drops(lv)) for lv in act)} (1일)",
+                              f"CPU {sysd.get('cpu_pct', 0):.0f}% · 메모리 {mem} · 회선 {sysd.get('net_tx_mbps', 0):.0f}Mbps",
+                              f"추가 가능 {cap.get('can_add', '-')}개"] + bad)
+        if cmd in ("오늘", "today"):
+            rows = []
+            for lv in lives:
+                d, b = drops(lv), lv.get("blips_day") or {}
+                if d or b.get("n"):
+                    rows.append(f"• {nm(lv)}: 끊김 {len(d)} · 밀림 {b.get('n', 0)}회" + (f" (최대 {b.get('max')}초)" if b.get("n") else ""))
+            return f"[{srv}] 오늘(자정부터)\n" + ("\n".join(rows) if rows else "문제 없음 ✅")
+        if cmd in ("라이브", "live"):
+            q = arg.strip().lower()
+            hit = [lv for lv in lives if q and (lv["name"].lower() == q or lv["name"].lower() == f"live {q}" or lv["id"] == q)]
+            if not hit:
+                return "그 라이브를 못 찾았습니다 — 예: /라이브 18"
+            lv = hit[0]
+            label = {"ok": "정상", "warn": "경고", "down": "중단", "restarting": "재시작중", "stopped": "대기중", "waiting": "다음 방송 대기"}
+            out = [f"[{srv}] {nm(lv)} — {label.get(lv['status'], lv['status'])}"]
+            if lv.get("state") == "running":
+                out.append(f"{(lv.get('bitrate_kbps') or 0):,.0f}kbps · speed {lv.get('speed') or 0:.2f}x")
+            if lv.get("song_title"):
+                out.append(f"♪ {lv['song_title']}")
+            b = lv.get("blips_day") or {}
+            out.append(f"오늘 끊김 {len(drops(lv))} · 밀림 {b.get('n', 0)}회")
+            if lv.get("message"):
+                out.append(lv["message"])
+            return "\n".join(out)
+        return (f"[{srv}] LiveMax 명령\n/상태 — 전체 요약\n/오늘 — 오늘 끊김·밀림이 있었던 라이브\n"
+                "/라이브 18 — 라이브 하나 자세히\n(읽기 전용 — 조작은 사이트에서)")
+
+    notifier.answer = _tg_answer
 
     @app.get("/api/overview")
     def overview(request: Request):
@@ -993,10 +1055,13 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     def _notify_view() -> dict:
         cfg = notifier.cfg
-        tok = notify.read_token(paths)
+        tok, tgt = notify.read_token(paths), notify.read_tg_token(paths)
         return {"enabled": bool(cfg.get("enabled")), "label": notifier.label(),
                 "categories": dict(cfg["categories"]), "token_masked": secrets.mask(tok) if tok else "",
                 "last_error": notifier.last_error,
+                "tg_enabled": bool(cfg.get("telegram_enabled")), "tg_token_masked": secrets.mask(tgt) if tgt else "",
+                "tg_chat": cfg.get("telegram_chat_name", "") if cfg.get("telegram_chat_id") else "",
+                "tg_commands": bool(cfg.get("telegram_commands", True)), "tg_last_error": notifier.tg_last_error,
                 "catalog": [{"key": k, "label": lb, "desc": ds} for k, lb, ds, _ in notify.CATEGORIES]}
 
     @app.put("/api/system/notify")
@@ -1016,6 +1081,34 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         else:
             who = None
         cfg = notifier.cfg
+        # 텔레그램: 토큰(바꿀 때만) · 켜기 · 명령 받기
+        tgt = str(b.get("tg_token") or "").strip()
+        tg_who = None
+        if tgt:
+            if len(tgt) > 100 or not tgt.isascii() or " " in tgt or ":" not in tgt:
+                return err("텔레그램 봇 토큰 형식이 올바르지 않습니다 (예: 123456789:ABC...)")
+            try:
+                tg_who = notify.tg_check(tgt)
+            except notify.PushError as e:
+                return err(str(e))
+            if tgt != notify.read_tg_token(paths):  # 봇이 바뀌면 대화방 연결도 새로
+                cfg["telegram_chat_id"], cfg["telegram_chat_name"] = "", ""
+                config.save_settings_override(paths, ["notify", "telegram_chat_id"], "")
+                config.save_settings_override(paths, ["notify", "telegram_chat_name"], "")
+            secrets.write_secret(notify.tg_token_file(paths), tgt)
+        elif b.get("clear_tg_token"):
+            notify.tg_token_file(paths).unlink(missing_ok=True)
+            for k, v in (("telegram_enabled", False), ("telegram_chat_id", ""), ("telegram_chat_name", "")):
+                cfg[k] = v
+                config.save_settings_override(paths, ["notify", k], v)
+        if "tg_enabled" in b:
+            if b["tg_enabled"] and not (notify.tg_token_file(paths).exists() and cfg.get("telegram_chat_id")):
+                return err("텔레그램은 봇 토큰을 넣고 '연결 확인'을 먼저 하세요")
+            cfg["telegram_enabled"] = bool(b["tg_enabled"])
+            config.save_settings_override(paths, ["notify", "telegram_enabled"], cfg["telegram_enabled"])
+        if "tg_commands" in b:
+            cfg["telegram_commands"] = bool(b["tg_commands"])
+            config.save_settings_override(paths, ["notify", "telegram_commands"], cfg["telegram_commands"])
         if "enabled" in b:
             if b["enabled"] and not notify.token_file(paths).exists():
                 return err("Access Token 을 먼저 입력하세요")
@@ -1028,7 +1121,35 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                     cfg["categories"][k] = bool(v)
             config.save_settings_override(paths, ["notify", "categories"], dict(cfg["categories"]))
         db.add_event(request.state.conn, "info", "web", "알림 설정 변경" + (" (토큰 교체)" if tok else ""))
-        return {"ok": True, "message": f"저장했습니다{f' (Pushbullet 계정: {who})' if who else ''}", "notify": _notify_view()}
+        extra = "".join(x for x in (f" (Pushbullet 계정: {who})" if who else "", f" (텔레그램 봇: {tg_who})" if tg_who else ""))
+        return {"ok": True, "message": f"저장했습니다{extra}", "notify": _notify_view()}
+
+    @app.post("/api/system/notify/telegram/connect")
+    def telegram_connect(request: Request, b: dict = Body(default={})):
+        """'연결 확인': (새 토큰이 있으면 확인·저장하고) 봇에게 말을 건 대화방을 찾아 저장 + 테스트 메시지."""
+        tgt = str(b.get("tg_token") or "").strip() or notify.read_tg_token(paths)
+        if not tgt:
+            return err("텔레그램 봇 토큰을 먼저 입력하세요")
+        try:
+            bot = notify.tg_check(tgt)
+            chat_id, name = notify.tg_find_chat(tgt)
+            notifier.tg_send(f"[{notifier.label()}] LiveMax 와 연결됐습니다 ✅\n이제 이 대화방으로 알림이 옵니다.\n명령: /상태  /오늘  /라이브 번호", chat_id=chat_id, token=tgt)
+        except notify.PushError as e:
+            return err(str(e))
+        secrets.write_secret(notify.tg_token_file(paths), tgt)
+        cfg = notifier.cfg
+        for k, v in (("telegram_chat_id", chat_id), ("telegram_chat_name", name), ("telegram_enabled", True)):
+            cfg[k] = v
+            config.save_settings_override(paths, ["notify", k], v)
+        db.add_event(request.state.conn, "info", "web", f"텔레그램 알림 연결 ({bot})")
+        return {"ok": True, "message": f"{bot} 봇과 '{name}' 대화방을 연결하고 알림을 켰습니다. 휴대폰을 확인하세요", "notify": _notify_view()}
+
+    @app.post("/api/system/notify/telegram/test")
+    def telegram_test():
+        try:
+            return {"ok": True, "message": notifier.tg_test()}
+        except notify.PushError as e:
+            return err(str(e))
 
     @app.post("/api/system/notify/test")
     def notify_test():

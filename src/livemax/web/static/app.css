@@ -587,3 +587,7 @@ span.logclick:hover, .alerts .logclick:hover { text-decoration: underline; text-
 /* 휴대폰: 미니 관제 숫자 칸의 '(1일)' 은 숨김 — 칸이 3줄로 늘어나지 않게 (뜻은 PC·마우스 올림 설명에) */
 @media (max-width: 560px) { .pulse .ps-sub { display: none; } }
 .cap-live .cap-bar { background: #222; }
+
+/* 설정 > 휴대폰 알림: 텔레그램 · Pushbullet 묶음 */
+.notify-sec { margin-top: 16px; padding: 14px; border: 1px solid #333; border-radius: 10px; background: #1f1f1f; }
+.notify-h { font-weight: 700; font-size: 14px; margin-bottom: 10px; }

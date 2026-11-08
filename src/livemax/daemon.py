@@ -5,7 +5,8 @@
   ingest     : _incoming 검증 → 방송 폴더로 원자적 이동
   collector  : 시스템·라이브 지표
   cleanup    : 하루 1회 정리 (+ 긴급·수동)
-  notify     : Pushbullet 모바일 알림 (디스크·재부팅·업로드 거부 감시 포함)
+  notify     : Pushbullet·텔레그램 모바일 알림 (디스크·재부팅·업로드 거부 감시 포함)
+  telegram   : 텔레그램 봇 명령 받기 (/상태 /오늘 /라이브 N — 읽기 전용)
 """
 
 from __future__ import annotations
@@ -151,7 +152,8 @@ class App:
                              ("notify-watch", self._notify_loop), ("updatecheck", lambda: self.updates.run(self.stop)),
                              ("boot", self.supervisor.start_all), ("cpuwatch", lambda: cpuwatch.run(self.stop)),
                              ("fetch", lambda: self.fetcher.run(self.stop)),
-                             ("prefetch", lambda: prefetch.run(self.supervisor, self.stop))):
+                             ("prefetch", lambda: prefetch.run(self.supervisor, self.stop)),
+                             ("telegram", lambda: self.notifier.run_bot(self.stop))):
             threading.Thread(target=target, name=name, daemon=True).start()
         log.info("livemaxd %s 시작 (data=%s)", self.version, self.paths.root)
 

@@ -1393,43 +1393,72 @@ function serverCard(s, card) {
 }
 
 function notifyCard(n, card) {
-  const en = h("input", { type: "checkbox" }); en.checked = n.enabled;
-  const enLab = h("label", { class: "check" + (en.checked ? " on" : ""), style: "margin-bottom:14px" }, en, h("span", { class: "nm" }, "휴대폰 알림 켜기"));
-  en.addEventListener("change", () => enLab.classList.toggle("on", en.checked));
+  // 휴대폰 알림: 보낼 알림 종류는 공통, 받는 곳은 Pushbullet · 텔레그램 (둘 다 켜도 됨)
+  const toggle = (checked, label) => {
+    const cb = h("input", { type: "checkbox" }); cb.checked = checked;
+    const lab = h("label", { class: "check" + (checked ? " on" : ""), style: "margin-bottom:10px" }, cb, h("span", { class: "nm" }, label));
+    cb.addEventListener("change", () => lab.classList.toggle("on", cb.checked));
+    return [cb, lab];
+  };
+  const [en, enLab] = toggle(n.enabled, "Pushbullet 으로 받기");
+  const [tgEn, tgEnLab] = toggle(n.tg_enabled, "텔레그램으로 받기");
+  const [tgCmd, tgCmdLab] = toggle(n.tg_commands, "이 서버에서 명령 받기 (/상태 /오늘 /라이브 번호)");
   const tok = h("input", { class: "input", type: "password", autocomplete: "off",
     placeholder: n.token_masked ? `현재 토큰 ${n.token_masked} — 바꿀 때만 입력` : "o.xxxxxxxxxxxxxxxx (Access Token)" });
+  const tgTok = h("input", { class: "input", type: "password", autocomplete: "off",
+    placeholder: n.tg_token_masked ? `현재 토큰 ${n.tg_token_masked} — 바꿀 때만 입력` : "123456789:ABC... (BotFather 가 준 토큰)" });
   const cats = h("div", { class: "checks one" }, n.catalog.map((c) => {
     const cb = h("input", { type: "checkbox", value: c.key }); cb.checked = !!n.categories[c.key];
     const lab = h("label", { class: "check" + (cb.checked ? " on" : "") }, cb, h("span", { class: "nm" }, h("b", {}, c.label), h("span", { class: "desc" }, c.desc)));
     cb.addEventListener("change", () => lab.classList.toggle("on", cb.checked));
     return lab;
   }));
-  const msg = h("div", { class: "msg err" }, n.last_error ? `최근 발송 실패: ${n.last_error}` : "");
+  const msg = h("div", { class: "msg err" }, [n.last_error ? `Pushbullet 최근 실패: ${n.last_error}` : "", n.tg_last_error ? `  텔레그램 최근 실패: ${n.tg_last_error}` : ""].join(""));
   const save = async () => {
     msg.textContent = "";
     const categories = Object.fromEntries([...cats.querySelectorAll("input")].map((x) => [x.value, x.checked]));
     try {
-      const r = await api("PUT", "/api/system/notify", { enabled: en.checked, token: tok.value, categories });
+      const r = await api("PUT", "/api/system/notify", { enabled: en.checked, token: tok.value, categories,
+        tg_enabled: tgEn.checked, tg_token: tgTok.value, tg_commands: tgCmd.checked });
       toast(r.message); showSystem();
     } catch (e) { msg.textContent = e.message; }
   };
-  return card("모바일 알림 (Pushbullet)",
-    enLab,
-    h("label", { class: "field" }, h("span", {}, "Pushbullet Access Token"), tok,
-      h("div", { class: "hint" }, "휴대폰에 Pushbullet 앱 설치·로그인 → PC에서 pushbullet.com → Settings → Access Tokens → Create Access Token 으로 만든 값을 붙여 넣으세요. 저장할 때 토큰이 맞는지 확인합니다.")),
-    h("p", { class: "hint", style: "margin:-4px 0 14px" }, `알림 제목 앞에 [${n.label}] 이 붙습니다. 서버명은 왼쪽 '서버' 칸에서 바꿉니다.`),
-    h("span", { class: "flabel" }, "보낼 알림"), cats,
-    h("p", { class: "hint" }, "같은 내용은 10분에 한 번, 시간당 최대 20건까지만 보냅니다 (Pushbullet 무료는 월 500건)."),
+  const btn = (label, fn, dis, cls) => h("button", { class: "btn " + (cls || ""), disabled: !!dis, onclick: fn }, label);
+  const call = async (method, url, body, after) => { try { const r = await api(method, url, body); toast(r.message); if (after) showSystem(); } catch (e) { toast(e.message, true); } };
+  return card("휴대폰 알림",
+    h("span", { class: "flabel" }, "보낼 알림 (Pushbullet · 텔레그램 공통)"), cats,
+    h("p", { class: "hint" }, `알림 제목 앞에 [${n.label}] 이 붙습니다 (서버명은 왼쪽 '서버' 칸). 같은 내용은 10분에 한 번, 시간당 최대 20건까지만 보냅니다.`),
+
+    h("div", { class: "notify-sec" },
+      h("div", { class: "notify-h" }, "텔레그램 ", h("span", { class: "faint small" }, "— 빠르고 무료 (추천)")),
+      tgEnLab,
+      h("label", { class: "field" }, h("span", {}, "텔레그램 봇 토큰"), tgTok,
+        h("div", { class: "hint" }, "① 텔레그램에서 @BotFather 검색 → /newbot → 이름·아이디(끝이 bot) 정하기 → 받은 토큰을 여기에 붙여 넣기 ",
+          "② 만든 봇을 열고 '시작(Start)' 누르기 ③ 아래 '연결 확인' — 대화방을 자동으로 찾아 연결하고 테스트 메시지를 보냅니다.")),
+      n.tg_chat ? h("p", { class: "hint", style: "margin:-4px 0 10px" }, `연결된 대화방: ${n.tg_chat}`) : null,
+      tgCmdLab,
+      h("p", { class: "hint", style: "margin:-4px 0 10px" }, "대화방에 /상태 · /오늘 · /라이브 18 을 보내면 답합니다 (읽기 전용). 서버가 여러 대이고 같은 봇을 쓰면 한 서버에서만 켜세요."),
+      h("div", { class: "row" },
+        btn("연결 확인", () => call("POST", "/api/system/notify/telegram/connect", { tg_token: tgTok.value }, true), false, "primary"),
+        btn("테스트 알림", () => call("POST", "/api/system/notify/telegram/test"), !n.tg_chat),
+        n.tg_token_masked ? btn("토큰 삭제", async () => {
+          if (!confirm("텔레그램 봇 토큰을 지우고 텔레그램 알림을 끌까요?")) return;
+          call("PUT", "/api/system/notify", { clear_tg_token: true }, true);
+        }, false, "ghost") : null)),
+
+    h("div", { class: "notify-sec" },
+      h("div", { class: "notify-h" }, "Pushbullet"),
+      enLab,
+      h("label", { class: "field" }, h("span", {}, "Pushbullet Access Token"), tok,
+        h("div", { class: "hint" }, "휴대폰에 Pushbullet 앱 설치·로그인 → PC에서 pushbullet.com → Settings → Access Tokens → Create Access Token 으로 만든 값을 붙여 넣으세요. 무료는 월 500건까지.")),
+      h("div", { class: "row" },
+        btn("테스트 알림", () => call("POST", "/api/system/notify/test"), !n.token_masked),
+        n.token_masked ? btn("토큰 삭제", async () => {
+          if (!confirm("저장된 토큰을 지우고 Pushbullet 알림을 끌까요?")) return;
+          call("PUT", "/api/system/notify", { clear_token: true, enabled: false }, true);
+        }, false, "ghost") : null)),
     msg,
-    h("div", { class: "row", style: "margin-top:10px" },
-      h("button", { class: "btn primary", onclick: save }, "저장"),
-      h("button", { class: "btn", disabled: !n.token_masked, onclick: async () => {
-        try { const r = await api("POST", "/api/system/notify/test"); toast(r.message); } catch (e) { toast(e.message, true); }
-      } }, "테스트 알림 보내기"),
-      n.token_masked ? h("button", { class: "btn ghost", onclick: async () => {
-        if (!confirm("저장된 토큰을 지우고 알림을 끌까요?")) return;
-        try { await api("PUT", "/api/system/notify", { clear_token: true, enabled: false }); toast("토큰을 지웠습니다"); showSystem(); } catch (e) { toast(e.message, true); }
-      } }, "토큰 삭제") : null));
+    h("div", { class: "row", style: "margin-top:12px" }, btn("저장", save, false, "primary")));
 }
 
 // ------------------------------------------------------------------ 라우터
