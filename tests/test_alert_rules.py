@@ -130,3 +130,19 @@ def test_sysmetrics_swap_readers():
     used, total = sysmetrics.read_swap()
     assert used >= 0 and total >= 0 and used <= total + 1
     assert isinstance(sysmetrics.read_swap_io(), int)
+
+
+def test_boot_waits_when_memory_tight(paths, settings, monkeypatch):
+    """업데이트·부팅 순차 시작: 메모리가 빠듯하면 다음 라이브를 조금 미루고, 여유가 있으면 바로 넘어간다."""
+    sup, _ = _sup(paths, settings, n=1)
+    waits = []
+    monkeypatch.setattr(sup.stop_event, "wait", lambda t: waits.append(t) or False)
+    monkeypatch.setattr(supervisor.sysmetrics, "read_swap_io", lambda: 0)
+    monkeypatch.setattr(supervisor.sysmetrics, "read_mem", lambda: (2000.0, 7751.0))   # 여유 많음
+    assert sup._wait_for_memory(0, 10) is False and waits == []
+    seq = iter([(7300.0, 7751.0), (7300.0, 7751.0), (5000.0, 7751.0)])               # 빠듯 → 빠듯 → 풀림
+    monkeypatch.setattr(supervisor.sysmetrics, "read_mem", lambda: next(seq))
+    assert sup._wait_for_memory(0, 10) is False and waits == [5, 5]
+    waits.clear()
+    monkeypatch.setattr(supervisor.sysmetrics, "read_mem", lambda: (7600.0, 7751.0))   # 계속 빠듯 → 최대 30초만
+    assert sup._wait_for_memory(0, 10) is False and sum(waits) == 30

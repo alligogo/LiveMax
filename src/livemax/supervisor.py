@@ -33,7 +33,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import channels, concat, config, db, ffmpeg_cmd, liquidsoap, rtmp_relay, secrets, tls_relay
+from . import channels, concat, config, db, ffmpeg_cmd, liquidsoap, rtmp_relay, secrets, sysmetrics, tls_relay
 from .config import ConfigError, LiveStore
 from .logsetup import UTCFormatter, FMT
 from .paths import Paths
@@ -690,13 +690,36 @@ class Supervisor:
             if lv.timer_mode == "until" and float(lv.timer_until) <= now + 60:
                 self._finish_timer(lv, None)
                 continue
+            io0, t0 = sysmetrics.read_swap_io(), time.monotonic()
             if not first and self.stop_event.wait(gap):
+                return
+            if not first and self._wait_for_memory(io0, time.monotonic() - t0):
                 return
             first = False
             log.info("부팅 시작: %s%s", lv.id, " (새 방송)" if fresh else " (이어서)")
             if fresh:
                 self._new_session(lv.id)
             self.proc(lv.id).start()
+
+    def _wait_for_memory(self, io0: int, span: float, max_extra: float = 30.0) -> bool:
+        """업데이트·부팅 때 40개가 10초 간격으로 줄줄이 켜지면 메모리가 몰린다 (v2.10).
+        다음 라이브를 켜기 전에, 남은 메모리가 '남길 여유 + 300MB' 보다 적거나 방금 간격(span 초) 동안 스왑을 계속
+        오갔으면(초당 200페이지 이상) 5초씩 최대 max_extra 초까지 더 기다린다. 여유가 있으면 바로 넘어간다 (복구 시간 그대로).
+        stop 이 걸리면 True."""
+        reserve = float(self.settings.get("capacity", {}).get("mem_reserve_mb", 700)) + 300
+        waited = 0.0
+        while True:
+            used, total = sysmetrics.read_mem()
+            io1 = sysmetrics.read_swap_io()
+            busy_swap = (io1 - io0) / max(span, 1.0) >= 200
+            if ((total - used) >= reserve and not busy_swap) or waited >= max_extra:
+                return False
+            if waited == 0:
+                log.info("메모리가 빠듯해 다음 라이브 시작을 잠시 미룸 (남은 %.0fMB%s)", total - used, ", 스왑 활동" if busy_swap else "")
+            io0, span = io1, 5.0
+            if self.stop_event.wait(5):
+                return True
+            waited += 5
 
     def shutdown(self) -> None:
         self.stop_event.set()

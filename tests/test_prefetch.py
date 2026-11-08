@@ -40,7 +40,7 @@ def test_warm_handles_missing_and_real_files(tmp_path):
     assert prefetch.warm(tmp_path / "없음.m4a") is False
 
 
-def test_files_for_reads_now_and_next_song_and_clips(tmp_path):
+def test_files_for_reads_only_next_song_and_next_clips(tmp_path):
     m = _meta(tmp_path, [("a.mp4", 60), ("b.mp4", 60)])
     run = tmp_path / "run"
     run.mkdir()
@@ -55,5 +55,17 @@ def test_files_for_reads_now_and_next_song_and_clips(tmp_path):
         id, sup, lock, meta_path, st = "live1", Sup, threading.Lock(), m, {"out_time": 50.0}
 
     got = prefetch.files_for(Proc)
-    assert got[:2] == ["/m/now.m4a", "/m/next.m4a"]
-    assert [Path(p).name for p in got[2:]] == ["a.mp4", "b.mp4"]
+    # 지금 곡(now.m4a)·지금 영상(a.mp4)은 이미 읽히는 중이라 빼고, 다음 곡·다음 영상만 (v2.10 — 메모리 압박 줄이기)
+    assert got[0] == "/m/next.m4a" and "/m/now.m4a" not in got
+    assert [Path(p).name for p in got[1:]] == ["b.mp4"]
+
+
+def test_warm_asks_kernel_for_head_only(tmp_path, monkeypatch):
+    """파일 통째가 아니라 앞부분(PREFETCH_BYTES)만 미리 읽어 달라고 요청한다."""
+    import os
+    calls = []
+    monkeypatch.setattr(os, "posix_fadvise", lambda fd, off, ln, adv: calls.append((off, ln, adv)), raising=False)
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"z" * 10)
+    assert prefetch.warm(f) is True
+    assert calls == [(0, prefetch.PREFETCH_BYTES, os.POSIX_FADV_WILLNEED)]

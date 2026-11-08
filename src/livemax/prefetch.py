@@ -5,6 +5,11 @@
 소리·영상이 멈칫하고 유튜브는 그동안 아무것도 못 받는다.
 → 곧 재생될 파일을 커널에 '미리 읽어 두라'(posix_fadvise WILLNEED)고 알려 메모리(페이지 캐시)에 올려 둔다.
    복사·디코딩이 없어 CPU 는 거의 안 쓰고, 읽기는 커널이 뒤에서 한다. 메모리가 모자라면 커널이 알아서 비운다.
+
+v2.10: 앞부분(PREFETCH_BYTES)만, 다음 것만. 예전엔 지금·다음 영상을 파일 통째로(3~5분 영상 = 약 150MB) 요청해
+   라이브 40개면 영상 캐시가 수 GB 로 '자주 쓰는 메모리'가 되어, 음악 프로그램의 안 쓰는 메모리가 스왑으로 밀려나고
+   다시 꺼내 쓰는 일(스왑 활동 알림)이 생겼다. 목적은 '영상이 바뀌는 순간 디스크 대기 없애기'라 앞부분이면 충분 —
+   나머지는 ffmpeg 가 읽는 동안 커널 미리 읽기가 따라간다. 지금 재생 중인 영상·곡은 이미 읽히고 있으니 건너뛴다.
 """
 
 from __future__ import annotations
@@ -21,17 +26,18 @@ log = logging.getLogger("livemax.prefetch")
 
 LOOKAHEAD_S = 90.0  # 지금 영상 다음으로 이만큼(초) 안에 나올 영상들을 미리 읽는다 (짧은 클립이면 여러 개)
 MAX_FILES = 6
+PREFETCH_BYTES = 32 * 1024 * 1024  # 파일마다 앞부분 32MB 만 (5000k 영상 약 50초, 음악 한 곡은 통째로 들어감)
 
 
-def warm(path: str | Path) -> bool:
-    """파일을 메모리에 미리 올려 달라고 커널에 요청 (기다리지 않음)."""
+def warm(path: str | Path, length: int = PREFETCH_BYTES) -> bool:
+    """파일 앞부분(length 바이트, 0 = 통째로)을 메모리에 미리 올려 달라고 커널에 요청 (기다리지 않음)."""
     try:
         fd = os.open(str(path), os.O_RDONLY)
     except OSError:
         return False
     try:
         if hasattr(os, "posix_fadvise"):
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_WILLNEED)
+            os.posix_fadvise(fd, 0, max(0, int(length)), os.POSIX_FADV_WILLNEED)
         return True
     except OSError:
         return False
@@ -60,16 +66,15 @@ def upcoming_clips(meta_path: Path | None, out_time_s: float | None) -> list[str
 
 
 def files_for(proc) -> list[str]:
-    """라이브 하나가 곧 쓸 파일들: 지금·다음 곡, 지금·다음 영상."""
+    """라이브 하나가 곧 쓸 파일들: 다음 곡, 다음 영상들 (지금 재생 중인 곡·영상은 이미 읽히는 중이라 뺀다)."""
     run = proc.sup.paths.run_dir
     files = []
-    for name in (f"{proc.id}.nowplaying.json", f"{proc.id}.next.json"):
-        f = (read_json(run / name) or {}).get("file")
-        if f:
-            files.append(str(f))
+    f = (read_json(run / f"{proc.id}.next.json") or {}).get("file")
+    if f:
+        files.append(str(f))
     with proc.lock:
         ot = proc.st.get("out_time")
-    files += upcoming_clips(proc.meta_path, ot)
+    files += upcoming_clips(proc.meta_path, ot)[1:]
     return files
 
 
