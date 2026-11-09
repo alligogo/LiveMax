@@ -432,7 +432,8 @@ tr.locked td:first-child { color: #fff; }
   .row-live .rl-main .nowline .lbl { width: 20px; height: 20px; border-radius: 5px; }
   .row-live .rl-main .nowline .lbl svg { width: 11px; height: 11px; }
   .row-live .rl-main .nowline .fold, .row-live .rl-main .nowline .sep { display: none; }
-  .row-live .rl-main .links { display: none; }
+  .row-live .rl-main .links { margin-top: 6px; font-size: 11px; gap: 2px 10px; }  /* 휴대폰에서도 로그·미리보기 링크 보이게 */
+  .row-live .rl-main .links .drops { margin-right: 0; }
   .row-live .rl-side { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: stretch; }
   .row-live .rl-side .tiles { gap: 5px; }
   .row-live .rl-side .tile { padding: 6px 2px; }
@@ -533,7 +534,9 @@ tr.locked td:first-child { color: #fff; }
 .cam-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
 @container (max-width: 640px) { .cam-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; } }
 @container (max-width: 420px) { .cam-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.cam { min-width: 0; }
+.cam { min-width: 0; cursor: pointer; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+.cam:hover .cam-view { box-shadow: 0 0 0 2px #4a4a4a; }
+.cam.bad:hover .cam-view { box-shadow: 0 0 0 3px var(--red); }
 /* 그림 안 표시들은 칸 크기에 맞춰 같이 커지고 작아진다 (cqw = 칸 폭의 1%) */
 .cam-view { position: relative; aspect-ratio: 16/9; background: #0b0b0b; border-radius: 6px; overflow: hidden;
   display: grid; place-items: center; container-type: inline-size; box-shadow: 0 0 0 1px #2c2c2c; }
@@ -593,3 +596,13 @@ span.logclick:hover, .alerts .logclick:hover { text-decoration: underline; text-
 .notify-h { font-weight: 700; font-size: 14px; margin-bottom: 10px; }
 .swap-note { color: #fbbf24; }
 .hint.warn { color: #fbbf24; }
+
+/* 관제 보기 상세 창 (칸을 두 번 누르면) — PC 는 가운데, 휴대폰은 아래에서 올라오는 판 */
+.cam-modal .modal { width: min(560px, 100%); }
+.cam-modal .modal-body { padding: 14px; }
+.cam-detail .card.live { box-shadow: none; border: 1px solid var(--line); }
+@media (max-width: 560px) {
+  .cam-modal { place-items: end center; padding: 0; }
+  .cam-modal .modal { width: 100%; max-height: 92vh; border-radius: 14px 14px 0 0; }
+  .cam-modal .modal-body { padding: 10px; }
+}

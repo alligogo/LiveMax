@@ -168,16 +168,21 @@ function showChangePassword(forced) {
 // ------------------------------------------------------------------ 모달
 function openModal(title, body, foot, opts = {}) {
   closeModal();
-  // 창 밖을 눌러도 닫히지 않는다 (입력하던 내용이 날아가지 않게) — X 또는 취소 버튼으로만 닫힘
-  const back = h("div", { class: "modal-back" },
+  // 창 밖을 눌러도 닫히지 않는다 (입력하던 내용이 날아가지 않게) — X 또는 취소 버튼으로만 닫힘.
+  // 예외: 보기 전용 창(opts.backdrop — 관제 상세)은 바깥을 누르거나 ESC 로도 닫힌다
+  const back = h("div", { class: "modal-back" + (opts.cls ? " " + opts.cls : "") },
     h("div", { class: "modal", style: opts.wide ? "width:min(1000px,100%)" : "" },
       h("div", { class: "card-head" }, title, h("span", { class: "spacer" }),
         opts.locked ? null : h("button", { class: "iconbtn", style: "width:28px;height:28px;background:transparent", onclick: closeModal }, "✕")),
       h("div", { class: "modal-body" }, body),
       foot ? h("div", { class: "modal-foot" }, foot) : null));
+  if (opts.backdrop) back.addEventListener("click", (e) => { if (e.target === back) closeModal(); });
+  MODAL_ESC = !!opts.backdrop;
   $("#modal-root").replaceChildren(back);
 }
-function closeModal() { $("#modal-root").replaceChildren(); }
+let MODAL_ESC = false;
+function closeModal() { $("#modal-root").replaceChildren(); CAM_OPEN = null; MODAL_ESC = false; }
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && MODAL_ESC) closeModal(); });
 
 // ------------------------------------------------------------------ 라이브 (메인)
 let lastOverview = null;
@@ -233,6 +238,21 @@ function chLink(ch, cls, ...kids) {
     : h("span", { class: cls }, kids);
 }
 
+// 관제 보기 상세 창: 칸을 두 번 누르면 블록 보기 카드(버튼·로그·설정 포함)를 그대로 띄운다 — 버튼 안전장치도 같음
+const CAM_TAP = { id: null, t: 0 };
+let CAM_OPEN = null, CAM_CARD = null;
+function camDetailBody(lv) {
+  const why = (lv.status === "warn" || lv.status === "down") && lv.message
+    ? h("div", { class: "msg err", style: "margin-bottom:10px" }, lv.message) : null;
+  return h("div", {}, why, CAM_CARD ? CAM_CARD(lv) : null);
+}
+function openCamDetail(id) {
+  const lv = (lastOverview?.lives || []).find((x) => x.id === id);
+  if (!lv || !CAM_CARD) return;
+  openModal(`상세 — ${lv.name}`, h("div", { class: "cam-detail" }, camDetailBody(lv)), null, { backdrop: true, cls: "cam-modal" });
+  CAM_OPEN = id;  // openModal 이 앞 창을 닫으며 비우므로 그 뒤에
+}
+
 // 라이브 보기 방식: grid(블록, 기본) | list(목록, 쇼핑몰처럼) | cctv(관제 — 썸네일만 작게 한 줄 5개). 서버 설정에 저장되어 PC·휴대폰 어디서나 같게
 let LIVES_VIEW = "grid";
 
@@ -245,6 +265,8 @@ function renderLives(grid, ov) {
     const bad = lv.status === "warn" || lv.status === "down";
     const tile = (val, label, cls) => h("div", { class: "tile " + (cls || "") }, h("b", {}, val), h("span", {}, label));
     const speedCls = lv.speed == null ? "" : lv.speed >= 0.97 ? "good" : "bad";
+    const statusEl = () => h("span", { class: "status " + lv.status }, bad ? ico("warn") : null,
+      lv.status === "restarting" ? reLabel(lv) : (STATUS[lv.status] || lv.status));
     // 썸네일 그림 (블록·목록·관제 보기가 같이 씀). key 는 보기마다 <img> 를 따로 두려고
     const pic = (key, short) => running && lv.clip && lv.clip_folder
         ? cimg(`/api/thumbs/${encodeURIComponent(lv.clip_folder)}/${encodeURIComponent(lv.clip)}?v=${lv.clip_v || 0}`, null, lv.id + key)
@@ -260,10 +282,10 @@ function renderLives(grid, ov) {
       preview: (withBadge) => h("div", { class: "preview" }, pic(withBadge ? "g" : "l"), liveBadge(lv, running),
         withBadge && ch ? chLink(ch, "ch-badge", chLogo(ch, 24), h("span", {}, ch.name)) : null),
       status: (() => {
-        const el = h("span", { class: "status " + lv.status }, bad ? ico("warn") : null,
-          lv.status === "restarting" ? reLabel(lv) : (STATUS[lv.status] || lv.status));
+        const el = statusEl();
         return bad || lv.status === "restarting" ? logClick(lv, el) : el;
       })(),
+      statusPlain: statusEl(),  // 관제 칸: 누르면 로그가 바로 열리지 않게 (두 번 누르기와 겹침)
       title: h("span", { class: "lv-title" }, lv.name),
       keytag: lv.key_label ? h("span", { class: "keytag", title: `스트림 키: ${lv.key_label} (${lv.key_masked})` }, ico("key"), lv.key_label) : null,
       edit: h("button", { class: "iconbtn", style: "width:30px;height:30px;background:transparent", title: "설정", html: ICON.edit, onclick: () => openLiveEditor(lv) }),
@@ -322,13 +344,26 @@ function renderLives(grid, ov) {
       // 그림 안: 왼쪽 위 LIVE(정상 송출일 때만) · 오른쪽 위 상태(검은 바탕) · 오른쪽 아래 방송 시간. 그림 아래는 이름·키만
       h("div", { class: "cam-view" }, p.pic("c", true),
         lv.desired && p.running && lv.status === "ok" ? h("span", { class: "badge-live" }, "LIVE") : null,
-        h("span", { class: "cam-st" }, p.status),
+        h("span", { class: "cam-st" }, p.statusPlain),
         p.age ? h("span", { class: "cam-time" }, p.age) : null,
         p.bad ? h("span", { class: "cam-alert" }) : null),
       h("div", { class: "cam-cap" },
         h("div", { class: "cam-name" }, h("span", { class: "lv-title" }, lv.name), p.keytag)));
-    return p.bad ? logClick(lv, art) : art;  // 빨간 칸은 어디를 눌러도 로그
+    // 두 번 누르면 상세 창 (휴대폰에서 스크롤하다 잘못 눌러도 안 열리게 한 번 누름은 아무 일 없음)
+    art.title += "\n두 번 눌러 상세 보기·조작";
+    art.addEventListener("click", () => {
+      const t = Date.now();
+      if (CAM_TAP.id === lv.id && t - CAM_TAP.t < 350) { CAM_TAP.id = null; openCamDetail(lv.id); return; }
+      CAM_TAP.id = lv.id; CAM_TAP.t = t;
+    });
+    return art;
   };
+  CAM_CARD = card;
+  if (CAM_OPEN && $("#modal-root .cam-detail")) {  // 상세 창이 떠 있으면 같은 주기로 내용도 새로
+    const lv = ov.lives.find((x) => x.id === CAM_OPEN);
+    if (lv) $("#modal-root .cam-detail").replaceChildren(camDetailBody(lv));
+    else closeModal();
+  }
   // 채널별로 묶어서: 채널 머리줄(로고·이름 ──── 설명) 아래에 그 채널의 라이브들
   const groups = (ov.channels || []).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id) }))
     .filter((g) => g.lives.length);
@@ -479,7 +514,7 @@ function renderSide(side, ov) {
     frac !== undefined ? bar(frac, safe, kind) : null,
     note ? h("div", { class: "cap-note" }, note) : null);
   const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, swapU = s.swap_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
-  const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.8, diskW = c.disk_warn_pct ?? 85;
+  const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.5, diskW = c.disk_warn_pct ?? 85;
   // 지금 송신 속도 그대로 한 달(이번 달 일수) 내내 보낸다면 — 대략 예상
   const sd = new Date((ov.server_time || Date.now() / 1000) * 1000);
   const mdays = new Date(sd.getUTCFullYear(), sd.getUTCMonth() + 1, 0).getDate();
@@ -1371,7 +1406,7 @@ function serverCard(s, card) {
   };
   const [memR, memF] = safe("메모리 남길 여유", "MB", s.settings.mem_reserve_mb, 100, 100000, 700);
   const [cpuT, cpuF] = safe("CPU 평균", "%", s.settings.cpu_target_pct, 10, 95, 50);
-  const [portU, portF] = safe("회선 사용", "%", s.settings.port_use_pct, 10, 100, 80);
+  const [portU, portF] = safe("회선 사용", "%", s.settings.port_use_pct, 10, 100, 50);
   const [diskW, diskF] = safe("디스크", "%", s.settings.disk_warn_pct, 50, 99, 85);
   // 음악 프로그램 채널별 묶음 (메모리 절약) — LiveMax 가 다시 켜질 때 적용
   const shared = h("input", { type: "checkbox" }); shared.checked = !!s.settings.audio_shared;
@@ -1381,6 +1416,7 @@ function serverCard(s, card) {
         "대신 그 프로그램이 멈추면 그 채널 라이브들의 음악이 같이 다시 켜집니다.")));
   shared.addEventListener("change", () => sharedLab.classList.toggle("on", shared.checked));
   const pendingShared = !!s.settings.audio_shared !== !!s.settings.audio_shared_active;
+  const groupMax = h("input", { class: "input", type: "number", min: 1, max: 50, value: s.settings.audio_group_max ?? 10, style: "max-width:90px" });
   return card("서버",
     h("label", { class: "field" }, h("span", {}, "서버명"), name,
       h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
@@ -1396,13 +1432,15 @@ function serverCard(s, card) {
     h("div", { class: "field" }, h("span", {}, "음악 프로그램"), sharedLab,
       h("div", { class: "hint" + (pendingShared ? " warn" : "") }, pendingShared
         ? `저장됨 — 다음 업데이트(또는 SSH 에서 sudo livemax restart) 때 적용됩니다. 지금은 ${s.settings.audio_shared_active ? "묶음" : "라이브마다 하나"}로 돌고 있어요.`
-        : `지금: ${s.settings.audio_shared_active ? "채널별 묶음" : "라이브마다 하나"}. 바꾸면 다음 업데이트(또는 sudo livemax restart) 때 적용됩니다 — 그때 라이브들이 차례로 다시 켜져요.`)),
+        : `지금: ${s.settings.audio_shared_active ? "채널별 묶음" : "라이브마다 하나"}. 바꾸면 다음 업데이트(또는 sudo livemax restart) 때 적용됩니다 — 그때 라이브들이 차례로 다시 켜져요.`),
+      h("div", { class: "row", style: "margin-top:10px;gap:8px;align-items:center" }, h("span", {}, "묶음 하나에 최대"), groupMax, h("span", {}, "개 (기본 10)")),
+      h("div", { class: "hint" }, "한 채널에 라이브가 이보다 많으면 라이브 번호 순으로 나눠 묶습니다 (예: 25개 → 10·10·5). 바꾸면 바로 적용 — 나뉘는 채널의 음악만 몇 초 다시 켜집니다.")),
     h("button", { class: "btn primary", onclick: async () => {
       try {
         await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value),
           port_mbit: Number(port.value), monthly_traffic_tb: Number(traffic.value),
           mem_reserve_mb: Number(memR.value), cpu_target_pct: Number(cpuT.value), port_use_pct: Number(portU.value), disk_warn_pct: Number(diskW.value),
-          audio_shared: shared.checked });
+          audio_shared: shared.checked, audio_group_max: Number(groupMax.value) });
         setServerName(name.value); toast("저장했습니다"); showSystem();
       } catch (e) { toast(e.message, true); }
     } }, "저장"));

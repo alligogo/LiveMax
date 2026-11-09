@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import zipfile
@@ -292,7 +293,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          "port_mbit": cap.port_mbit, "traffic_unlimited": cap.traffic_unlimited,
                          "mem_reserve_mb": settings["capacity"].get("mem_reserve_mb", 700),
                          "cpu_target_pct": settings["capacity"].get("cpu_target_pct", 50),
-                         "port_use_ratio": settings["capacity"].get("port_use_ratio", 0.8),
+                         "port_use_ratio": settings["capacity"].get("port_use_ratio", 0.5),
                          "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85),
                          "options": cap.options, "usage": cap.usage},
             "max_lives": _max_lives(),
@@ -621,17 +622,47 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if not (name == "livemaxd" or any(name == f"{p}-{lv.id}" for lv in store.all() for p in ("live", "audio", "tls"))):
             return err("로그 없음", 404)
         f = paths.logs / f"{name}.log"
-        if name.startswith("audio-") and getattr(sup, "shared_audio", False):  # 음악 묶음 모드: 채널 묶음 로그를 보여 준다
+        group = name.startswith("audio-") and getattr(sup, "shared_audio", False)
+        if group:  # 음악 묶음 모드: 채널 묶음 로그에서 이 라이브 줄만 골라 보여 준다
             f = paths.logs / f"{sup.audio_log_name(name[len('audio-'):])}.log"
         if not f.exists():
             return {"name": name, "text": "(아직 기록 없음)"}
         lines = max(20, min(int(lines), 2000))
+        members = sup.group_members(name[len("audio-"):]) if group else []
+        read_n = lines * max(1, len(members)) if group else lines  # 걸러 내면 줄어드니 묶음 크기만큼 더 읽는다
         with open(f, "rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
-            fh.seek(max(0, size - lines * 250))
-            text = b"\n".join(fh.read().splitlines()[-lines:]).decode("utf-8", "replace")
+            fh.seek(max(0, size - read_n * 250))
+            text = b"\n".join(fh.read().splitlines()[-read_n:]).decode("utf-8", "replace")
+        if group:
+            text = _group_log_view(text, name[len("audio-"):], members, lines)
         return {"name": name, "text": secrets.redact(text)}
+
+    # 음악 묶음 로그 (DESIGN 11-D 19): 한 파일에 그 묶음 라이브들 기록이 섞여 있다. Liquidsoap 은 줄마다 'live13_pl' 처럼
+    # 내부 이름만 찍으므로, 보는 라이브의 줄과 공통 줄(어느 라이브 것도 아닌 줄)만 남기고 이름을 사람이 읽는 말로 바꾼다
+    _SRC_KR = {"pl": "재생목록", "silence": "무음", "fallback": "전환", "xf": "크로스페이드", "music": "음악 시계",
+               "buf": "버퍼", "out": "출력"}
+    _SRC_RE = re.compile(r"\b(live\d+)_(pl|silence|fallback|xf|music|buf|out)\b")
+
+    def _short_label(live_id: str) -> str:
+        lab = sup.live_label(live_id)
+        srv = config.server_name(settings)
+        return lab[len(srv) + 3:] if srv and lab.startswith(srv + " · ") else lab
+
+    def _group_log_view(text: str, live_id: str, members: list[str], lines: int) -> str:
+        me = _short_label(live_id)
+        out = []
+        for ln in text.splitlines():
+            ids = {m.group(1) for m in _SRC_RE.finditer(ln)}
+            if ids and live_id not in ids:
+                continue
+            out.append(_SRC_RE.sub(lambda m: f"{me} · {_SRC_KR[m.group(2)]}" if m.group(1) == live_id else m.group(0), ln))
+        others = [m for m in members if m != live_id]
+        names = ", ".join(sup.store.get(m).name if sup.store.get(m) else m for m in sorted(others, key=catalog.natural_key))
+        head = f"# 음악 묶음 — {me}" + (f" · 같은 프로그램에서 함께 도는 라이브 {len(others)}개: {names}" if others else "")
+        head += "\n# (이 라이브 기록과 묶음 공통 기록만 보여 줍니다)"
+        return head + "\n" + "\n".join(out[-lines:])
 
     # ------------------------------------------------------------------ 미디어
     def _kind(kind: str) -> bool:
@@ -1006,12 +1037,13 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          "max_lives": _max_lives(), "tls_relay": settings["output"]["tls_relay"]["enabled"],
                          "audio_shared": bool(settings.get("audio_shared", False)),
                          "audio_shared_active": bool(getattr(sup, "shared_audio", False)),
+                         "audio_group_max": int(settings.get("audio_group_max", 10) or 10),
                          "port_mbit": settings["capacity"].get("port_mbit", 1000),
                          "monthly_traffic_tb": settings["capacity"].get("monthly_traffic_tb", 0),
                          # 안전선 (용량 계산·서버 박스 막대 눈금)
                          "mem_reserve_mb": settings["capacity"].get("mem_reserve_mb", 700),
                          "cpu_target_pct": settings["capacity"].get("cpu_target_pct", 50),
-                         "port_use_pct": round(float(settings["capacity"].get("port_use_ratio", 0.8)) * 100),
+                         "port_use_pct": round(float(settings["capacity"].get("port_use_ratio", 0.5)) * 100),
                          "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85)},
             "sessions": [{"id": r["token_hash"], "ip": r["ip"], "ua": r["user_agent"], "last_seen": r["last_seen"],
                           "current": r["token_hash"] == sess["token_hash"]}
@@ -1206,6 +1238,17 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                     key, v = "port_use_ratio", round(v / 100, 3)
                 config.save_settings_override(paths, ["capacity", key], v)
                 settings["capacity"][key] = v
+        if "audio_group_max" in b:  # 음악 묶음 하나에 넣는 라이브 최대 수 — 바로 적용 (나뉘는 묶음만 다시 켜짐)
+            try:
+                gm = int(b["audio_group_max"])
+            except (TypeError, ValueError):
+                return err("묶음당 라이브 수는 숫자로 입력하세요")
+            if not 1 <= gm <= 50:
+                return err("묶음당 라이브 수는 1~50 사이로 입력하세요")
+            config.save_settings_override(paths, ["audio_group_max"], gm)
+            settings["audio_group_max"] = gm
+            if getattr(sup, "shared_audio", False):
+                sup.groups_kick()
         if "audio_shared" in b:  # 음악 프로그램 채널별 묶음 — LiveMax 가 다시 켜질 때 적용
             config.save_settings_override(paths, ["audio_shared"], bool(b["audio_shared"]))
             settings["audio_shared"] = bool(b["audio_shared"])

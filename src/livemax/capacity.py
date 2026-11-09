@@ -100,7 +100,7 @@ def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | No
 
     # --- 회선: 보장 속도의 port_use_ratio 까지
     port = _f(cfg, "port_mbit", 1000)
-    ratio = _f(cfg, "port_use_ratio", 0.8)
+    ratio = _f(cfg, "port_use_ratio", 0.5)
     cur = max(current_tx_mbps or 0.0, n * per_live_mbps)
     if port > 0:
         options["bandwidth"] = int((port * ratio - cur) // per_live_mbps) if per_live_mbps else 0

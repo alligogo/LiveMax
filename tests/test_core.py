@@ -170,7 +170,7 @@ def test_capacity_unlimited_traffic_is_memory_bound(settings):
     assert cap.limiting == "ram"
     assert 140 < cap.mem_per_live_mb < 160  # (1286 - 550) / 5 ≈ 147
     assert cap.can_add == int((7751 - 700 - 1286) // cap.mem_per_live_mb)  # 약 39개 더
-    assert cap.options["cpu"] == 95 and cap.options["bandwidth"] > 100  # CPU (50%−2.5%)÷0.5% · 회선 80%=800Mbps — 한참 남음
+    assert cap.options["cpu"] == 95 and cap.options["bandwidth"] > 80  # CPU (50%−2.5%)÷0.5% · 회선 50%=500Mbps — 한참 남음
     assert abs(cap.cpu_per_live_pct - 0.5) < 1e-9  # 코어 1개 대비 2% ÷ 4코어
 
 

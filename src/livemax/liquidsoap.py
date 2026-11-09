@@ -179,6 +179,29 @@ def group_key(live: Live) -> str:
     return f"ch-{live.channel_id}" if live.channel_id else f"solo-{live.id}"
 
 
+GROUP_MAX_DEFAULT = 10
+
+
+def group_keys(lives: list[Live], max_n: int = GROUP_MAX_DEFAULT) -> dict[str, str]:
+    """라이브 id → 묶음 이름. 같은 채널을 라이브 번호 순으로 최대 max_n 개씩 (DESIGN 11-D 19).
+    채널 하나에 라이브가 몰려도(예: 50개) 묶음 하나가 전부를 떠안지 않게. 첫 묶음 이름은 예전과 같은 'ch-<채널>' →
+    10개 이하 채널은 이름·로그 파일이 그대로. 번호 순이라 새 라이브(큰 번호)는 마지막 묶음 뒤에 붙고 앞 묶음은 안 흔들린다."""
+    from .catalog import natural_key  # catalog → probe 를 끌어오므로 여기서만
+    max_n = max(1, int(max_n or GROUP_MAX_DEFAULT))
+    out: dict[str, str] = {}
+    by_ch: dict[str, list[Live]] = {}
+    for lv in lives:
+        if lv.channel_id:
+            by_ch.setdefault(lv.channel_id, []).append(lv)
+        else:
+            out[lv.id] = f"solo-{lv.id}"
+    for cid, lst in by_ch.items():
+        for i, lv in enumerate(sorted(lst, key=lambda x: natural_key(x.id))):
+            k = i // max_n
+            out[lv.id] = f"ch-{cid}" if k == 0 else f"ch-{cid}-{k + 1}"
+    return out
+
+
 def group_log_name(key: str) -> str:
     return f"audio-g-{key}"
 

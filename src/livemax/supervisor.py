@@ -512,6 +512,7 @@ class Supervisor:
         self.shared_audio = bool(settings.get("audio_shared", False))
         self.groups: dict[str, dict] = {}  # 묶음 키 → {proc, sig, fails, next_try, started, members}
         self._glock = threading.Lock()
+        self._gmap: dict[str, str] = {}  # 라이브 id → 묶음 이름 (groups_tick 이 갱신)
         self._mass_slow_at = 0.0
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -745,14 +746,37 @@ class Supervisor:
     # ---------------------------------------------------------------- 음악 묶음 (B안)
     def group_pid(self, live_id: str) -> int | None:
         lv = self.store.get(live_id)
-        g = self.groups.get(liquidsoap.group_key(lv)) if lv else None
+        g = self.groups.get(self._group_of(lv)) if lv else None
         pr = g and g.get("proc")
         return pr.pid if pr and pr.poll() is None else None
 
     def audio_log_name(self, live_id: str) -> str:
         """사이트 로그 창의 '음악' 탭이 읽을 파일 이름 (묶음 모드면 채널 묶음 로그)."""
         lv = self.store.get(live_id)
-        return liquidsoap.group_log_name(liquidsoap.group_key(lv)) if (self.shared_audio and lv) else f"audio-{live_id}"
+        return liquidsoap.group_log_name(self._group_of(lv)) if (self.shared_audio and lv) else f"audio-{live_id}"
+
+    def group_max(self) -> int:
+        try:
+            return max(1, int(self.settings.get("audio_group_max") or liquidsoap.GROUP_MAX_DEFAULT))
+        except (TypeError, ValueError):
+            return liquidsoap.GROUP_MAX_DEFAULT
+
+    def _group_of(self, lv) -> str:
+        """그 라이브가 들어간 묶음 이름 (마지막 groups_tick 기준, 아직 없으면 지금 계산)."""
+        k = self._gmap.get(lv.id)
+        if k is None:
+            k = liquidsoap.group_keys([x for x in self.store.all() if x.audio_folders] or [lv], self.group_max()).get(
+                lv.id, liquidsoap.group_key(lv))
+        return k
+
+    def group_members(self, live_id: str) -> list[str]:
+        """같은 음악 묶음에 들어 있는 라이브 id 들 (묶음 모드가 아니면 자기 하나)."""
+        lv = self.store.get(live_id)
+        if not (self.shared_audio and lv):
+            return [live_id]
+        gmap = liquidsoap.group_keys([x for x in self.store.all() if x.audio_folders] or [lv], self.group_max())
+        k = gmap.get(live_id, self._group_of(lv))
+        return [i for i, g in gmap.items() if g == k] or [live_id]
 
     def groups_kick(self) -> None:
         """라이브 시작·정지·설정 변경 직후 바로 한 번 맞춘다 (5초 주기를 기다리지 않게)."""
@@ -767,9 +791,11 @@ class Supervisor:
         try:
             now = time.time()
             members: dict[str, list] = {}
-            for lv in self.store.all():
-                if lv.audio_folders:
-                    members.setdefault(liquidsoap.group_key(lv), []).append(lv)
+            withaudio = [lv for lv in self.store.all() if lv.audio_folders]
+            gmap = liquidsoap.group_keys(withaudio, self.group_max())
+            self._gmap = gmap
+            for lv in withaudio:
+                members.setdefault(gmap[lv.id], []).append(lv)
             for key in list(self.groups):
                 if key not in members:
                     LiveProc._kill(self.groups.pop(key).get("proc"))
