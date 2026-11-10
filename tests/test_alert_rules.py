@@ -146,3 +146,58 @@ def test_boot_waits_when_memory_tight(paths, settings, monkeypatch):
     waits.clear()
     monkeypatch.setattr(supervisor.sysmetrics, "read_mem", lambda: (7600.0, 7751.0))   # 계속 빠듯 → 최대 30초만
     assert sup._wait_for_memory(0, 10) is False and sum(waits) == 30
+
+
+def test_big_backlog_alerts_even_when_short(paths, settings):
+    """실제 사건(LIVE 26): 18초 동안 최대 17.8초 밀림 + 3초 만에 재접속 — 예전 기준(30초·재접속 5초)으로는 조용히 넘어갔다."""
+    sup, _sent = _sup(paths, settings)
+    p = sup.proc("live1")
+    p._relay_event({"event": "slow_end", "dur": 18, "max_delay": 17.8, "kbps_out": 433, "kbps_in": 5149})
+    ev = _events(paths)
+    assert len(ev) == 1 and ev[0][0] == "warn" and "17.8초" in ev[0][1]
+    p._relay_event({"event": "slow_end", "dur": 12, "max_delay": 4})  # 조금 밀린 것은 여전히 조용히
+    assert len(_events(paths)) == 1
+
+
+def test_no_audio_restarts_only_that_live_and_respects_limit(paths, settings):
+    """중계기가 '소리 없음'을 알리면 그 라이브의 ffmpeg 만 다시 띄우고 알림. 1시간 한도를 넘으면 더 안 건드리고 '확인 필요' 알림."""
+    sup, sent = _sup(paths, settings)
+    p = sup.proc("live1")
+    calls = []
+    p.restart = lambda reason, audio_too=False: (calls.append(reason), p.restarts.append((time.time(), reason)))
+    p._relay_event({"event": "no_audio", "sec": 8})
+    assert calls == []  # 송출 중이 아니면 아무것도 안 함
+    p.desired = True
+    p.set(state="running")
+    p._relay_event({"event": "no_audio", "sec": 8})
+    assert calls == ["소리 없음"] and sent[-1][0] == "restart" and "소리" in _events(paths)[-1][1]
+    p._relay_event({"event": "no_input", "sec": 10})  # 10초: 기록만
+    assert calls == ["소리 없음"] and "10초째" in _events(paths)[-1][1]
+    p._relay_event({"event": "no_input", "sec": 30})  # 30초: 다시 띄움
+    assert calls == ["소리 없음", "입력 없음"]
+    for _ in range(int(settings["watchdog"]["max_restarts_per_hour"])):
+        p.restarts.append((time.time(), "소리 없음"))
+    p._relay_event({"event": "no_audio", "sec": 8})
+    assert len(calls) == 2 and sent[-1][0] == "down" and "한도" in _events(paths)[-1][1]
+
+
+def test_peak_tracker_keeps_daily_max_and_resets(monkeypatch):
+    """CPU·메모리 오늘 최고값: 1초 표본 중 최고와 그 시각만 기억, 하루 기준(day_start)이 바뀌면 처음부터."""
+    from livemax import sysmetrics as sm
+
+    cpu = iter([sm.CpuTimes(1000, 900, 0, 0), sm.CpuTimes(1100, 960, 0, 0), sm.CpuTimes(1200, 1050, 0, 0),
+                sm.CpuTimes(1300, 1140, 0, 0), sm.CpuTimes(1400, 1210, 0, 0)])
+    mem = iter([(2000, 8000), (2600, 8000), (2300, 8000), (2100, 8000), (2200, 8000)])
+    monkeypatch.setattr(sm, "read_cpu", lambda: next(cpu))
+    monkeypatch.setattr(sm, "read_mem", lambda: next(mem))
+    monkeypatch.setattr(sm, "read_swap", lambda: (100, 2000))
+    day = {"v": 1.0}
+    pk = sm.PeakTracker(lambda now: day["v"])
+    for t in (10.0, 11.0, 12.0):
+        pk.sample(t)
+    s = pk.snapshot()
+    assert s["cpu_peak_pct"] == 40.0 and s["cpu_peak_at"] == 11.0  # 100 중 60 이 쉼 → 40%
+    assert s["mem_peak_mb"] == 2700 and s["mem_peak_at"] == 11.0   # 스왑 100MB 포함
+    day["v"] = 2.0  # 일일 재시작 시각을 지남 → 새 하루
+    pk.sample(13.0)
+    assert pk.snapshot()["cpu_peak_pct"] == 10.0 and pk.snapshot()["mem_peak_mb"] == 2200

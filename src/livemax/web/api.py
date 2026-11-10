@@ -255,6 +255,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         snap = sup.snapshot()
         lives = [live_view(lv, snap) for lv in store.all()]
         sysd = dict(core.collector.latest)
+        if getattr(core, "peaks", None) is not None:
+            sysd.update(core.peaks.snapshot())  # 오늘 최고 CPU·메모리 (1초 단위)
         planned = [lv for lv in lives if lv["enabled"]]  # 송출 중이거나 켜 둔 라이브만 (대기중은 제외)
         on_air = [lv for lv in planned if lv["state"] == "running"]
         cap = capacity.compute(settings["capacity"], [_video_kbps(conn, lv) for lv in planned],
@@ -643,7 +645,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     # 내부 이름만 찍으므로, 보는 라이브의 줄과 공통 줄(어느 라이브 것도 아닌 줄)만 남기고 이름을 사람이 읽는 말로 바꾼다
     _SRC_KR = {"pl": "재생목록", "silence": "무음", "fallback": "전환", "xf": "크로스페이드", "music": "음악 시계",
                "buf": "버퍼", "out": "출력"}
-    _SRC_RE = re.compile(r"\b(live\d+)_(pl|silence|fallback|xf|music|buf|out)\b")
+    # 이름 꼴: live13_pl (v2.12 까지) · live13_2_pl (v2.13 — 프로그램 안에서 겹치지 않게 번호가 붙음) · live13_2 (올림·내림 기록)
+    _SRC_RE = re.compile(r"\b(live\d+)_(?:(?:\d+_)?(pl|silence|fallback|xf|music|buf|out)|\d+)\b")
+    _GROUP_KR = (("ADD FAILED", "음악 올리기 실패:"), ("ADD", "음악 올림:"), ("REMOVE", "음악 내림:"))
 
     def _short_label(live_id: str) -> str:
         lab = sup.live_label(live_id)
@@ -657,7 +661,13 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             ids = {m.group(1) for m in _SRC_RE.finditer(ln)}
             if ids and live_id not in ids:
                 continue
-            out.append(_SRC_RE.sub(lambda m: f"{me} · {_SRC_KR[m.group(2)]}" if m.group(1) == live_id else m.group(0), ln))
+            if "[group:" in ln:
+                for en, kr in _GROUP_KR:
+                    if f"] {en} " in ln:
+                        ln = ln.replace(f"] {en} ", f"] {kr} ", 1)
+                        break
+            out.append(_SRC_RE.sub(lambda m: (me + (f" · {_SRC_KR[m.group(2)]}" if m.group(2) else ""))
+                                   if m.group(1) == live_id else m.group(0), ln))
         others = [m for m in members if m != live_id]
         names = ", ".join(sup.store.get(m).name if sup.store.get(m) else m for m in sorted(others, key=catalog.natural_key))
         head = f"# 음악 묶음 — {me}" + (f" · 같은 프로그램에서 함께 도는 라이브 {len(others)}개: {names}" if others else "")

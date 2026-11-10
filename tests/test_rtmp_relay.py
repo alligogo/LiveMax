@@ -386,3 +386,55 @@ def test_reconnect_gives_up_on_a_hung_server_quickly_and_reresolves(monkeypatch)
     assert isinstance(pub, P) and took < 2
     assert calls == ["1.1.1.1", "2.2.2.2"]  # 두 번째 시도는 다른 서버로
     assert addrs == ["a.rtmps.youtube.com"]
+
+
+def test_relay_reports_missing_audio_and_missing_input(monkeypatch):
+    """내용 감시 (v2.13): 영상만 오고 소리가 8초 없으면 'no_audio' 한 번, 다시 오면 'audio_back'.
+    ffmpeg 가 붙어 있는데 아무것도 안 보내면 10초·30초에 'no_input', 다시 보내면 'input_back'. 영상 교체 중(busy 아님)은 안 센다."""
+    events = []
+    monkeypatch.setattr(rr, "_emit", lambda e: events.append(e) if e["event"] != "stats" else None)
+    r = rr.Relay({})
+    r.busy = True
+    r.feed = rr.Feed(r.stats)
+    w = r._watch_state(0.0)
+    t = 0.0
+
+    def tick(video=30, audio=43, data=True):
+        nonlocal t
+        t += 1
+        r.stats["v"] += video
+        r.stats["a"] += audio
+        if data:
+            r.stats["in"] += 600_000
+            r.stats["out"] += 600_000
+        r._watch_step(w, t)
+
+    for _ in range(20):
+        tick()
+    assert events == []
+    for _ in range(7):
+        tick(audio=0)
+    assert events == []  # 7초까지는 조용히 (곡 사이 짧은 공백 등)
+    tick(audio=0)
+    assert events == [{"event": "no_audio", "sec": 8}]
+    for _ in range(5):
+        tick(audio=0)
+    assert len(events) == 1  # 한 번만
+    tick()
+    assert events[-1] == {"event": "audio_back", "sec": 13}
+    events.clear()
+    for _ in range(9):
+        tick(video=0, audio=0, data=False)
+    assert events == []
+    tick(video=0, audio=0, data=False)
+    assert events == [{"event": "no_input", "sec": 10}]
+    for _ in range(20):
+        tick(video=0, audio=0, data=False)
+    assert events == [{"event": "no_input", "sec": 10}, {"event": "no_input", "sec": 30}]
+    tick()
+    assert events[-1] == {"event": "input_back", "sec": 30}
+    events.clear()
+    r.busy = False  # 일일 재시작·영상 교체로 ffmpeg 가 잠깐 없는 동안
+    for _ in range(40):
+        tick(video=0, audio=0, data=False)
+    assert events == []

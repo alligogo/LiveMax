@@ -206,38 +206,182 @@ def group_log_name(key: str) -> str:
     return f"audio-g-{key}"
 
 
-def _split(text: str) -> tuple[list[str], list[str]]:
-    lines = text.splitlines()
-    i = next(k for k, ln in enumerate(lines) if ln.startswith("live_id ="))
-    return lines[:i], lines[i:]
+# ---------------------------------------------------------------- 무중단 묶음 (v2.13, DESIGN 11-F)
+# v2.11~12 는 묶음 구성이 바뀌면(라이브 추가·삭제·재생 방식 변경) 묶음 프로그램을 통째로 껐다 켰다. 그러면 이미 송출 중이던
+# 같은 묶음 라이브들의 ffmpeg 음악 연결이 끊기고, ffmpeg 는 죽지 않은 채 '소리 없는 영상'만 계속 보냈다 (41번째 라이브
+# 추가 때 실제 사고 — 감시는 정상으로 봄). 그래서 묶음 프로그램은 한 번 켜면 그대로 두고, 프로그램이 1초마다
+# run/<묶음>.members.json 을 읽어 새 항목만 올리고 빠진 항목만 내린다 (2.2.4 실측: 올리는 동안 기존 라이브 공백 0.4초 미만).
+#   - 묶음마다 harbor 포트 하나, 라이브마다 '매번 새 이름'의 주소(mount) — 같은 이름·포트를 다시 쓰면 2.2.4 에서 안 열린다
+#     (내린 출력의 이름이 남음). 설정이 바뀐 라이브는 새 이름으로 다시 올리고 옛 것은 내린다.
+#   - 2.2.4 는 출력만 내릴 수 있고 그 앞의 재생 목록은 못 내린다 → 내린 라이브 몫이 조금 남는다 (실측 약 1.3MB/회).
+#     라이브 삭제·음악 설정 변경 때만 생기고, 묶음이 다시 켜질 때(업데이트·재부팅·채널 전체 정지) 없어진다.
+
+def members_path(paths: Paths, key: str) -> Path:
+    return paths.run_dir / f"{key}.members.json"
 
 
-def render_group(lives: list[Live], paths: Paths, settings: dict, key: str) -> str:
-    """여러 라이브를 Liquidsoap 하나에. 라이브마다 'def setup_<id>() = … end' 안에 기존 스크립트를 그대로 넣어
-    이름이 섞이지 않게 한다 (history·next_path 등은 함수 안 지역 변수)."""
-    lives = sorted(lives, key=lambda lv: lv.id)
-    head, _ = _split(render(lives[0], paths, settings))
-    log_line = f"settings.log.file.path.set({q(paths.logs / (group_log_name(key) + '.log'))})"
-    head = [log_line if ln.startswith("settings.log.file.path.set(") else ln for ln in head]
-    head[0] = f"# 자동 생성 — 직접 수정하지 말 것 (묶음 {key}: {', '.join(lv.id for lv in lives)}, LiveMax)"
-    out = head[:]
-    for lv in lives:
-        _, body = _split(render(lv, paths, settings))
-        fn = "setup_" + "".join(c if c.isalnum() else "_" for c in lv.id)
-        out.append(f"def {fn}() =")
-        out += ["  " + ln if ln else "" for ln in body]
-        out.append("  ()")
-        out.append("end")
-        out.append(f"{fn}()")
-    return "\n".join(out) + "\n"
+def audio_sig(live: Live) -> str:
+    """이 값이 바뀌면 그 라이브 음악만 새 주소로 다시 올린다 (재생 방식·중복방지 수·크로스페이드)."""
+    import hashlib
+
+    pl_mode, loop, norepeat = _MODE[live.audio_mode]
+    raw = f"{pl_mode}|{loop}|{live.norepeat_count if norepeat else 0}|{float(live.crossfade):.1f}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:8]
 
 
-def write_group(lives: list[Live], paths: Paths, settings: dict, key: str, text: str | None = None) -> Path:
-    for lv in lives:
-        write_m3u(lv, paths)
+def member_entry(live: Live, paths: Paths, token: str, port: int) -> dict:
+    """members.json 한 줄. token: 프로그램 안에서 겹치지 않는 이름 (예: live13_2) — 소스 이름·주소에 쓴다."""
+    pl_mode, loop, norepeat = _MODE[live.audio_mode]
+    for v in (token, m3u_path(live, paths), paths.run_dir):
+        q(v)  # '#{' 가 들어간 경로는 거부 (Liquidsoap 문자열 보간)
+    return {"id": token, "live": live.id, "mount": f"{token}.aac", "port": int(port),
+            "m3u": str(m3u_path(live, paths)), "np": str(paths.run_dir / f"{live.id}.nowplaying.json"),
+            "next": str(next_path(live, paths)), "mode": pl_mode, "loop": bool(loop),
+            "norepeat": int(live.norepeat_count if norepeat else 0), "cf": float(live.crossfade)}
+
+
+def write_members(paths: Paths, key: str, entries: list[dict]) -> bool:
+    """내용이 바뀌었을 때만 통째로 바꿔 쓴다 (rename — 프로그램은 감시가 아니라 1초마다 읽으므로 안전). 바뀌었으면 True."""
+    import json
+
+    p = members_path(paths, key)
+    text = json.dumps(sorted(entries, key=lambda e: e["id"]), ensure_ascii=False)
+    try:
+        if p.read_text(encoding="utf-8") == text:
+            return False
+    except OSError:
+        pass
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(p)
+    return True
+
+
+_DYN = r"""# 자동 생성 — 직접 수정하지 말 것 (음악 묶음 @KEY@, LiveMax). 라이브 목록은 members.json 에서 읽는다
+settings.log.stdout.set(false)
+settings.log.file.set(true)
+settings.log.file.path.set(@LOG@)
+settings.log.level.set(2)
+settings.frame.duration.set(@FRAME@)
+settings.harbor.bind_addrs.set(["127.0.0.1"])
+settings.server.telnet.set(false)
+settings.init.allow_root.set(true)
+
+members_path = @MEMBERS@
+silence_file = @SILENCE@
+
+# 라이브 하나의 음악: 재생 목록 + 중복방지 + '다음 곡' 기록 (라이브별 스크립트 render 와 같은 동작)
+def mk_base(m) =
+  history = ref([])
+  rejects = ref(0)
+  def library_size() =
+    lines = string.split(separator="\n", file.contents(m.m3u))
+    list.length(list.filter(fun (l) -> l != "", lines))
+  end
+  def not_recent(r) =
+    uri = request.uri(r)
+    # 곡이 적으면 창을 줄인다 (3곡이면 최근 1곡만) — 창이 너무 크면 고를 곡이 없어 같은 곡이 반복됨
+    window = min(m.norepeat, library_size() / 2)
+    if list.mem(uri, list.prefix(window, history())) and rejects() < 200 then
+      rejects := rejects() + 1
+      false
+    else
+      rejects := 0
+      h = list.add(uri, history())
+      history := if list.length(h) > m.norepeat then list.prefix(m.norepeat, h) else h end
+      file.write(data=json.stringify({file=uri, at=time()}), m.next)
+      true
+    end
+  end
+  music = playlist(id=m.id ^ "_pl", mode=m.mode, loop=m.loop, reload_mode="watch", check_next=not_recent, m.m3u)
+  silence = single(id=m.id ^ "_silence", silence_file)
+  # track_sensitive=false: 음악이 준비되는 즉시 무음에서 넘어간다
+  fallback(id=m.id ^ "_fallback", track_sensitive=false, [music, silence])
+end
+def on_new_track(m) =
+  fun (md) -> begin
+    np = json.stringify({live=m.live, file=md["filename"], title=md["title"], artist=md["artist"], started=time()})
+    file.write(data=np, m.np)
+  end
+end
+# 그대로 내보내기 (기본 — AAC 를 디코딩 없이)
+def mk_copy(m) =
+  radio = source.on_track(mk_base(m), on_new_track(m))
+@TAIL@  out = output.harbor(@ENC_COPY@, id=m.id ^ "_out", port=m.port, mount=m.mount,
+    format="audio/aac", fallible=true, radio)
+  fun () -> out.shutdown()
+end
+# 크로스페이드 (이 라이브만 디코딩·섞기·AAC 재인코딩)
+def mk_xf(m) =
+  radio = crossfade(id=m.id ^ "_xf", duration=m.cf + 2., fade_in=m.cf, fade_out=m.cf, mk_base(m))
+  radio = source.on_track(radio, on_new_track(m))
+@TAIL@  out = output.harbor(@ENC_XF@, id=m.id ^ "_out", port=m.port, mount=m.mount,
+    format="audio/aac", fallible=true, radio)
+  fun () -> out.shutdown()
+end
+
+# 1초마다 목록을 읽어: 빠진 항목은 내리고, 새 항목은 올린다. 이미 도는 항목은 건드리지 않는다
+running = ref([])
+def sync() =
+  try
+    let json.parse (ms : [{id: string, live: string, mount: string, port: int, m3u: string, np: string, next: string, mode: string, loop: bool, norepeat: int, cf: float}]) = file.contents(members_path)
+    want = list.map(fun (m) -> m.id, ms)
+    gone = list.filter(fun (r) -> not list.mem(fst(r), want), running())
+    list.iter(fun (r) -> begin
+      log.important(label="group", "REMOVE #{fst(r)}")
+      stop = snd(r)
+      stop()
+    end, gone)
+    running := list.filter(fun (r) -> list.mem(fst(r), want), running())
+    list.iter(fun (m) -> begin
+      if not list.assoc.mem(m.id, running()) then
+        try
+          stop = if m.cf > 0. then mk_xf(m) else mk_copy(m) end
+          running := list.add((m.id, stop), running())
+          log.important(label="group", "ADD #{m.id}")
+        catch err do
+          log.severe(label="group", "ADD FAILED #{m.id}: #{err}")
+        end
+      end
+    end, ms)
+  catch err do
+    log.severe(label="group", "members read failed: #{err}")
+  end
+end
+sync()
+thread.run(every=1., sync)
+"""
+
+
+def render_dynamic(paths: Paths, settings: dict, key: str) -> str:
+    """묶음 프로그램 스크립트 — 라이브 목록은 들어 있지 않다 (members.json 에서 읽음). 서버 설정이 같으면 늘 같은 내용."""
+    aspec = settings["spec"]["audio"]
+    buf = float(settings.get("audio_buffer_seconds", 2.0))
+    # 음악 완충(render 와 같음): 곡 읽기를 '음악 시계'로 따로 돌리고 내보내기 사이에 버퍼
+    tail = (f'  clock.assign_new(id=m.id ^ "_music", [radio])\n'
+            f'  radio = buffer(id=m.id ^ "_buf", buffer={buf:.1f}, max={max(buf * 3, 6.0):.1f}, radio)\n') if buf > 0 else ""
+    rep = {
+        "@KEY@": key,
+        "@LOG@": q(paths.logs / (group_log_name(key) + ".log")),
+        "@FRAME@": f"{float(settings.get('audio_frame_seconds', 0.2)):.2f}",
+        "@MEMBERS@": q(members_path(paths, key)),
+        "@SILENCE@": q(SILENCE_FILE),
+        "@TAIL@": tail,
+        "@ENC_COPY@": '%ffmpeg(format="adts", %audio.copy)',
+        "@ENC_XF@": (f'%ffmpeg(format="adts", %audio(codec="aac", b={q(aspec["bitrate"])}, '
+                     f'samplerate={int(aspec["sample_rate"])}, channels={int(aspec["channels"])}))'),
+    }
+    text = _DYN
+    for k, v in rep.items():
+        text = text.replace(k, v)
+    return text
+
+
+def write_dynamic(paths: Paths, settings: dict, key: str, text: str | None = None) -> Path:
     p = paths.run_dir / f"{key}.group.liq"
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(text if text is not None else render_group(lives, paths, settings, key), encoding="utf-8")
+    tmp.write_text(text if text is not None else render_dynamic(paths, settings, key), encoding="utf-8")
     tmp.replace(p)
     return p

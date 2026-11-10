@@ -8,7 +8,7 @@ import time
 import pytest
 
 from conftest import make_live
-from livemax import config, liquidsoap, supervisor
+from livemax import config, ffmpeg_cmd, liquidsoap, supervisor
 
 HAS = bool(shutil.which("liquidsoap") and shutil.which("ffmpeg"))
 
@@ -30,60 +30,213 @@ def _open(port):
         return False
 
 
-def test_render_group_keeps_each_live_separate(paths, settings):
-    lives = [make_live(id=f"live{i}", channel_id="ch1", audio_folders=["a"], harbor_port=8400 + i, restart_slot=i) for i in range(3)]
-    txt = liquidsoap.render_group(lives, paths, settings, "ch-ch1")
-    assert txt.count("def setup_live") == 3 and txt.count("output.harbor(") == 3
-    assert all(f"port={8400 + i}" in txt for i in range(3))
-    assert "audio-g-ch-ch1.log" in txt and txt.count("settings.log.file.path.set(") == 1
-    assert liquidsoap.group_key(lives[0]) == "ch-ch1" and liquidsoap.group_key(make_live(id="x9")) == "solo-x9"
+class _Sink:
+    """ffmpeg 가 보내는 FLV 를 받아 영상·소리 조각을 센다 (유튜브 자리)."""
+
+    def __init__(self):
+        import threading
+
+        from livemax.rtmp_relay import FlvParser
+
+        self.v = self.a = 0
+        self.last_a = time.time()
+        self.max_a_gap = 0.0
+        self.srv = socket.socket()
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(1)
+        self.port = self.srv.getsockname()[1]
+        self._parser = FlvParser
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        c, _ = self.srv.accept()
+        ps, buf, hdr = self._parser(), b"", False
+        while True:
+            b = c.recv(65536)
+            if not b:
+                return
+            if not hdr:
+                buf += b
+                if len(buf) < 13:
+                    continue
+                b, hdr = buf[13:], True
+            for t, _ts, _d in ps.feed(b):
+                if t == 9:
+                    self.v += 1
+                elif t == 8:
+                    now = time.time()
+                    if self.a:
+                        self.max_a_gap = max(self.max_a_gap, now - self.last_a)
+                    self.a, self.last_a = self.a + 1, now
+
+    def audio_flowing(self, sec=3.0):
+        a0 = self.a
+        time.sleep(sec)
+        return self.a - a0 > sec * 20  # AAC 44.1kHz ≈ 초당 43조각
 
 
-@pytest.mark.skipif(not HAS, reason="liquidsoap/ffmpeg 미설치")
-def test_group_check_passes(paths, settings, tmp_path):
-    _songs(paths)
-    lives = [make_live(id=f"live{i}", channel_id="ch1", audio_folders=["a"], harbor_port=8400 + i, restart_slot=i,
-                       crossfade=(3 if i == 1 else 0)) for i in range(3)]
-    p = liquidsoap.write_group(lives, paths, settings, "ch-ch1")
-    r = subprocess.run(["liquidsoap", "--no-deprecated", "--check", str(p)], capture_output=True, text=True, timeout=180)
-    assert r.returncode == 0, r.stdout + r.stderr
+def _video(paths):
+    v = paths.root / "v.mp4"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=6", "-c:v", "libx264",
+                    "-g", "30", "-b:v", "300k", "-pix_fmt", "yuv420p", str(v)], check=True)
+    lst = paths.root / "list.ffconcat"
+    lst.write_text("ffconcat version 1.0\n" + "".join(f"file '{v}'\n" for _ in range(100)))
+    return lst
 
 
-@pytest.mark.skipif(not HAS, reason="liquidsoap/ffmpeg 미설치")
-def test_supervisor_runs_one_process_per_channel(paths, settings):
-    _songs(paths)
+def _wait(fn, timeout=25.0, step=0.25):
+    end = time.time() + timeout
+    while time.time() < end:
+        r = fn()
+        if r:
+            return r
+        time.sleep(step)
+    return None
+
+
+def _sup(paths, settings, n=2):
     settings["audio_shared"] = True
     store = config.LiveStore(paths, settings)
-    for i in range(3):
-        store.save(make_live(id=f"live{i + 1}", channel_id="ch1", key_id=f"k{i + 1}", audio_folders=["a"], harbor_port=8410 + i, restart_slot=i))
-    sup = supervisor.Supervisor(paths, settings)
-    assert sup.shared_audio and sup.audio_log_name("live2") == "audio-g-ch-ch1"
+    for i in range(1, n + 1):
+        store.save(make_live(id=f"live{i}", channel_id="ch1", key_id=f"k{i}", audio_folders=["a"], harbor_port=8410 + i, restart_slot=i))
+    return supervisor.Supervisor(paths, settings), store
+
+
+def _stop(sup, *procs):
+    sup.stop_event.set()
+    for p in procs:
+        if p and p.poll() is None:
+            p.kill()
+    for g in sup.groups.values():
+        supervisor.LiveProc._kill(g.get("proc"))
+
+
+def test_dynamic_script_has_no_members_and_entry_fields(paths, settings):
+    """묶음 스크립트에는 라이브가 들어 있지 않다 (목록 파일로 넣고 뺌) → 라이브가 늘어도 스크립트는 그대로."""
+    txt = liquidsoap.render_dynamic(paths, settings, "ch-ch1")
+    assert "members.json" in txt and "audio-g-ch-ch1.log" in txt and "live1" not in txt
+    lv = make_live(id="live7", channel_id="ch1", audio_folders=["a"], crossfade=3)
+    e = liquidsoap.member_entry(lv, paths, "live7_4", 9001)
+    assert e["id"] == "live7_4" and e["mount"] == "live7_4.aac" and e["port"] == 9001 and e["cf"] == 3.0 and e["live"] == "live7"
+    assert liquidsoap.audio_sig(lv) != liquidsoap.audio_sig(make_live(id="live7", channel_id="ch1", audio_folders=["a"]))
+    assert liquidsoap.write_members(paths, "ch-ch1", [e]) is True and liquidsoap.write_members(paths, "ch-ch1", [e]) is False
+
+
+@pytest.mark.skipif(not HAS, reason="liquidsoap/ffmpeg 미설치")
+def test_dynamic_script_check_passes(paths, settings):
+    for buf in (2.0, 0):
+        settings["audio_buffer_seconds"] = buf
+        p = liquidsoap.write_dynamic(paths, settings, "ch-ch1")
+        r = subprocess.run(["liquidsoap", "--no-deprecated", "--check", str(p)], capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_assignment_is_sticky(paths, settings):
+    """한 번 잡은 묶음 자리는 다른 라이브가 생기거나 지워져도 안 바뀐다 (옮기면 그 라이브 음악이 끊김). 새 라이브만 빈자리로."""
+    settings["audio_group_max"] = 2
+    sup, store = _sup(paths, settings, 3)
+    lives = store.all()
+    m = dict(sup._assign(lives))
+    assert m == {"live1": "ch-ch1", "live2": "ch-ch1", "live3": "ch-ch1-2"}
+    store.delete("live1")  # 앞 묶음에 빈자리 — live3 은 그대로, 새 라이브가 그 자리로
+    store.save(make_live(id="live9", channel_id="ch1", key_id="k9", audio_folders=["a"], harbor_port=8499, restart_slot=9))
+    m2 = dict(sup._assign(store.all()))
+    assert m2["live2"] == "ch-ch1" and m2["live3"] == "ch-ch1-2" and m2["live9"] == "ch-ch1" and "live1" not in m2
+    lv = store.get("live2")
+    lv.channel_id, lv.key_id = "ch2", "k2"
+    store.save(lv)  # 채널을 옮기면 그 라이브만 새 자리
+    assert dict(sup._assign(store.all()))["live2"] == "ch-ch2"
+
+
+@pytest.mark.skipif(not HAS, reason="liquidsoap/ffmpeg 미설치")
+def test_add_remove_change_without_restarting_group(paths, settings):
+    """v2.12 사고 재현 방지: 송출 중인 묶음에 라이브를 추가·삭제·설정 변경해도 묶음 프로그램은 그대로, 기존 라이브 소리는 안 끊긴다."""
+    _songs(paths)
+    sup, store = _sup(paths, settings, 2)
+    ff = None
     try:
         sup.groups_tick()
-        assert "ch-ch1" in sup.groups and sup.groups["ch-ch1"]["proc"] is None  # 송출 중인 라이브가 없으면 안 띄움
-        sup.proc("live1").desired = True  # 하나만 켜도 묶음 전체(꺼 둔 라이브 몫까지)가 뜬다
+        assert sup.groups["ch-ch1"]["proc"] is None  # 송출 중인 라이브가 없으면 안 띄움
+        sup.proc("live1").desired = True
         sup.groups_tick()
-        pr = sup.groups["ch-ch1"]["proc"]
-        assert pr is not None and pr.poll() is None
-        for _ in range(80):
-            if all(_open(8410 + i) for i in range(3)):
-                break
-            time.sleep(0.25)
-        assert all(_open(8410 + i) for i in range(3))
-        assert sup.group_pid("live3") == pr.pid  # 세 라이브가 같은 프로그램
+        g = sup.groups["ch-ch1"]
+        pr = g["proc"]
+        assert pr is not None and pr.poll() is None and set(g["inst"]) == {"live1"}  # 켠 라이브만 올림
+        url1 = _wait(lambda: sup.audio_url("live1"))
+        assert url1 and url1.endswith("/live1_1.aac") and sup.audio_url("live2") is None
+        sink = _Sink()
+        ff = subprocess.Popen(ffmpeg_cmd.build(_video(paths), url1, f"tcp://127.0.0.1:{sink.port}", extra_out=["-flush_packets", "0"]),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        assert _wait(lambda: sink.a > 50)
+        sink.max_a_gap = 0.0
+        # 1) 같은 채널에 새 라이브 추가 (41번째 라이브 상황) + 기존 live2 시작
+        store.save(make_live(id="live3", channel_id="ch1", key_id="k3", audio_folders=["a"], harbor_port=8413, restart_slot=3))
+        sup.proc("live3").desired = True
+        sup.proc("live2").desired = True
         sup.groups_tick()
-        assert sup.groups["ch-ch1"]["proc"] is pr  # 바뀐 게 없으면 그대로
+        assert g["proc"] is pr and pr.poll() is None  # 다시 켜지 않음
+        assert _wait(lambda: sup.audio_url("live3")) and _wait(lambda: sup.audio_url("live2"))
+        # 2) live2 재생 방식 변경 → live2 만 새 주소, live1 주소는 그대로
+        old2 = sup.audio_url("live2")
         lv = store.get("live2")
         lv.audio_mode = "random"
-        store.save(lv)  # 재생 방식 변경 → 그 채널 묶음만 다시
+        store.save(lv)
+        assert sup.audio_url("live2") is None  # 옛 설정의 주소는 더 내주지 않는다 (ffmpeg 가 옛 주소로 붙지 않게)
         sup.groups_tick()
-        assert sup.groups["ch-ch1"]["proc"] is not pr and pr.poll() is not None
-        sup.proc("live1").desired = False  # 송출 중인 라이브가 없어지면 끈다
+        new2 = _wait(lambda: sup.audio_url("live2"))
+        assert new2 and new2 != old2 and sup.audio_url("live1") == url1
+        assert not sup._mount_ok(g["port"], old2.rsplit("/", 1)[1])  # 옛 주소는 내려감
+        # 3) live3 삭제 → live3 만 내려감
+        tok3 = g["inst"]["live3"]["token"]
+        sup.procs.pop("live3").desired = False
+        store.delete("live3")
         sup.groups_tick()
-        assert sup.groups["ch-ch1"]["proc"] is None
+        assert _wait(lambda: not sup._mount_ok(g["port"], tok3 + ".aac"))
+        # 4) 같은 id 의 새 라이브가 다시 생겨도 (id·포트 재사용) 새 이름으로 올라간다
+        store.save(make_live(id="live3", channel_id="ch1", key_id="k3", audio_folders=["a"], harbor_port=8413, restart_slot=3))
+        sup.proc("live3").desired = True
+        sup.groups_tick()
+        again = _wait(lambda: sup.audio_url("live3"))
+        assert again and not again.endswith(tok3 + ".aac")
+        # 그동안 live1 의 소리는 한 번도 끊기지 않았다
+        assert g["proc"] is pr and pr.poll() is None and ff.poll() is None
+        assert sink.audio_flowing() and sink.max_a_gap < 1.5, sink.max_a_gap
+        # 5) 송출 중인 라이브가 없어지면 프로그램도 끈다
+        for i in ("live1", "live2", "live3"):
+            sup.proc(i).desired = False
+        sup.groups_tick()
+        assert g["proc"] is None and pr.poll() is not None
     finally:
-        for g in sup.groups.values():
-            supervisor.LiveProc._kill(g.get("proc"))
+        _stop(sup, ff)
+
+
+@pytest.mark.skipif(not HAS, reason="liquidsoap/ffmpeg 미설치")
+def test_ffmpeg_reattaches_audio_after_group_crash(paths, settings):
+    """음악 묶음 프로그램이 죽어도: 바로 다시 뜨고(같은 포트·같은 주소), ffmpeg 가 스스로 다시 붙어 소리가 돌아온다.
+    (v2.12 까지: ffmpeg 는 죽지 않고 소리 없는 영상만 계속 보냄 — 감시에는 정상으로 보임)"""
+    _songs(paths)
+    sup, _store = _sup(paths, settings, 1)
+    ff = None
+    try:
+        sup.proc("live1").desired = True
+        sup.groups_tick()
+        g = sup.groups["ch-ch1"]
+        url = _wait(lambda: sup.audio_url("live1"))
+        assert url
+        sink = _Sink()
+        ff = subprocess.Popen(ffmpeg_cmd.build(_video(paths), url, f"tcp://127.0.0.1:{sink.port}", extra_out=["-flush_packets", "0"]),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        assert _wait(lambda: sink.a > 50)
+        old = g["proc"]
+        old.kill()  # 사고: 음악 프로그램이 갑자기 죽음
+        assert _wait(lambda: g["proc"] is not None and g["proc"] is not old and g["proc"].poll() is None, timeout=15)  # 5초 주기를 안 기다림
+        assert sup.audio_url("live1") in (None, url)
+        assert _wait(lambda: sup.audio_url("live1") == url, timeout=20)  # 같은 주소로 다시 올라옴
+        a0, v0 = sink.a, sink.v
+        assert _wait(lambda: sink.a > a0 + 100 and sink.v > v0 + 60, timeout=40), (sink.a - a0, sink.v - v0)  # 소리·영상 모두 다시 흐름
+        assert ff.poll() is None
+    finally:
+        _stop(sup, ff)
 
 
 def test_group_keys_cap_by_live_number():
@@ -115,10 +268,14 @@ def test_group_log_view_filters_and_names(client, paths, settings):
         "2026/11/09 01:00:00 [main:3] Liquidsoap 2.2\n"
         "2026/11/09 01:00:01 [live1_pl:3] Prepared song-a\n"
         "2026/11/09 01:00:02 [live13_pl:3] Prepared song-b\n"
-        "2026/11/09 01:00:03 [clock.live13_music:3] catchup\n", encoding="utf-8")
+        "2026/11/09 01:00:03 [clock.live13_music:3] catchup\n"
+        "2026/11/09 01:00:04 [group:2] ADD live13_2\n"
+        "2026/11/09 01:00:05 [live13_2_out:3] new-format-line\n"
+        "2026/11/09 01:00:06 [live1_7_pl:3] other-new\n", encoding="utf-8")
     t = client.get("/api/logs", params={"name": "audio-live13"}).json()["text"]
     assert "song-b" in t and "song-a" not in t and "Liquidsoap 2.2" in t
     assert "LIVE 13 · live13 · 재생목록" in t and "음악 시계" in t and "live13_pl" not in t
+    assert "음악 올림: LIVE 13 · live13" in t and "LIVE 13 · live13 · 출력:3] new-format-line" in t and "other-new" not in t
     assert "함께 도는 라이브 1개: LIVE 1" in t
     t1 = client.get("/api/logs", params={"name": "audio-live1"}).json()["text"]
     assert "song-a" in t1 and "song-b" not in t1 and "catchup" not in t1

@@ -55,6 +55,9 @@ TS_RENEW_MS = 40 * 86400 * 1000  # RTMP 시각은 32비트(약 49.7일)에서 0�
 STATS_S = 15  # 이만큼마다 supervisor 에 전송량·지연을 알린다 (DB 기록용)
 SLOW_DELAY_S = 2.0  # 유튜브로 못 보내고 밀린 영상이 이만큼(초) 넘게 이어지면 '전송 밀림'
 SLOW_HOLD_S = 5  # 밀림이 이만큼 계속돼야 기록 (순간 출렁임은 무시), 회복도 이만큼 계속돼야 끝으로 봄
+# 내용 감시 (v2.13): 원인이 무엇이든 사고는 '유튜브로 가는 영상·소리가 모자람'으로 나타난다 → 영상·소리를 따로 센다
+NO_AUDIO_S = 8    # 영상은 오는데 소리가 이만큼(초) 한 조각도 없으면 '소리 없음' (ffmpeg 가 음악 연결을 잃은 채 영상만 보냄)
+NO_INPUT_S = (10, 30)  # ffmpeg 가 붙어 있는데 이만큼(초) 아무것도 안 보내면 알림 — 10초: 기록, 30초: 송출 프로그램 재시작 요청
 
 # ------------------------------------------------------------------ AMF0
 
@@ -482,6 +485,10 @@ class Feed:
                     break
                 self.stats["in"] += len(chunk)
                 for t, ts, d in parser.feed(chunk):
+                    if t == 8:
+                        self.stats["a"] = self.stats.get("a", 0) + 1
+                    elif t == 9:
+                        self.stats["v"] = self.stats.get("v", 0) + 1
                     if t == 18 and self.meta is None:
                         self.meta = (t, ts, d)
                     elif _avc_seq(t, d):
@@ -527,7 +534,8 @@ class Relay:
         self.last_out = 0  # 마지막으로 보낸 시각(ms)
         self.last_wall = 0.0  # 그때의 실제 시각
         self.idle_task: asyncio.Task | None = None
-        self.stats = {"in": 0, "out": 0}  # ffmpeg 에서 받은 바이트 / 유튜브 쪽에 넘긴 바이트 (누적)
+        # ffmpeg 에서 받은 바이트 / 유튜브 쪽에 넘긴 바이트 / 받은 소리·영상 조각 수 (누적)
+        self.stats = {"in": 0, "out": 0, "a": 0, "v": 0}
         self.feed: Feed | None = None
         self.reconnecting = False
 
@@ -561,7 +569,43 @@ class Relay:
 
     def _watch_state(self, now: float) -> dict:
         return {"t": now, "in": self.stats["in"], "out": self.stats["out"], "rate": 0.0, "win": deque(maxlen=STATS_S),
-                "slow": None, "calm": 0, "emit": now}
+                "slow": None, "calm": 0, "emit": now,
+                "a": self.stats.get("a", 0), "v": self.stats.get("v", 0), "mute": 0.0, "mute_on": False,
+                "idle": 0.0, "idle_lv": 0}
+
+    def _watch_content(self, w: dict, dt: float, d_in: int) -> None:
+        """영상·소리가 실제로 오는지. 영상만 오고 소리가 없으면 'no_audio', 아무것도 안 오면 'no_input' (송출 중일 때만)."""
+        a, v = self.stats.get("a", 0), self.stats.get("v", 0)
+        da, dv = a - w["a"], v - w["v"]
+        w["a"], w["v"] = a, v
+        if not self.busy:  # ffmpeg 가 바뀌는 중(영상 교체·재시작) — 세지 않는다
+            w["mute"] = w["idle"] = 0.0
+            w["mute_on"], w["idle_lv"] = False, 0
+            return
+        # --- 소리 없음: 영상 조각은 오는데 소리 조각이 0
+        if da > 0:
+            if w["mute_on"]:
+                log.warning("소리가 다시 들어옴 (%.0f초 만에)", w["mute"])
+                _emit({"event": "audio_back", "sec": round(w["mute"])})
+            w["mute"], w["mute_on"] = 0.0, False
+        elif dv > 0:
+            w["mute"] += dt
+            if not w["mute_on"] and w["mute"] >= NO_AUDIO_S:
+                w["mute_on"] = True
+                log.warning("소리 없음 — 영상만 들어온 지 %.0f초 (송출 프로그램이 음악 연결을 잃음)", w["mute"])
+                _emit({"event": "no_audio", "sec": round(w["mute"])})
+        # --- 입력 없음: ffmpeg 가 붙어 있는데 아무것도 안 보냄
+        if d_in > 0:
+            if w["idle_lv"]:
+                log.warning("송출 프로그램이 다시 보내기 시작 (%.0f초 동안 멈춤)", w["idle"])
+                _emit({"event": "input_back", "sec": round(w["idle"])})
+            w["idle"], w["idle_lv"] = 0.0, 0
+        else:
+            w["idle"] += dt
+            if w["idle_lv"] < len(NO_INPUT_S) and w["idle"] >= NO_INPUT_S[w["idle_lv"]]:
+                w["idle_lv"] += 1
+                log.warning("송출 프로그램이 %.0f초째 아무것도 안 보냄", w["idle"])
+                _emit({"event": "no_input", "sec": round(w["idle"])})
 
     def _watch_step(self, w: dict, now: float) -> None:
         dt = max(0.001, now - w["t"])
@@ -573,6 +617,7 @@ class Relay:
         if d_in > 0:  # 최근 입력 속도 (바이트/초) — 밀린 양을 '초'로 바꿀 때 쓴다
             w["rate"] = d_in / dt if w["rate"] == 0 else w["rate"] * 0.9 + d_in / dt * 0.1
         w["win"].append((dt, d_in, d_out))
+        self._watch_content(w, dt, d_in)
         delay = pend / w["rate"] if w["rate"] > 0 and self.busy else 0.0
         if self.busy and dt >= 2.5:  # 1초마다 깨어나야 하는데 한참 늦음 = 중계기 자체가 멈춤 (그동안 유튜브로 아무것도 안 감)
             log.warning("중계기가 %.1f초 멈췄다가 다시 움직임 (서버 처리 지연)", dt - 1)

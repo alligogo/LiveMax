@@ -151,3 +151,43 @@ def proc_rss_mb(pid: int) -> float | None:
 
 def pid_alive(pid: int | None) -> bool:
     return bool(pid) and Path(f"/proc/{pid}").exists()
+
+
+class PeakTracker:
+    """CPU·메모리의 '오늘 최고값' (DESIGN 11-D 19 · v2.13). 수집기는 15초 평균이라 순간 피크가 안 보인다 —
+    1초마다 /proc/stat·/proc/meminfo 두 파일만 읽어 하루(day_start 기준) 최고값과 그 시각만 기억한다 (부담 거의 없음).
+    실측(라이브 40개): 15초 평균 약 24% 일 때 1초 최고 43% — 서버 업체 그래프가 이 1초 최고값과 비슷하게 나온다."""
+
+    def __init__(self, day_start=None):
+        self._day_start = day_start or (lambda now: 0.0)
+        self._prev: CpuTimes | None = None
+        self._day = None
+        self.cpu = (0.0, 0.0)  # (최고 %, 시각)
+        self.mem = (0.0, 0.0)  # (최고 MB, 시각)
+
+    def sample(self, now: float) -> None:
+        day = self._day_start(now)
+        if day != self._day:
+            self._day, self.cpu, self.mem = day, (0.0, 0.0), (0.0, 0.0)
+        cur = read_cpu()
+        if self._prev is not None:
+            pct = cpu_percent(self._prev, cur)[0]
+            if pct > self.cpu[0]:
+                self.cpu = (pct, now)
+        self._prev = cur
+        used = read_mem()[0] + read_swap()[0]  # 스왑으로 옮겨진 몫도 쓰는 메모리로 (서버 박스와 같은 기준)
+        if used > self.mem[0]:
+            self.mem = (used, now)
+
+    def snapshot(self) -> dict:
+        return {"cpu_peak_pct": round(self.cpu[0], 1), "cpu_peak_at": self.cpu[1] or None,
+                "mem_peak_mb": round(self.mem[0]), "mem_peak_at": self.mem[1] or None}
+
+    def run(self, stop) -> None:
+        import time
+
+        while not stop.wait(1):
+            try:
+                self.sample(time.time())
+            except Exception:  # noqa: BLE001 — 측정 실패가 다른 일을 막지 않게
+                pass

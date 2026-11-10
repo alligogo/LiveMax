@@ -501,18 +501,23 @@ function renderSide(side, ov) {
   // 서버 박스 한 줄: 이름 · 지금 값 / 막대(실제 사용 ÷ 전체, 세로 눈금 = 안전선) / 설명. 먼저 막히는 자원은 이름 굵게
   // 안전선 넘으면 노랑·95% 넘으면 빨강 + 빗금(색만으로 구분하지 않게 — 색약 배려), 값 앞에 ⚠
   const over = (frac, safe) => (frac || 0) >= 0.95 ? "hi" : safe != null && (frac || 0) > safe ? "mid" : "";
-  const bar = (frac, safe, kind) => {
+  // peak: 오늘 최고값 위치 (0~1) — 안전선(세로 막대)과 모양이 다른 작은 ▼ 로 (색만으로 구분하지 않게)
+  const bar = (frac, safe, kind, peak) => {
     const f = Math.max(0, Math.min(1, frac || 0));
     const cls = over(frac, safe) || "k-" + kind;
     return h("div", { class: "cap-bar" }, h("i", { class: cls, style: `width:${(f * 100).toFixed(1)}%` }),
-      safe != null ? h("s", { style: `left:${(Math.min(1, safe) * 100).toFixed(1)}%`, title: "안전선" }) : null);
+      safe != null ? h("s", { style: `left:${(Math.min(1, safe) * 100).toFixed(1)}%`, title: "안전선" }) : null,
+      peak != null && peak > 0 ? h("u", { style: `left:${(Math.min(1, peak) * 100).toFixed(1)}%`, title: "오늘 최고" }) : null);
   };
   // 제목 옆 작은 회색 글씨 = 지금 사용률 % (CPU 는 값 자체가 % 라 생략)
-  const row = (kind, k, v, note, frac, safe, lead) => h("div", { class: "cap-row" + (lead ? " lead" : "") },
+  const row = (kind, k, v, note, frac, safe, lead, peak) => h("div", { class: "cap-row" + (lead ? " lead" : "") },
     h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, k,
       kind !== "cpu" && frac != null ? h("small", { class: "cap-safe" }, `${Math.round(Math.max(0, frac) * 100)}%`) : null), h("b", { class: over(frac, safe) ? "over" : "" }, over(frac, safe) ? ico("warn") : null, v)),
-    frac !== undefined ? bar(frac, safe, kind) : null,
+    frac !== undefined ? bar(frac, safe, kind, peak) : null,
     note ? h("div", { class: "cap-note" }, note) : null);
+  // 오늘 최고값 (1초 단위로 잰 순간 피크 — 위 숫자는 15초 평균). 하루 기준은 일일 재시작 시각
+  const peakNote = (txt, at) => h("div", { class: "peak-note", title: "오늘(일일 재시작 시각부터) 1초 단위로 잰 순간 최고값. 위의 큰 숫자는 15초 평균이라 이보다 낮습니다" },
+    "▼ 오늘 최고 ", h("b", {}, txt), at ? ` (${fmt.clock(at)})` : "");
   const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, swapU = s.swap_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
   const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.5, diskW = c.disk_warn_pct ?? 85;
   // 지금 송신 속도 그대로 한 달(이번 달 일수) 내내 보낸다면 — 대략 예상
@@ -554,10 +559,12 @@ function renderSide(side, ov) {
             // 남은 여유분은 스왑으로 옮겨진 몫까지 '쓰는 메모리'로 쳐서 계산 (여유가 부풀려 보이지 않게)
             memT ? [`라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 남은 여유분 ${Math.max(0, Math.round(memT - reserve - memU - swapU)).toLocaleString()}MB`,
               swapU >= 50 ? h("span", { class: "swap-note", title: "리눅스가 한동안 안 쓰는 메모리를 비상 스왑으로 옮겨 둔 양 — 계속 오가지만 않으면 괜찮습니다 (오가면 알림)" },
-                ` · 스왑 ${fmt.num(swapU / 1024, 1)}GB`) : null] : null,
-            memT ? memU / memT : 0, memT ? (memT - reserve) / memT : null, c.limiting === "ram"),
-          row("cpu", "CPU", fmt.num(s.cpu_pct, 1, "%"), `라이브당 약 ${fmt.num(c.cpu_per_live_pct, 1)}% · steal ${fmt.num(s.steal_pct, 2, "%")}`,
-            (s.cpu_pct || 0) / 100, cpuT / 100, c.limiting === "cpu"),
+                ` · 스왑 ${fmt.num(swapU / 1024, 1)}GB`) : null,
+              s.mem_peak_mb ? peakNote(`${fmt.num(s.mem_peak_mb / 1024, 1)}GB`, s.mem_peak_at) : null] : null,
+            memT ? memU / memT : 0, memT ? (memT - reserve) / memT : null, c.limiting === "ram", memT && s.mem_peak_mb ? s.mem_peak_mb / memT : null),
+          row("cpu", "CPU", fmt.num(s.cpu_pct, 1, "%"), [`라이브당 약 ${fmt.num(c.cpu_per_live_pct, 1)}% · steal ${fmt.num(s.steal_pct, 2, "%")}`,
+              s.cpu_peak_pct ? peakNote(`${fmt.num(s.cpu_peak_pct, 0)}%`, s.cpu_peak_at) : null],
+            (s.cpu_pct || 0) / 100, cpuT / 100, c.limiting === "cpu", s.cpu_peak_pct ? s.cpu_peak_pct / 100 : null),
           row("net", "회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, `라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps`,
             c.port_mbit ? (s.net_tx_mbps || 0) / c.port_mbit : 0, portR, c.limiting === "bandwidth"),
           row("disk", "디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-", diskFit,
@@ -601,6 +608,19 @@ function armBtn(lv, action, cls, label) {
   const b = h("button", { class: `${cls} arm${on ? " armed" : ""}` }, h("i", { class: "gauge" }), h("span", {}, on ? "한 번 더 누르세요" : label));
   b.addEventListener("click", () => {
     if (armed[k] && Date.now() - armed[k] < 4000) { delete armed[k]; liveAction(lv, action); return; }
+    armed[k] = Date.now();
+    b.classList.add("armed"); b.querySelector("span").textContent = "한 번 더 누르세요";
+    setTimeout(() => { if (armed[k] && Date.now() - armed[k] >= 3900) { delete armed[k]; b.classList.remove("armed"); b.querySelector("span").textContent = label; } }, 4000);
+  });
+  return b;
+}
+
+// 같은 방식의 두 번 누르기를 다른 버튼에도 (예: 업데이트)
+function armAny(k, cls, label, fn) {
+  const on = armed[k] && Date.now() - armed[k] < 4000;
+  const b = h("button", { class: `${cls} arm${on ? " armed" : ""}` }, h("i", { class: "gauge" }), h("span", {}, on ? "한 번 더 누르세요" : label));
+  b.addEventListener("click", () => {
+    if (armed[k] && Date.now() - armed[k] < 4000) { delete armed[k]; b.classList.remove("armed"); b.querySelector("span").textContent = label; fn(); return; }
     armed[k] = Date.now();
     b.classList.add("armed"); b.querySelector("span").textContent = "한 번 더 누르세요";
     setTimeout(() => { if (armed[k] && Date.now() - armed[k] >= 3900) { delete armed[k]; b.classList.remove("armed"); b.querySelector("span").textContent = label; } }, 4000);
@@ -1350,10 +1370,11 @@ async function showSystem() {
         s.update_requested ? h("p", { class: "msg" }, "업데이트 요청됨 — 1~2분 안에 처리됩니다.")
           : s.update_last ? h("p", { class: "small " + (s.update_last.result === "failed" ? "msg err" : "muted") }, `마지막 업데이트 실행 ${fmt.time(Date.parse(s.update_last.at) / 1000)} — `,
             { latest: "그때 이미 최신이었음", updated: "새 버전으로 업데이트함", failed: "실패 (서버의 logs/update.log 확인)", running: "진행 중" }[s.update_last.result]) : null,
-        h("button", { class: "btn primary", onclick: async () => {
+        // 실수 방지: 라이브 정지·재시작 버튼처럼 4초 안에 두 번 눌러야 확인 창이 뜬다 (전체 라이브가 다시 켜지는 버튼이라)
+        armAny("system:update", "btn primary", "최신 버전으로 업데이트", async () => {
           if (!confirm("새 버전으로 업데이트할까요? 모든 라이브가 잠깐 끊겼다가 차례대로 복귀합니다.")) return;
           try { const r = await api("POST", "/api/system/update"); toast(r.message); showSystem(); } catch (e) { toast(e.message, true); }
-        } }, "최신 버전으로 업데이트")),
+        })),
       s.reboot_required ? card("서버 재부팅 필요",
         h("p", {}, "보안 업데이트(커널 등)가 설치되어 재부팅을 기다리고 있습니다. 송출 영향이 적은 시간에 서버에서 ", h("code", {}, "sudo reboot"), " 하세요."),
         s.reboot_packages.length ? h("p", { class: "small muted" }, s.reboot_packages.join(", ")) : null) : null,
@@ -1413,7 +1434,7 @@ function serverCard(s, card) {
   const sharedLab = h("label", { class: "check" + (shared.checked ? " on" : "") }, shared,
     h("span", { class: "nm" }, h("b", {}, "음악 프로그램을 채널별로 묶기 (메모리 절약)"),
       h("span", { class: "desc" }, "라이브마다 하나씩 띄우던 음악 프로그램을 채널마다 하나로 — 라이브 10개 기준 약 835MB → 150MB. ",
-        "대신 그 프로그램이 멈추면 그 채널 라이브들의 음악이 같이 다시 켜집니다.")));
+"라이브를 추가·삭제해도 다른 라이브 음악은 끊기지 않습니다. 프로그램이 멈추면 바로 다시 켜지고 송출도 몇 초 뒤 스스로 이어집니다.")));
   shared.addEventListener("change", () => sharedLab.classList.toggle("on", shared.checked));
   const pendingShared = !!s.settings.audio_shared !== !!s.settings.audio_shared_active;
   const groupMax = h("input", { class: "input", type: "number", min: 1, max: 50, value: s.settings.audio_group_max ?? 10, style: "max-width:90px" });
@@ -1434,7 +1455,7 @@ function serverCard(s, card) {
         ? `저장됨 — 다음 업데이트(또는 SSH 에서 sudo livemax restart) 때 적용됩니다. 지금은 ${s.settings.audio_shared_active ? "묶음" : "라이브마다 하나"}로 돌고 있어요.`
         : `지금: ${s.settings.audio_shared_active ? "채널별 묶음" : "라이브마다 하나"}. 바꾸면 다음 업데이트(또는 sudo livemax restart) 때 적용됩니다 — 그때 라이브들이 차례로 다시 켜져요.`),
       h("div", { class: "row", style: "margin-top:10px;gap:8px;align-items:center" }, h("span", {}, "묶음 하나에 최대"), groupMax, h("span", {}, "개 (기본 10)")),
-      h("div", { class: "hint" }, "한 채널에 라이브가 이보다 많으면 라이브 번호 순으로 나눠 묶습니다 (예: 25개 → 10·10·5). 바꾸면 바로 적용 — 나뉘는 채널의 음악만 몇 초 다시 켜집니다.")),
+      h("div", { class: "hint" }, "한 채널에 라이브가 이보다 많으면 나눠 묶습니다 (예: 25개 → 10·10·5). 이미 자리를 잡은 라이브는 옮기지 않고(음악이 끊기지 않게), 새로 만드는 라이브와 다음 업데이트부터 적용됩니다.")),
     h("button", { class: "btn primary", onclick: async () => {
       try {
         await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value),

@@ -40,6 +40,7 @@ from .paths import Paths
 from .state import read_json, write_json_atomic
 
 log = logging.getLogger("livemax.supervisor")
+GROUP_ADD_GRACE_S = 20  # 묶음에 올리라고 한 뒤 이만큼 지나도 소리가 안 나오면 그 라이브만 단독 프로그램으로
 
 
 class _LiveName(logging.Filter):
@@ -63,6 +64,8 @@ NOT_COUNTED = PLANNED + (QUIET_RECONNECT,)
 # 밀림·재연결 알림 기준 (DESIGN 11-D 11) — '우리 문제'일 때만 눈에 띄게
 SLOW_LOG_S = 10        # 밀림 요약을 로그에 남기는 기준 (최대 밀림 또는 지속 시간)
 SLOW_ALERT_DUR_S = 30  # 라이브 1개가 이만큼 넘게 밀리면 알림 박스
+SLOW_ALERT_DELAY_S = 10  # 또는 못 보낸 영상이 이만큼(초) 넘게 쌓였으면 알림 박스 — 짧아도 시청자가 끊김을 겪는다
+                         # (실제: 18초 동안 최대 17.8초 밀리고 3초 만에 재접속한 사건이 '30초 미만·재접속 5초 이하'라 조용히 넘어갔다)
 SLOW_REPEAT_N = 3      # 같은 라이브가 1시간에 이만큼 밀리면 알림 박스
 QUIET_GAP_S = 5.0      # 유튜브 재연결이 이 안에 붙으면 조용히
 MASS_SLOW_N = 3        # 라이브 이만큼이 같은 순간 밀리면 서버·회선 문제 → 휴대폰 알림
@@ -204,7 +207,7 @@ class LiveProc:
             self.start()
             return
         if audio_too:
-            self.sup.groups_kick()  # 묶음 모드: 재생 방식·크로스페이드가 바뀌면 묶음 스크립트가 달라져 그 채널 음악이 다시 켜진다
+            self.sup.groups_kick()  # 묶음 모드: 재생 방식·크로스페이드가 바뀌면 이 라이브 음악만 새 주소로 다시 올린다 (다른 라이브는 그대로)
         self.pending_reason = reason
         self.set(state="restarting", message=reason)
         self._kill_video(keep_relay=True)
@@ -301,11 +304,18 @@ class LiveProc:
                 return False
             key = secrets.read_secret(kp)
 
-            # 오디오 준비 대기
+            # 오디오 준비 대기. 묶음 모드: 묶음 프로그램이 이 라이브 음악을 (지금 설정으로) 올려 소리가 나올 때까지
             deadline = time.time() + float(settings["output"]["audio_connect_timeout"])
-            while time.time() < deadline and self.desired and not _port_open(live.harbor_port):
-                time.sleep(0.5)
-            if not _port_open(live.harbor_port):
+            if self.sup.shared_audio:
+                audio_url = self.sup.audio_url(self.id)
+                while audio_url is None and time.time() < deadline and self.desired:
+                    time.sleep(0.5)
+                    audio_url = self.sup.audio_url(self.id)
+            else:
+                while time.time() < deadline and self.desired and not _port_open(live.harbor_port):
+                    time.sleep(0.5)
+                audio_url = f"http://127.0.0.1:{live.harbor_port}/{live.id}.aac" if _port_open(live.harbor_port) else None
+            if audio_url is None:
                 self.set(state="error", message="오디오 준비 안 됨 (음악 폴더 확인)")
                 return False
 
@@ -338,7 +348,7 @@ class LiveProc:
                     relay_port = self.relay.start(base, verify=bool(rcfg.get("verify", True)),
                                                   ipv4=bool(rcfg.get("ipv4", True)))
                 out = tls_relay.plan(base, key, relay_port)
-            args = ffmpeg_cmd.build(list_path, f"http://127.0.0.1:{live.harbor_port}/{live.id}.aac", out.url,
+            args = ffmpeg_cmd.build(list_path, audio_url, out.url,
                                     extra_out=out.extra_args)
             self.log.info("ffmpeg 시작 (%s, %s): %s", out.mode, list_path.name, ffmpeg_cmd.redacted(args, key))
             self.video = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -391,6 +401,22 @@ class LiveProc:
         if kind == "slow_start":  # 2초 넘게 5초 이상 밀림 — 로그는 끝날 때 한 번만, 동시 밀림 판정에만 쓴다
             self.sup.note_slow(self.id, True)
             return
+        if kind == "no_audio":  # 영상만 가고 소리가 없다 — ffmpeg 가 음악 연결을 잃음 (스스로 다시 붙기에 실패한 뒤)
+            self._auto_restart("소리 없음", f"영상만 송출되고 소리가 {ev.get('sec')}초째 없음 — 송출 프로그램을 다시 띄워 음악을 다시 붙임")
+            return
+        if kind == "audio_back":
+            self.log.info("소리가 다시 나감 (%s초 만에)", ev.get("sec"))
+            return
+        if kind == "no_input":
+            sec = float(ev.get("sec") or 0)
+            if sec >= 30:
+                self._auto_restart("입력 없음", f"송출 프로그램이 {sec:.0f}초째 아무것도 안 보냄 — 다시 띄움")
+            else:
+                self.event("warn", f"송출 프로그램이 {sec:.0f}초째 아무것도 안 보냄 (음악 프로그램이 다시 켜지는 중이면 곧 이어짐)")
+            return
+        if kind == "input_back":
+            self.event("warn", f"송출 프로그램이 다시 보내기 시작 — {ev.get('sec')}초 동안 유튜브로 영상·소리가 안 나감")
+            return
         if kind == "stall":
             msg = f"중계기가 {ev.get('sec')}초 멈춤 — 그동안 유튜브로 못 보냄 (서버 처리 지연, 회선 아님)"
             if float(ev.get("sec") or 0) >= 3:
@@ -408,7 +434,7 @@ class LiveProc:
                    + (f", 막힌 곳: {where}" if where else "") + ". 연결은 유지됨")
             self.slow_eps.append(now)
             recent = sum(1 for t in self.slow_eps if now - t < 3600)
-            if dur >= SLOW_ALERT_DUR_S:
+            if dur >= SLOW_ALERT_DUR_S or mx >= SLOW_ALERT_DELAY_S:
                 self.event("warn", msg)
             elif recent >= SLOW_REPEAT_N and now - self.slow_alert_at > 3600:
                 self.slow_alert_at = now
@@ -425,6 +451,24 @@ class LiveProc:
                 return
             self.restarts.append((time.time(), f"유튜브 재접속 {gap:.1f}초"))
             self.event("warn", f"유튜브가 연결을 끊음 → 중계기가 {gap:.1f}초 만에 다시 접속 (송출 프로그램은 계속)")
+
+    def _auto_restart(self, reason: str, detail: str) -> None:
+        """중계기가 내용 이상(소리 없음·입력 없음)을 알렸을 때 — 그 라이브의 ffmpeg 만 다시 띄운다 (유튜브 연결은 유지).
+        1시간 재시작 한도를 넘으면 더 건드리지 않고 알림만 (감시 루프와 같은 규칙)."""
+        if not self.desired or self.st.get("state") != "running":
+            return
+        now = time.time()
+        lv = self.sup.store.get(self.id)
+        name = lv.name if lv else self.id
+        recent = sum(1 for t, r in self.restarts if now - t < 3600 and not r.startswith(NOT_COUNTED))
+        if recent >= int(self.sup.settings["watchdog"]["max_restarts_per_hour"]):
+            self.set(message=f"재시작 한도 초과 — {reason}")
+            self.event("error", f"{detail} (재시작 한도 초과 — 자동 재시작 안 함)")
+            self.sup.notify("down", f"{name}: 재시작 한도 초과", f"1시간에 {recent}번 재시작 — {reason}. 확인이 필요합니다", dedupe_s=3600)
+            return
+        self.event("warn", detail)
+        self.sup.notify("restart", f"{name}: 자동 재시작", detail)
+        self.restart(reason)
 
     def _track_blip(self, delay: float) -> None:
         """15초 숫자로 '1초 넘는 밀림' 횟수·최대를 센다 (카드에 회색으로, 알림 없음)."""
@@ -510,9 +554,12 @@ class Supervisor:
         self._slow_now: dict[str, float] = {}  # 지금 밀리는 중인 라이브 → 시작 시각
         # 음악 프로그램 채널별 묶음 (B안). 켜고 끄기는 LiveMax 가 다시 켜질 때(업데이트·재시작) 적용 — 도중에 바꾸면 꼬인다
         self.shared_audio = bool(settings.get("audio_shared", False))
-        self.groups: dict[str, dict] = {}  # 묶음 키 → {proc, sig, fails, next_try, started, members}
+        # 묶음 키 → {proc, port, seq, inst{라이브 id → {token, sig, since, ready}}, fails, next_try, started}
+        self.groups: dict[str, dict] = {}
         self._glock = threading.Lock()
-        self._gmap: dict[str, str] = {}  # 라이브 id → 묶음 이름 (groups_tick 이 갱신)
+        self._alock = threading.Lock()
+        self._gmap: dict[str, str] = {}  # 라이브 id → 묶음 이름 (한 번 정하면 LiveMax 가 다시 켜질 때까지 그대로)
+        self._gch: dict[str, str] = {}   # 라이브 id → 자리를 잡을 때의 채널 (채널이 바뀌면 자리를 다시 잡는다)
         self._mass_slow_at = 0.0
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -743,10 +790,55 @@ class Supervisor:
         for g in list(self.groups.values()):
             LiveProc._kill(g.get("proc"))
 
-    # ---------------------------------------------------------------- 음악 묶음 (B안)
+    # ---------------------------------------------------------------- 음악 묶음 (무중단, DESIGN 11-F)
+    def group_max(self) -> int:
+        try:
+            return max(1, int(self.settings.get("audio_group_max") or liquidsoap.GROUP_MAX_DEFAULT))
+        except (TypeError, ValueError):
+            return liquidsoap.GROUP_MAX_DEFAULT
+
+    def _assign(self, lives: list) -> dict[str, str]:
+        """라이브 → 묶음. 한 번 정해진 자리는 LiveMax 가 다시 켜질 때까지 그대로 (다른 라이브가 생기거나 지워져도 안 옮긴다 —
+        옮기면 그 라이브 음악이 끊긴다). 새 라이브만 그 채널에서 자리가 남은 묶음(없으면 새 묶음)에 넣는다."""
+        from .catalog import natural_key
+
+        ids = {lv.id: lv for lv in lives}
+        for lid in list(self._gmap):
+            lv = ids.get(lid)
+            if lv is None or self._gch.get(lid) != (lv.channel_id or ""):
+                self._gmap.pop(lid, None)
+                self._gch.pop(lid, None)
+        counts: dict[str, int] = {}
+        for k in self._gmap.values():
+            counts[k] = counts.get(k, 0) + 1
+        mx = self.group_max()
+        for lv in sorted(lives, key=lambda x: natural_key(x.id)):
+            if lv.id in self._gmap:
+                continue
+            if not lv.channel_id:
+                key = f"solo-{lv.id}"
+            else:
+                n = 1
+                while True:
+                    key = f"ch-{lv.channel_id}" if n == 1 else f"ch-{lv.channel_id}-{n}"
+                    if counts.get(key, 0) < mx:
+                        break
+                    n += 1
+            self._gmap[lv.id] = key
+            self._gch[lv.id] = lv.channel_id or ""
+            counts[key] = counts.get(key, 0) + 1
+        return self._gmap
+
+    def _group_of(self, lv) -> str:
+        """그 라이브가 들어간 묶음 이름 (아직 자리를 안 잡았으면 지금 잡는다)."""
+        k = self._gmap.get(lv.id)
+        if k is None:
+            with self._alock:
+                k = self._assign([x for x in self.store.all() if x.audio_folders]).get(lv.id) or liquidsoap.group_key(lv)
+        return k
+
     def group_pid(self, live_id: str) -> int | None:
-        lv = self.store.get(live_id)
-        g = self.groups.get(self._group_of(lv)) if lv else None
+        g = self.groups.get(self._gmap.get(live_id, ""))
         pr = g and g.get("proc")
         return pr.pid if pr and pr.poll() is None else None
 
@@ -755,85 +847,161 @@ class Supervisor:
         lv = self.store.get(live_id)
         return liquidsoap.group_log_name(self._group_of(lv)) if (self.shared_audio and lv) else f"audio-{live_id}"
 
-    def group_max(self) -> int:
-        try:
-            return max(1, int(self.settings.get("audio_group_max") or liquidsoap.GROUP_MAX_DEFAULT))
-        except (TypeError, ValueError):
-            return liquidsoap.GROUP_MAX_DEFAULT
-
-    def _group_of(self, lv) -> str:
-        """그 라이브가 들어간 묶음 이름 (마지막 groups_tick 기준, 아직 없으면 지금 계산)."""
-        k = self._gmap.get(lv.id)
-        if k is None:
-            k = liquidsoap.group_keys([x for x in self.store.all() if x.audio_folders] or [lv], self.group_max()).get(
-                lv.id, liquidsoap.group_key(lv))
-        return k
-
     def group_members(self, live_id: str) -> list[str]:
         """같은 음악 묶음에 들어 있는 라이브 id 들 (묶음 모드가 아니면 자기 하나)."""
         lv = self.store.get(live_id)
         if not (self.shared_audio and lv):
             return [live_id]
-        gmap = liquidsoap.group_keys([x for x in self.store.all() if x.audio_folders] or [lv], self.group_max())
-        k = gmap.get(live_id, self._group_of(lv))
-        return [i for i, g in gmap.items() if g == k] or [live_id]
+        k = self._group_of(lv)
+        return [i for i, g in list(self._gmap.items()) if g == k] or [live_id]
+
+    @staticmethod
+    def _mount_ok(port: int, mount: str) -> bool:
+        """그 음악 주소가 실제로 소리를 내보내는지 (포트만 열려 있고 주소는 아직 없을 수 있다 — 묶음 포트는 여럿이 같이 씀)."""
+        import http.client
+
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=1.5)
+            try:
+                c.request("GET", "/" + mount)
+                return c.getresponse().status == 200
+            finally:
+                c.close()
+        except (OSError, http.client.HTTPException):
+            return False
+
+    def audio_url(self, live_id: str) -> str | None:
+        """묶음 모드: 그 라이브의 음악 주소 — 지금 설정으로 올라와 소리가 나올 때만. 아니면 None (ffmpeg 는 기다린다)."""
+        lv = self.store.get(live_id)
+        g = self.groups.get(self._gmap.get(live_id, ""))
+        if not lv or not g:
+            return None
+        inst = g["inst"].get(live_id)
+        pr = g.get("proc")
+        if not inst or inst["sig"] != liquidsoap.audio_sig(lv) or pr is None or pr.poll() is not None:
+            return None
+        mount = f"{inst['token']}.aac"
+        if not inst["ready"]:
+            if not self._mount_ok(g["port"], mount):
+                return None
+            inst["ready"] = True
+        return f"http://127.0.0.1:{g['port']}/{mount}"
+
+    def _group_wait(self, key: str, proc: subprocess.Popen) -> None:
+        """묶음 프로그램이 죽으면 5초 주기를 기다리지 않고 바로 다시 띄운다 — ffmpeg 가 다시 붙기를 시도하는 동안(약 26초) 안에
+        돌아오게. 일부러 끈 경우(송출 중인 라이브 없음)는 groups_tick 이 아무것도 하지 않는다."""
+        proc.wait()
+        if self.stop_event.is_set():
+            return
+        self.groups_tick()  # 죽음을 기록하고 다시 띄울 시각을 정한다
+        g = self.groups.get(key)
+        if g and g.get("proc") is None:
+            self.stop_event.wait(max(0.0, g["next_try"] - time.time()) + 0.05)
+            if not self.stop_event.is_set():
+                self.groups_tick()
 
     def groups_kick(self) -> None:
         """라이브 시작·정지·설정 변경 직후 바로 한 번 맞춘다 (5초 주기를 기다리지 않게)."""
         threading.Thread(target=self.groups_tick, name="groups-kick", daemon=True).start()
 
     def groups_tick(self) -> None:
-        """채널마다: 송출 중인 라이브가 하나라도 있으면 묶음 프로그램을 띄우고, 없으면 끈다.
-        묶음에는 그 채널의 모든 라이브(꺼 둔 것도)를 넣는다 — 라이브 하나를 켜고 끌 때마다 같은 채널의 다른 라이브
-        음악을 다시 켜지 않게. 라이브 추가·삭제·채널 변경·재생 방식/크로스페이드 변경으로 스크립트가 달라질 때만 다시 켠다."""
+        """묶음마다: 송출 중인 라이브가 하나라도 있으면 묶음 프로그램을 띄우고, 없으면 끈다.
+        돌고 있는 프로그램은 다시 켜지 않는다 — 라이브 추가·삭제·음악 설정 변경은 members.json 만 바꾸면 프로그램이
+        그 라이브 몫만 올리고 내린다 (v2.12 까지는 통째로 다시 켜서 같은 묶음의 다른 라이브 소리가 끊겼다)."""
         if not self._glock.acquire(blocking=False):
             return
         try:
             now = time.time()
-            members: dict[str, list] = {}
             withaudio = [lv for lv in self.store.all() if lv.audio_folders]
-            gmap = liquidsoap.group_keys(withaudio, self.group_max())
-            self._gmap = gmap
+            with self._alock:
+                gmap = dict(self._assign(withaudio))
+            members: dict[str, list] = {}
             for lv in withaudio:
                 members.setdefault(gmap[lv.id], []).append(lv)
             for key in list(self.groups):
                 if key not in members:
                     LiveProc._kill(self.groups.pop(key).get("proc"))
+                    liquidsoap.members_path(self.paths, key).unlink(missing_ok=True)
+            backoff = self.settings["supervisor"]["restart_backoff_seconds"]
             for key, lives in members.items():
-                g = self.groups.setdefault(key, {"proc": None, "sig": None, "fails": 0, "next_try": 0.0, "started": 0.0})
-                want = any((self.procs.get(lv.id) and self.procs[lv.id].desired) for lv in lives)
+                g = self.groups.setdefault(key, {"proc": None, "port": None, "seq": 0, "inst": {}, "fails": 0,
+                                                 "next_try": 0.0, "started": 0.0})
+                inst: dict[str, dict] = g["inst"]
+                on_air = [lv for lv in lives if (self.procs.get(lv.id) and self.procs[lv.id].desired)]
                 pr = g["proc"]
-                if pr is not None and pr.poll() is not None:  # 죽음
+                if pr is not None and pr.poll() is not None:  # 죽음 → 같은 포트·같은 주소로 다시 (ffmpeg 가 스스로 다시 붙는다)
                     rc = pr.returncode
                     g["fails"] = 0 if now - g["started"] > 120 else g["fails"] + 1
-                    g["next_try"] = now + float(self.settings["supervisor"]["restart_backoff_seconds"][
-                        min(g["fails"], len(self.settings["supervisor"]["restart_backoff_seconds"]) - 1)])
+                    g["next_try"] = now + float(backoff[min(g["fails"], len(backoff) - 1)])
                     g["proc"] = pr = None
-                    if want:
-                        log.error("음악 묶음 %s 종료 rc=%s — 다시 띄움 (라이브 %s)", key, rc, ", ".join(lv.id for lv in lives))
-                        for lv in lives:
-                            p = self.procs.get(lv.id)
-                            if p and p.desired:
-                                p.event("error", f"오디오(Liquidsoap 묶음 {key}) 종료 rc={rc} — 재기동")
-                if not want:
+                    if g["fails"] >= 3:
+                        g["port"] = None  # 계속 못 뜨면 포트를 바꿔 본다 (그 묶음 ffmpeg 는 무음 감지로 다시 붙음)
+                    if on_air:
+                        log.error("음악 묶음 %s 종료 rc=%s — 다시 띄움 (송출 중 %s)", key, rc, ", ".join(lv.id for lv in on_air))
+                        for lv in on_air:
+                            self.procs[lv.id].event("error", f"오디오(Liquidsoap 묶음 {key}) 종료 rc={rc} — 재기동")
+                if not on_air:  # 그 묶음에 송출 중인 라이브가 없음 → 프로그램도 끈다 (내린 라이브 찌꺼기도 이때 사라진다)
                     if pr is not None:
                         LiveProc._kill(pr)
                         g["proc"] = None
+                    if inst:
+                        inst.clear()
+                        liquidsoap.write_members(self.paths, key, [])
                     continue
-                script = liquidsoap.render_group(lives, self.paths, self.settings, key)
-                if pr is not None and g["sig"] == script:
+                # 항목 맞추기: 없어진 라이브·설정이 바뀐 라이브는 내리고, 송출하려는 라이브는 (새 이름으로) 올린다.
+                # 정지한 라이브의 항목은 그대로 둔다 — 다시 시작하면 바로 붙고, 내려도 찌꺼기가 남아 이득이 없다
+                ids = {lv.id for lv in lives}
+                for lid in [x for x in inst if x not in ids]:
+                    del inst[lid]
+                for lv in lives:
+                    sig = liquidsoap.audio_sig(lv)
+                    cur = inst.get(lv.id)
+                    if cur is not None and cur["sig"] != sig:
+                        del inst[lv.id]
+                        cur = None
+                    if cur is None and lv in on_air:
+                        g["seq"] += 1
+                        inst[lv.id] = {"token": f"{lv.id}_{g['seq']}", "sig": sig, "since": now, "ready": False}
+                        try:
+                            liquidsoap.write_m3u(lv, self.paths)
+                        except Exception:  # noqa: BLE001
+                            log.exception("m3u 쓰기 실패 %s", lv.id)
+                if g["port"] is None:
+                    g["port"] = tls_relay.free_port()
+                entries = []
+                for lv in lives:
+                    if lv.id in inst:
+                        try:
+                            entries.append(liquidsoap.member_entry(lv, self.paths, inst[lv.id]["token"], g["port"]))
+                        except ValueError as e:
+                            log.error("음악 묶음 %s: %s 를 넣을 수 없음 — %s", key, lv.id, e)
+                if liquidsoap.write_members(self.paths, key, entries) and pr is not None:
+                    log.info("음악 묶음 %s 구성 변경 — 다시 켜지 않고 반영 (%s)", key, ", ".join(e["id"] for e in entries))
+                if pr is None:
+                    if now < g["next_try"]:
+                        continue
+                    path = liquidsoap.write_dynamic(self.paths, self.settings, key)
+                    g["proc"] = subprocess.Popen([LIQUIDSOAP, *LIQUIDSOAP_ARGS, str(path)], stdin=subprocess.DEVNULL,
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    g["started"] = now
+                    for i in inst.values():
+                        i["since"], i["ready"] = now, False
+                    threading.Thread(target=self._group_wait, args=(key, g["proc"]), name=f"group-wait-{key}", daemon=True).start()
+                    log.info("음악 묶음 %s 시작 (포트 %d, 라이브 %d개: %s)", key, g["port"], len(entries),
+                             ", ".join(e["live"] for e in entries))
                     continue
-                if pr is not None:  # 묶음 구성이 바뀜 → 그 채널 음악만 다시
-                    log.info("음악 묶음 %s 구성 변경 — 다시 띄움", key)
-                    LiveProc._kill(pr)
-                    g["proc"] = None
-                elif now < g["next_try"]:
-                    continue
-                path = liquidsoap.write_group(lives, self.paths, self.settings, key, script)
-                g["proc"] = subprocess.Popen([LIQUIDSOAP, *LIQUIDSOAP_ARGS, str(path)], stdin=subprocess.DEVNULL,
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                g["sig"], g["started"] = script, now
-                log.info("음악 묶음 %s 시작 (라이브 %d개: %s)", key, len(lives), ", ".join(lv.id for lv in lives))
+                # 보험: 올리라고 한 지 한참인데 소리가 안 나오는 라이브는 단독 프로그램으로 뺀다 (기존 묶음은 그대로)
+                if now - g["started"] > GROUP_ADD_GRACE_S and not key.startswith("solo-"):
+                    for lv in on_air:
+                        i = inst.get(lv.id)
+                        if i and not i["ready"] and now - i["since"] > GROUP_ADD_GRACE_S:
+                            if self._mount_ok(g["port"], f"{i['token']}.aac"):
+                                i["ready"] = True
+                                continue
+                            with self._alock:
+                                self._gmap[lv.id] = f"solo-{lv.id}"
+                            del inst[lv.id]
+                            self.procs[lv.id].event("error", f"음악 묶음 {key} 에 올리지 못함 — 이 라이브만 단독 음악 프로그램으로 전환")
         finally:
             self._glock.release()
 

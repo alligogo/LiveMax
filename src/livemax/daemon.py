@@ -58,6 +58,7 @@ class App:
         self.notifier = notify.Notifier(self.paths, self.settings)
         self.supervisor.notify = self.notifier.send
         self.collector = Collector(self.paths, self.settings, self.supervisor, on_emergency=self.cleanup_async)
+        self.peaks = sysmetrics.PeakTracker(lambda now: config.day_start(self.settings, now))  # CPU·메모리 오늘 최고값
         self.started_at = time.time()
         self._cleanup_lock = threading.Lock()
         self.version = os.environ.get("LIVEMAX_VERSION", "dev")
@@ -166,7 +167,8 @@ class App:
                              ("boot", self.supervisor.start_all), ("cpuwatch", lambda: cpuwatch.run(self.stop)),
                              ("fetch", lambda: self.fetcher.run(self.stop)),
                              ("prefetch", lambda: prefetch.run(self.supervisor, self.stop)),
-                             ("telegram", lambda: self.notifier.run_bot(self.stop))):
+                             ("telegram", lambda: self.notifier.run_bot(self.stop)),
+                             ("peaks", lambda: self.peaks.run(self.stop))):
             threading.Thread(target=target, name=name, daemon=True).start()
         log.info("livemaxd %s 시작 (data=%s)", self.version, self.paths.root)
 

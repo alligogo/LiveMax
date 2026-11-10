@@ -19,6 +19,10 @@ from pathlib import Path
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
 
+AUDIO_RECONNECT = ("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_at_eof", "1",
+                   "-reconnect_on_network_error", "1", "-reconnect_on_http_error", "4xx,5xx", "-reconnect_delay_max", "15")
+
+
 class ReencodeForbidden(RuntimeError):
     pass
 
@@ -77,7 +81,11 @@ def build(concat_list: Path, audio_url: str, output_url: str, rw_timeout_s: int 
         "-nostats", "-progress", "pipe:1", "-stats_period", "2",
         # 영상: 24시간치 concat 목록을 실시간 속도로 읽음
         "-re", "-f", "concat", "-safe", "0", "-i", str(concat_list),
-        # 오디오: Liquidsoap harbor (로컬). 끊기면 rw_timeout 후 종료 → systemd/워치독이 재시작
+        # 오디오: Liquidsoap harbor (로컬).
+        # 음악 프로그램이 죽었다 살아나도 ffmpeg 가 스스로 다시 붙는다 (v2.13). 이 옵션이 없으면 음악 연결이 끊긴 순간
+        # ffmpeg 는 죽지 않고 '소리 없는 영상'만 계속 보낸다 (6.1 실측 — 감시에는 정상으로 보임).
+        # 다시 붙는 동안 영상도 같이 멈췄다가 이어져 시각이 어긋나지 않는다. 간격 0·1·3·7·15초로 약 26초까지 시도.
+        *AUDIO_RECONNECT,
         # 로컬 Liquidsoap 의 ADTS AAC — 기본 탐색(최대 5초) 대신 0.5초만 보고 바로 시작 (재시작 공백 단축)
         "-thread_queue_size", "1024", "-rw_timeout", str(rw_timeout_s * 1_000_000),
         "-analyzeduration", "500000", "-probesize", "65536", "-i", audio_url,
