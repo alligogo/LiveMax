@@ -521,15 +521,19 @@ function setSidePin(v) {
 }
 function renderSide(side, ov) {
   side.classList.toggle("pinned", SIDE_PIN);
+  // 고정 위치 = 원래 자리(상단바 실제 높이 + 본문 위 여백) — 스크롤을 시작할 때 칸이 위로 밀리지 않게 (v2.15)
+  const tb = document.querySelector(".topbar");
+  if (tb) document.documentElement.style.setProperty("--topbar-h", `${tb.offsetHeight}px`);
+  const keepTop = side.scrollTop;  // 5초마다 다시 그려도 칸 안 스크롤 위치 유지
   const s = ov.system || {}, c = ov.capacity || {};
   const counts = liveCounts(ov);
   // 서버 박스 한 줄: 이름 · 지금 값 / 막대(실제 사용 ÷ 전체, 세로 눈금 = 안전선) / 설명. 먼저 막히는 자원은 이름 굵게
   // 안전선 넘으면 노랑·95% 넘으면 빨강 + 빗금(색만으로 구분하지 않게 — 색약 배려), 값 앞에 ⚠
   const over = (frac, safe) => (frac || 0) >= 0.95 ? "hi" : safe != null && (frac || 0) > safe ? "mid" : "";
-  // peak: 오늘 최고값 위치 (0~1) — 빨간 점선 세로선 (안전선은 흰 실선 — 색만이 아니라 점선/실선 모양으로도 구분, 색약 배려)
+  // peak: 오늘 최고값 위치 (0~1) — 안전선과 같은 모양의 빨간 세로선 (v2.15)
   const bar = (frac, safe, kind, peak) => {
     const f = Math.max(0, Math.min(1, frac || 0));
-    const cls = over(frac, safe) || "k-" + kind;
+    const cls = (kind === "lives" ? "" : over(frac, safe)) || "k-" + kind;  // 라이브 개수 막대는 늘 초록 (꽉 차도 경고 아님)
     return h("div", { class: "cap-bar" }, h("i", { class: cls, style: `width:${(f * 100).toFixed(1)}%` }),
       safe != null ? h("s", { style: `left:${(Math.min(1, safe) * 100).toFixed(1)}%`, title: "안전선" }) : null,
       peak != null && peak > 0 ? h("u", { style: `left:${(Math.min(1, peak) * 100).toFixed(1)}%`, title: "오늘 최고" }) : null);
@@ -542,7 +546,7 @@ function renderSide(side, ov) {
     note ? h("div", { class: "cap-note" }, note) : null);
   // 오늘 최고값 (1초 단위로 잰 순간 피크 — 위 숫자는 15초 평균). 하루 기준은 일일 재시작 시각
   const peakNote = (txt, at) => h("div", { class: "peak-note", title: "오늘(일일 재시작 시각부터) 1초 단위로 잰 순간 최고값. 위의 큰 숫자는 15초 평균이라 이보다 낮습니다" },
-    h("i", { class: "peak-ico", "aria-hidden": "true" }), "오늘 최고 ", h("b", {}, txt), at ? ` (${fmt.clock(at)})` : "");
+    "오늘 최고 ", h("b", {}, txt), at ? ` (${fmt.clock(at)})` : "");
   const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, swapU = s.swap_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
   const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.5, diskW = c.disk_warn_pct ?? 85;
   // 지금 송신 속도 그대로 한 달(이번 달 일수) 내내 보낸다면 — 대략 예상
@@ -621,6 +625,7 @@ function renderSide(side, ov) {
             a.id ? h("button", { class: "x", title: "확인 — 지우기", "aria-label": "지우기", onclick: () => dismissAlert(a.id) }, "✕")
                  : h("span", { class: "x-ph", title: "지금 상태 — 해결되면 저절로 사라집니다" }))))
         : h("div", { class: "muted small" }, "알림 없음"))));
+  if (keepTop) side.scrollTop = keepTop;
 }
 
 async function dismissAlert(id) {
@@ -1475,7 +1480,7 @@ function serverCard(s, card) {
     h("label", { class: "field" }, h("span", {}, "서버명"), name,
       h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
     h("label", { class: "field" }, h("span", {}, "라이브 최대 개수"), maxLives,
-      h("div", { class: "hint" }, "안전장치 — 이 서버에 이 개수보다 많은 라이브를 만들 수 없습니다 (기본 40). 서버 사양을 올리면 늘리세요.")),
+      h("div", { class: "hint" }, "안전장치 — 이 서버에 이 개수보다 많은 라이브를 만들 수 없습니다 (기본 50 — 운영 표준). 서버 사양을 올리면 늘리세요.")),
     h("label", { class: "field" }, h("span", {}, "회선 속도 (Mbps)"), port,
       h("div", { class: "hint" }, "서버 업체가 보장하는 속도 (예: OVH VPS-2 = 1000, VPS-1 = 500). 용량 계산에서 아래 '회선 사용' 안전선까지 씁니다.")),
     h("label", { class: "field" }, h("span", {}, "월 트래픽 한도 (TB)"), traffic,

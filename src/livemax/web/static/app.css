@@ -314,11 +314,8 @@ a.ch-name:hover span { text-decoration: underline; }
 .cap-lbar { flex-basis: 100%; margin-top: 2px; }
 .cap-bar i.mid { background: var(--yellow); } .cap-bar i.hi { background: var(--red); }
 .cap-bar s { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #d4d4d4; border-radius: 1px; }
-/* 오늘 최고값: 빨간 '점선' 세로선 (v2.14) — 안전선(흰 실선)보다 위아래로 조금 길게. 색이 안 보여도 점선/실선·길이로 구분 */
-.cap-bar u { position: absolute; top: -5px; width: 2px; height: 16px; margin-left: -1px; text-decoration: none;
-  background: repeating-linear-gradient(to bottom, #ff3b3b 0 3px, transparent 3px 5px); }
-.peak-ico { display: inline-block; width: 2px; height: 11px; margin: 0 6px -1px 1px; vertical-align: baseline;
-  background: repeating-linear-gradient(to bottom, #ff3b3b 0 3px, transparent 3px 5px); }
+/* 오늘 최고값: 안전선(흰 세로선)과 같은 모양, 빨간색 (v2.15) */
+.cap-bar u { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; text-decoration: none; background: #ff3b3b; border-radius: 1px; }
 /* 안전기준 | 최소기준 (하루) */
 .cap-guess { display: flex; flex-wrap: wrap; gap: 2px 6px; font-size: 11px; letter-spacing: -.2px; }  /* 300px 칸에서 한 줄 (세 자리·메모리여도) */
 .cap-guess .sep { color: #555; }
@@ -627,7 +624,8 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .pin-btn:hover { color: var(--text); border-color: #777; }
 .pin-btn.on { background: #e5e5e5; border-color: #e5e5e5; color: #141414; }  /* 켜짐 = 채운 모양 (색만이 아니라 모양으로) */
 @media (min-width: 981px) {
-  .side.pinned { position: sticky; top: 84px; max-height: calc(100vh - 100px); overflow-y: auto; overscroll-behavior: contain;
+  .side.pinned { position: sticky; top: calc(var(--topbar-h, 66px) + 24px); max-height: calc(100vh - var(--topbar-h, 66px) - 40px);
+    overflow-y: auto; overscroll-behavior: contain;
     scrollbar-width: thin; scrollbar-color: #444 transparent; padding-right: 2px; }
 }
 @media (max-width: 980px) { .pin-btn { display: none; } }

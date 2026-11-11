@@ -436,7 +436,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
     _ov_cache = {"t": 0.0, "data": None}
 
     def _max_lives() -> int:
-        return int(settings.get("max_lives") or 40)
+        return int(settings.get("max_lives") or 50)
 
     # ------------------------------------------------------------------ 텔레그램 명령 (읽기 전용)
     _NOT_DROP = ("일일 재시작", "설정 적용", "사용자 재시작", "유튜브 짧은 재연결")
