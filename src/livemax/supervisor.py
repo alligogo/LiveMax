@@ -640,6 +640,21 @@ class Supervisor:
         now = time.time()
         self._write_session(live_id, started_at=now, alive_at=now)
 
+    def set_elapsed(self, live_id: str, seconds: float) -> float:
+        """화면에서 방송 시간을 직접 고침 (송출은 그대로, 숫자만). 송출 중(켜 둔) 라이브만. 새 시작 시각을 돌려준다.
+        방송 시간 타이머도 이 시작 시각을 기준으로 하므로 종료 예정도 같이 움직인다."""
+        p = self.procs.get(live_id)
+        if not (p and p.desired):
+            raise ConfigError("송출 중인 라이브만 방송 시간을 바꿀 수 있습니다")
+        seconds = float(seconds)
+        if not 0 <= seconds <= 3650 * 86400:
+            raise ConfigError("방송 시간 범위 오류")
+        now = time.time()
+        ses = self.session(live_id)
+        ses["started_at"], ses["alive_at"] = now - seconds, now
+        self._write_session(live_id, **ses)
+        return ses["started_at"]
+
     def timer_info(self, lv) -> dict:
         """화면용: 세션 시작, 타이머 종료 예정, 다음 방송 시작 예정 (epoch)."""
         ses = self.session(lv.id)
@@ -727,14 +742,11 @@ class Supervisor:
     def start_all(self) -> None:
         """부팅: 활성 라이브를 간격을 두고 하나씩 시작 (동시 시작 금지).
 
-        세션이 5분 안쪽으로 끊겼으면(업데이트·컨테이너 재시작) 같은 방송으로 이어 가고 타이머도 유지한다.
-        더 오래 꺼져 있었으면 유튜브 방송은 이미 끝났으므로 새 세션으로 시작한다.
+        방송 시간 기준 (v2.16, 사용자 결정 — DESIGN 11-G): **사용자가 정지하지 않은 라이브는 서버가 얼마나 꺼져 있었든
+        같은 방송으로 이어 간다** (업데이트·재부팅·장애 모두). 방송 시간이 0이 되는 건 사용자 정지·삭제·타이머 종료뿐.
+        유튜브 쪽 방송은 사용자가 직접 열고 닫으므로, 어긋나면 화면에서 시간을 직접 고친다 (set_elapsed).
+        (v2.13 까지 '5분 넘게 꺼졌으면 새 방송' 규칙 → 업데이트 때 뒤쪽 라이브가 리셋되던 원인 · v2.14 에서 부팅 시작 기준으로 · v2.16 에서 삭제)
         타이머가 이미 지났으면: 반복 → 새 세션, 반복 아님 → 시작하지 않는다.
-
-        '꺼져 있던 시간'은 부팅을 시작한 순간 한 번만 잰다 (v2.14). 예전엔 라이브마다 자기 차례에 쟀기 때문에
-        50개를 10초 간격으로 켜면 뒤쪽 약 20개가 순서를 기다린 시간까지 '꺼진 시간'으로 쳐져 5분을 넘었고,
-        유튜브 방송은 이어지는데 방송 시간이 0으로 돌아갔다 (4일째 라이브가 2일로 표시).
-        이어 갈 라이브는 이때 alive_at 도 지금으로 적어 둬서, 줄 서 있는 동안 다시 재시작돼도 이어 간다.
         """
         gap = float(self.settings["supervisor"]["boot_start_gap_seconds"])
         boot_at = time.time()
@@ -745,7 +757,7 @@ class Supervisor:
             ses = self.session(lv.id)
             if ses.get("next_start_at"):
                 continue  # 반복 대기 중 — loop 가 시각이 되면 시작
-            fresh = not ses.get("started_at") or boot_at - float(ses.get("alive_at") or 0) > 300
+            fresh = not ses.get("started_at")
             if not fresh:
                 ses["alive_at"] = boot_at
                 self._write_session(lv.id, **ses)

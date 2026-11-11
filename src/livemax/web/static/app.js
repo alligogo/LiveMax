@@ -307,7 +307,10 @@ function renderLives(grid, ov) {
       keytag: lv.key_label ? h("span", { class: "keytag", title: `스트림 키: ${lv.key_label} (${lv.key_masked})` }, ico("key"), lv.key_label) : null,
       edit: h("button", { class: "iconbtn", style: "width:30px;height:30px;background:transparent", title: "설정", html: ICON.edit, onclick: () => openLiveEditor(lv) }),
       tiles: h("div", { class: "tiles" },
-        tile(running && (lv.session_started_at || lv.started_at) ? fmt.age(now - (lv.session_started_at || lv.started_at)) : "-", "방송 시간"),
+        h("div", { class: "tile" }, h("b", {}, running && (lv.session_started_at || lv.started_at) ? fmt.age(now - (lv.session_started_at || lv.started_at)) : "-"),
+          h("span", { class: "tile-lab" }, "방송 시간",
+            running && lv.session_started_at ? h("button", { class: "tile-edit", title: "방송 시간 직접 설정", "aria-label": "방송 시간 직접 설정",
+              onclick: (e) => { e.stopPropagation(); openElapsedEditor(lv); } }, ico("edit")) : null)),
         tile(running && lv.bitrate_kbps ? Math.round(lv.bitrate_kbps).toLocaleString() : "-", "kbit/s"),
         tile(lv.speed != null ? lv.speed.toFixed(2) + "x" : "-", "speed", speedCls)),
       lines: [
@@ -711,6 +714,38 @@ function logClick(lv, el) {
   el.title = (el.title ? el.title + "\n" : "") + "눌러서 로그 보기";
   el.addEventListener("click", (e) => { e.stopPropagation(); e.preventDefault(); openLog(lv); });
   return el;
+}
+
+// 방송 시간 직접 설정 (v2.16) — 유튜브에서 방송을 새로 열었을 때 등. 송출은 그대로, 숫자만 바꾼다
+function openElapsedEditor(lv) {
+  const base = lastOverview?.server_time || Date.now() / 1000;
+  let sec = Math.max(0, Math.floor(base - (lv.session_started_at || base)));
+  const num = (v, max) => h("input", { class: "input el-num", type: "number", min: 0, max, value: v, inputmode: "numeric" });
+  const hh = num(Math.floor(sec / 3600), 87600), mm = num(Math.floor(sec % 3600 / 60), 59), ss = num(sec % 60, 59);
+  const preview = h("div", { class: "muted small", style: "margin-top:8px" });
+  const msg = h("div", { class: "msg err" });
+  const total = () => (Number(hh.value) || 0) * 3600 + (Number(mm.value) || 0) * 60 + (Number(ss.value) || 0);
+  const upd = () => { const t = total(); preview.textContent = `= ${Math.floor(t / 86400)}일 ${Math.floor(t % 86400 / 3600)}시간 ${Math.floor(t % 3600 / 60)}분`; };
+  [hh, mm, ss].forEach((x) => x.addEventListener("input", upd));
+  upd();
+  const save = async (t) => {
+    msg.textContent = "";
+    if (Number(mm.value) > 59 || Number(ss.value) > 59 || t < 0) { msg.textContent = "분·초는 0~59"; return; }
+    try { await api("PUT", `/api/lives/${lv.id}/elapsed`, { seconds: t }); closeModal(); toast("방송 시간을 바꿨습니다"); softRefresh(); }
+    catch (e) { msg.textContent = e.message; }
+  };
+  openModal(`방송 시간 — ${lv.name}`, [
+    h("div", { class: "el-row" }, hh, h("span", {}, ":"), mm, h("span", {}, ":"), ss),
+    h("div", { class: "muted small", style: "margin-top:4px" }, "시간 : 분 : 초 (시간은 24 넘어도 됨 — 4일 = 96)"),
+    preview,
+    lv.timer_mode === "duration" ? h("div", { class: "hint", style: "margin-top:8px" }, "방송 시간 타이머의 종료 시각도 이 기준으로 바뀝니다") : null,
+    h("div", { class: "hint", style: "margin-top:8px" }, "송출은 그대로 — 화면의 숫자만 바뀝니다. 정지하면 0으로 돌아갑니다."),
+    msg,
+  ], [
+    h("button", { class: "btn", onclick: () => save(0) }, "0으로"),
+    h("span", { class: "spacer", style: "flex:1" }),
+    h("button", { class: "btn primary", onclick: () => save(total()) }, "저장"),
+  ]);
 }
 
 async function openLog(lv) {

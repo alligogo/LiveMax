@@ -91,7 +91,11 @@ def test_boot_resume_or_fresh(sup):
     sup.start_all()
     assert sup.session("live1")["started_at"] == now - 3600
     sup.procs["live1"].desired = False
-    sup._write_session("live1", started_at=now - 3600, alive_at=now - 3000)  # 오래 꺼져 있었음 → 새 방송
+    sup._write_session("live1", started_at=now - 3600, alive_at=now - 3 * 86400)  # 사흘 꺼져 있었어도 정지 안 했으면 이어서 (v2.16)
+    sup.start_all()
+    assert sup.session("live1")["started_at"] == now - 3600
+    sup.procs["live1"].desired = False
+    sup._clear_session("live1")  # 세션 없음(사용자 정지 뒤) → 새 방송
     sup.start_all()
     assert sup.session("live1")["started_at"] > now - 5
 
@@ -200,3 +204,19 @@ def test_boot_queue_alive_refresh_and_stop_while_queued(sup, monkeypatch):
     monkeypatch.setattr(sup.store, "get", get_after_stop)
     sup.start_all()
     assert not sup.procs["live1"].desired
+
+
+def test_set_elapsed_only_while_running(sup):
+    """방송 시간 직접 설정 (v2.16): 송출 중일 때만, 숫자만 바뀌고 정지하면 초기화."""
+    from livemax.config import ConfigError
+
+    _save(sup)
+    with pytest.raises(ConfigError):
+        sup.set_elapsed("live1", 60)
+    sup.start("live1")
+    started = sup.set_elapsed("live1", 4 * 86400)
+    assert abs(time.time() - started - 4 * 86400) < 2 and sup.session("live1")["started_at"] == started
+    sup.set_elapsed("live1", 0)
+    assert abs(sup.session("live1")["started_at"] - time.time()) < 2
+    sup.stop("live1")
+    assert sup.session("live1") == {}

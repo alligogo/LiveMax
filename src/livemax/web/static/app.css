@@ -629,3 +629,12 @@ html.modal-open, html.modal-open body { overflow: hidden; }
     scrollbar-width: thin; scrollbar-color: #444 transparent; padding-right: 2px; }
 }
 @media (max-width: 980px) { .pin-btn { display: none; } }
+
+/* ---------------- v2.16: 방송 시간 직접 설정 (연필) ---------------- */
+.tile-lab { display: inline-flex; align-items: center; gap: 3px; }
+.tile-edit { border: 0; background: transparent; color: var(--muted); padding: 0 2px; cursor: pointer; display: inline-grid; place-items: center; }
+.tile-edit:hover { color: var(--text); }
+.tile-edit svg { width: 11px; height: 11px; }
+.el-row { display: flex; align-items: center; gap: 8px; }
+.el-row .el-num { width: 90px; text-align: center; font-size: 18px; font-variant-numeric: tabular-nums; }
+.el-row span { font-size: 18px; color: var(--muted); }

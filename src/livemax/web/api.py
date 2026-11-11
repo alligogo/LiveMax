@@ -607,6 +607,18 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         db.add_event(request.state.conn, "info", "web", "라이브 삭제", live_id)
         return {"ok": True}
 
+    @app.put("/api/lives/{live_id}/elapsed")
+    def live_elapsed(request: Request, live_id: str, body: dict = Body(default={})):
+        """방송 시간 직접 설정 (초). 송출은 건드리지 않는다 (v2.16)."""
+        try:
+            started = sup.set_elapsed(live_id, float(body.get("seconds")))
+        except (TypeError, ValueError):
+            return err("방송 시간 형식 오류")
+        except ConfigError as e:
+            return err(str(e))
+        db.add_event(request.state.conn, "info", "web", f"방송 시간 직접 설정: {int(float(body['seconds']))}초", live_id)
+        return {"ok": True, "session_started_at": started}
+
     @app.post("/api/lives/{live_id}/{action}")
     def live_action(request: Request, live_id: str, action: str):
         try:
