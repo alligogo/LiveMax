@@ -438,3 +438,26 @@ def test_relay_reports_missing_audio_and_missing_input(monkeypatch):
     for _ in range(40):
         tick(video=0, audio=0, data=False)
     assert events == []
+
+
+def test_ingest_ips_spread_evenly(monkeypatch):
+    """v2.18: 라이브를 유튜브 수신 IP 여러 개에 골고루 (예전: DNS 맨 앞 IP 하나 → 한 곳에 13개 몰림).
+    DNS 답 순서가 바뀌어도 같은 라이브는 같은 IP."""
+    import random
+    import socket
+
+    from livemax import tls_relay
+
+    ips = ["142.250.117.134", "142.250.129.134", "142.250.140.134", "142.250.151.134", "142.251.29.134", "142.251.30.134"]
+
+    def fake(host, port, fam, typ):
+        order = ips[:]
+        random.shuffle(order)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, port)) for a in order]
+
+    monkeypatch.setattr(tls_relay.socket, "getaddrinfo", fake)
+    pick = {f"live{i}": tls_relay.resolve_ipv4("a.rtmps.youtube.com", 443, spread=f"live{i}") for i in range(1, 51)}
+    counts = {a: list(pick.values()).count(a) for a in ips}
+    assert max(counts.values()) <= 9 and min(counts.values()) >= 8  # 50개 ÷ 6 = 8~9
+    assert all(tls_relay.resolve_ipv4("a.rtmps.youtube.com", 443, spread=k) == v for k, v in pick.items())  # 순서 무관
+    assert tls_relay.resolve_ipv4("a.rtmps.youtube.com", 443) in ips  # spread 없으면 예전처럼

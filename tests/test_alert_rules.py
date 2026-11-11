@@ -201,3 +201,18 @@ def test_peak_tracker_keeps_daily_max_and_resets(monkeypatch):
     day["v"] = 2.0  # 일일 재시작 시각을 지남 → 새 하루
     pk.sample(13.0)
     assert pk.snapshot()["cpu_peak_pct"] == 10.0 and pk.snapshot()["mem_peak_mb"] == 2200
+
+
+def test_mass_slow_names_same_ingest(paths, settings):
+    """v2.18: 동시 밀림 라이브들이 모두 같은 유튜브 수신 서버였으면 '유튜브 쪽'으로, 여러 곳이면 '서버나 회선'으로 알린다."""
+    sup, sent = _sup(paths, settings, n=6)
+    for lid in ("live1", "live2", "live3"):
+        sup.proc(lid)._relay_event({"event": "slow_start", "delay": 3, "peer": "142.250.69.140"})
+    assert "같은 유튜브 수신 서버(142.250.69.140)" in sent[-1][2]
+    sup2, sent2 = _sup(paths, settings, n=6)
+    for lid, ip in (("live4", "142.250.69.140"), ("live5", "142.250.117.134"), ("live6", "142.251.30.134")):
+        sup2.proc(lid)._relay_event({"event": "slow_start", "delay": 3, "peer": ip})
+    assert "수신 서버 3곳 — 서버나 회선" in sent2[-1][2]
+    p = sup.proc("live1")
+    p._relay_event({"event": "slow_end", "dur": 31, "max_delay": 19, "peer": "142.250.69.140"})
+    assert "유튜브 수신 서버 142.250.69.140" in _events(paths)[-1][1]

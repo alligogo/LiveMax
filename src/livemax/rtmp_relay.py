@@ -640,7 +640,7 @@ class Relay:
             if not slow["logged"] and now - slow["t0"] >= SLOW_HOLD_S:
                 slow["logged"] = True
                 log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %.1f초 쌓임 (수신 서버 %s)", delay, self.peer)
-                _emit({"event": "slow_start", "delay": round(delay, 1)})
+                _emit({"event": "slow_start", "delay": round(delay, 1), "peer": self.peer})
         elif slow is not None:
             w["calm"] += 1
             if w["calm"] >= SLOW_HOLD_S or not self.busy:
@@ -651,7 +651,7 @@ class Relay:
                                 span, slow["max"], kout, kin, self.peer)
                     # 막힌 곳: 커널 대기열이 컸으면 회선, 중계기가 늦게 깨어났으면 서버(CPU 등)
                     where = "network" if slow["fill"] >= 0.3 and slow["lag"] < 1.0 else "server"
-                    _emit({"event": "slow_end", "dur": round(span), "max_delay": round(slow["max"], 1),
+                    _emit({"event": "slow_end", "dur": round(span), "max_delay": round(slow["max"], 1), "peer": self.peer,
                            "kbps_out": round(kout), "kbps_in": round(kin), "where": where,
                            "kern_kb": slow["kern"] // 1024, "app_kb": slow["app"] // 1024, "lag": round(slow["lag"], 1)})
                 w["slow"], w["calm"] = None, 0
@@ -726,13 +726,15 @@ class Relay:
                 c["host"], int(c["port"]), family=socket.AF_INET, type=socket.SOCK_STREAM), 3)
         except (OSError, asyncio.TimeoutError):
             return
-        addrs = list(dict.fromkeys(i[4][0] for i in infos))
-        other = [a for a in addrs if a != c["connect_addr"]]
-        if other or addrs:
-            new = (other or addrs)[0]
-            if new != c["connect_addr"]:
-                log.info("유튜브 수신 서버 주소 바꿈 (다시 찾음)")
-            c["connect_addr"] = new
+        addrs = sorted(set(i[4][0] for i in infos), key=lambda a: tuple(int(x) for x in a.split(".")))
+        if not addrs:
+            return
+        # 다시 접속이 안 될 때: 정렬한 목록에서 지금 IP 의 '다음' 것으로 (여러 라이브가 같은 IP 로 몰리지 않게 — v2.18)
+        cur = c["connect_addr"]
+        new = addrs[(addrs.index(cur) + 1) % len(addrs)] if cur in addrs else addrs[0]
+        if new != cur:
+            log.info("유튜브 수신 서버 주소 바꿈 (다시 찾음): %s → %s", cur, new)
+        c["connect_addr"] = new
 
     async def _close_idle(self) -> None:
         """ffmpeg 가 끊긴 뒤 KEEP_S 안에 다시 안 오면 (라이브 정지 등) 유튜브 연결을 닫는다."""
@@ -914,7 +916,7 @@ class RelayProc:
         cfg = {"listen_port": self.port, "host": host, "port": port, "app": app, "key": key,
                "tcurl": f"{u.scheme}://{host}:{port}/{app}", "tls": tls, "verify": verify,
                "cafile": tls_relay.CA_FILE if os.path.exists(tls_relay.CA_FILE) else None,
-               "connect_addr": tls_relay.resolve_ipv4(host, port) if ipv4 else None, "log": str(self.log_path)}
+               "connect_addr": tls_relay.resolve_ipv4(host, port, spread=self.live_id) if ipv4 else None, "log": str(self.log_path)}
         self.proc = subprocess.Popen([sys.executable, "-m", "livemax.rtmp_relay"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         import threading

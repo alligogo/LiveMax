@@ -83,13 +83,32 @@ def is_listening(port: int) -> bool:
     return False
 
 
-def resolve_ipv4(host: str, port: int) -> str | None:
-    """유튜브 인제스트의 IPv4 주소. (v1 live1: IPv6 경로가 약 10분마다 끊겨 송출이 멈췄다)"""
+def spread_index(live_id: str) -> int:
+    """라이브마다 고정된 번호 (live13 → 13). 숫자가 없으면 이름으로."""
+    import re
+    import zlib
+
+    d = re.sub(r"\D", "", live_id or "")
+    return int(d) if d else zlib.crc32((live_id or "").encode())
+
+
+def resolve_ipv4(host: str, port: int, spread: str | None = None) -> str | None:
+    """유튜브 인제스트의 IPv4 주소. (v1 live1: IPv6 경로가 약 10분마다 끊겨 송출이 멈췄다)
+
+    spread(라이브 ID)를 주면 DNS 가 준 IP 여러 개에 라이브를 **골고루** 나눈다 (v2.18). 예전엔 DNS 가 맨 앞에 준 IP 하나를
+    써서 비슷한 시각에 켜진 라이브들이 한 곳에 몰렸고(실측: IP 하나에 13개), 그 유튜브 수신 서버가 몇십 초 멈칫하면
+    몰린 라이브들이 한꺼번에 밀렸다 (11-12 00:30 KST 7개 · 2개 재접속). 나눠 두면 한 곳이 멈춰도 영향이 1/IP 수로 준다.
+    IP 를 정렬해서 고르므로 DNS 가 답하는 순서가 바뀌어도 같은 라이브는 같은 자리."""
     try:
         infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-        return infos[0][4][0] if infos else None
     except OSError:
         return None
+    if not infos:
+        return None
+    if spread is None:
+        return infos[0][4][0]
+    addrs = sorted(set(i[4][0] for i in infos), key=lambda a: tuple(int(x) for x in a.split(".")))
+    return addrs[spread_index(spread) % len(addrs)]
 
 
 def render_conf(listen_port: int, host: str, port: int, log_path: Path, verify: bool = True,
@@ -139,7 +158,7 @@ class Relay:
             return None
         host, port, _ = t
         self.port = free_port()
-        self.connect_addr = resolve_ipv4(host, port) if ipv4 else None
+        self.connect_addr = resolve_ipv4(host, port, spread=self.live_id) if ipv4 else None
         self.conf_path.write_text(render_conf(self.port, host, port, self.log_path, verify, self.connect_addr),
                                   encoding="utf-8")
         self.proc = subprocess.Popen([STUNNEL, str(self.conf_path)], stdin=subprocess.DEVNULL,

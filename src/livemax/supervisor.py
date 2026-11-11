@@ -399,7 +399,7 @@ class LiveProc:
             self._track_blip(float(ev.get("delay") or 0))
             return
         if kind == "slow_start":  # 2초 넘게 5초 이상 밀림 — 로그는 끝날 때 한 번만, 동시 밀림 판정에만 쓴다
-            self.sup.note_slow(self.id, True)
+            self.sup.note_slow(self.id, True, ev.get("peer"))
             return
         if kind == "no_audio":  # 영상만 가고 소리가 없다 — ffmpeg 가 음악 연결을 잃음 (스스로 다시 붙기에 실패한 뒤)
             self._auto_restart("소리 없음", f"영상만 송출되고 소리가 {ev.get('sec')}초째 없음 — 송출 프로그램을 다시 띄워 음악을 다시 붙임")
@@ -431,7 +431,8 @@ class LiveProc:
             where = {"network": "서버→유튜브 회선", "server": "서버 처리 지연"}.get(ev.get("where"), "")
             msg = (f"유튜브 전송 밀림 {ev.get('dur')}초 — 최대 {ev.get('max_delay')}초 밀림, "
                    f"유튜브로 {ev.get('kbps_out')}kbps (보낼 양 {ev.get('kbps_in')}kbps)"
-                   + (f", 막힌 곳: {where}" if where else "") + ". 연결은 유지됨")
+                   + (f", 막힌 곳: {where}" if where else "") + (f", 유튜브 수신 서버 {ev['peer']}" if ev.get("peer") else "")
+                   + ". 연결은 유지됨")
             self.slow_eps.append(now)
             recent = sum(1 for t in self.slow_eps if now - t < 3600)
             if dur >= SLOW_ALERT_DUR_S or mx >= SLOW_ALERT_DELAY_S:
@@ -552,6 +553,7 @@ class Supervisor:
         self.procs: dict[str, LiveProc] = {}
         self._labels: dict[str, tuple[float, str]] = {}
         self._slow_now: dict[str, float] = {}  # 지금 밀리는 중인 라이브 → 시작 시각
+        self._slow_peer: dict[str, str] = {}  # 그 라이브가 붙은 유튜브 수신 서버 IP (v2.18)
         # 음악 프로그램 채널별 묶음 (B안). 켜고 끄기는 LiveMax 가 다시 켜질 때(업데이트·재시작) 적용 — 도중에 바꾸면 꼬인다
         self.shared_audio = bool(settings.get("audio_shared", True))
         # 묶음 키 → {proc, port, seq, inst{라이브 id → {token, sig, since, ready}}, fails, next_try, started}
@@ -570,7 +572,7 @@ class Supervisor:
         self.last_m3u = 0.0
         self.notify = lambda *a, **k: False  # daemon 이 Notifier.send 로 바꿔 끼운다
 
-    def note_slow(self, live_id: str, on: bool) -> None:
+    def note_slow(self, live_id: str, on: bool, peer: str | None = None) -> None:
         """라이브 여러 개가 같은 순간 밀리면 서버·회선(우리) 문제 → 휴대폰 알림 (DESIGN 11-D 11).
         라이브 하나만 밀리는 건 유튜브 쪽 출렁임이라 알리지 않는다. 막 켜진(1분 안) 라이브는 세지 않음."""
         now = time.time()
@@ -582,6 +584,7 @@ class Supervisor:
             if p is not None and now - float(p.st.get("ffmpeg_started_at") or 0) < 60:
                 return
             self._slow_now[live_id] = now
+            self._slow_peer[live_id] = peer or "?"
             for lid in [k for k, t in self._slow_now.items() if now - t > 600]:  # 끝 소식이 안 온 오래된 것
                 self._slow_now.pop(lid, None)
             n = len(self._slow_now)
@@ -589,7 +592,13 @@ class Supervisor:
                 return
             self._mass_slow_at = now
             names = ", ".join(sorted(self.live_label(k).split(" · ")[-2] if " · " in self.live_label(k) else k for k in self._slow_now))
-        msg = f"라이브 {n}개가 동시에 유튜브 전송 밀림 — 서버나 회선 문제일 수 있습니다 ({names})"
+            peers = {self._slow_peer.get(k, "?") for k in self._slow_now}
+        # v2.18: 밀린 라이브들이 모두 같은 유튜브 수신 서버에 붙어 있었으면 그 서버 쪽 (나머지 라이브는 정상이었을 것)
+        if len(peers) == 1 and "?" not in peers:
+            why = f"모두 같은 유튜브 수신 서버({next(iter(peers))}) — 유튜브 쪽 일시 문제로 보임"
+        else:
+            why = f"유튜브 수신 서버 {len(peers - {'?'})}곳 — 서버나 회선 문제일 수 있습니다"
+        msg = f"라이브 {n}개가 동시에 유튜브 전송 밀림 — {why} ({names})"
         log.warning(msg)
         try:
             with db.session(self.paths.db) as c:
