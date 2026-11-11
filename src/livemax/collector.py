@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 
-from . import db, sysmetrics
+from . import capacity, config, db, sysmetrics
 from .paths import Paths
 
 log = logging.getLogger("livemax.collector")
@@ -23,6 +23,7 @@ class Collector:
         self.latest: dict = {}
         self.per_live: dict[str, dict] = {}
         self._prev_proc: dict[int, int] = {}
+        self.day_low = capacity.DayLow()  # '예상 최대'의 오늘 최솟값 (서버 박스 '최소기준')
 
     def run(self, stop: threading.Event) -> None:
         iface = sysmetrics.default_iface()
@@ -85,6 +86,7 @@ class Collector:
                                "swap_used_mb": swap_used, "swap_total_mb": swap_total,
                                "disk_total_gb": d_total, "disk_pct": d_pct, "net_tx_mbps": tx, "net_rx_mbps": rx,
                                "month_tx_bytes": month_tx, "lives_running": running, "iface": iface}
+                self._track_low(now, snap, cpu, mem_used + (swap_used or 0), mem_total, tx, month_tx, running)
                 # 한 번의 짧은 트랜잭션으로 (라이브 15개면 예전엔 쓰기 16번)
                 conn.execute("BEGIN")
                 conn.executemany("INSERT INTO metrics_live(ts, live_id, state, speed, cpu_pct, rss_mb, out_time_s,"
@@ -104,6 +106,20 @@ class Collector:
                 log.exception("수집 실패")
                 if conn.in_transaction:  # 열린 트랜잭션이 잠금을 쥔 채 남지 않게
                     conn.execute("ROLLBACK")
+
+    def _track_low(self, now, snap, cpu, mem_used, mem_total, tx, month_tx, running) -> None:
+        """서버 박스 '최소기준 N개 (하루)' — 화면이 꺼져 있는 새벽에도 세도록 수집기에서 (계산만, 부담 없음)."""
+        try:
+            planned = [lv.id for lv in self.sup.store.all() if lv.enabled]
+            if not planned or any((snap.get(lid) or {}).get("state") != "running" for lid in planned):
+                return  # 켜는 중·재시작 중인 라이브가 있으면 세지 않는다
+            audio = float(self.settings["capacity"].get("audio_kbps", 128))
+            kbps = [max(500.0, float(snap[lid].get("kbps_in") or 5128) - audio) for lid in planned]
+            cap = capacity.compute(self.settings["capacity"], kbps, month_tx, tx, cpu, mem_used, mem_total,
+                                   live_cpu=[self.per_live.get(lid, {}).get("cpu") for lid in planned], running=running)
+            self.day_low.update(config.day_start(self.settings, now), capacity.max_guess(cap, len(planned)), now)
+        except Exception:  # noqa: BLE001 — 표시용 숫자가 수집을 막지 않게
+            log.debug("최소기준 계산 실패", exc_info=True)
 
     def _cpu(self, pid, dt, default):
         if not sysmetrics.pid_alive(pid):

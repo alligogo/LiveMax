@@ -63,7 +63,7 @@ a:focus-visible, button:focus-visible, li:focus-visible { outline: none; filter:
 .iconbtn:hover { background: #303030; }
 
 /* ---------------- 레이아웃 ---------------- */
-.page { max-width: 1320px; margin: 0 auto; padding: 24px; }
+.page { max-width: 1320px; margin: 0 auto; padding: 24px 24px 74px; }  /* 맨 아래 50px 더 여유 (v2.14) */
 .layout { display: grid; grid-template-columns: 1fr 300px; gap: 20px; align-items: start; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(380px, 100%), 1fr)); gap: 20px; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -279,7 +279,7 @@ pre.log { margin: 0; background: #0d0d0d; border-radius: 8px; padding: 12px; fon
   .topbar { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
   .nav { order: 3; flex-basis: 100%; justify-content: space-between; overflow-x: auto; }
   .nav a { padding: 7px 12px; }
-  .page { padding: 12px; }
+  .page { padding: 12px 12px 62px; }
   .grid { grid-template-columns: 1fr; }
   .tiles b { font-size: 14px; }
   .modal-body { padding: 14px; }
@@ -314,9 +314,14 @@ a.ch-name:hover span { text-decoration: underline; }
 .cap-lbar { flex-basis: 100%; margin-top: 2px; }
 .cap-bar i.mid { background: var(--yellow); } .cap-bar i.hi { background: var(--red); }
 .cap-bar s { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #d4d4d4; border-radius: 1px; }
-/* 오늘 최고값: 막대 위의 작은 ▼ (안전선 세로 막대와 모양으로 구분) */
-.cap-bar u { position: absolute; top: -7px; width: 0; height: 0; margin-left: -4px; text-decoration: none;
-  border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid #f5f5f5; }
+/* 오늘 최고값: 빨간 '점선' 세로선 (v2.14) — 안전선(흰 실선)보다 위아래로 조금 길게. 색이 안 보여도 점선/실선·길이로 구분 */
+.cap-bar u { position: absolute; top: -5px; width: 2px; height: 16px; margin-left: -1px; text-decoration: none;
+  background: repeating-linear-gradient(to bottom, #ff3b3b 0 3px, transparent 3px 5px); }
+.peak-ico { display: inline-block; width: 2px; height: 11px; margin: 0 6px -1px 1px; vertical-align: baseline;
+  background: repeating-linear-gradient(to bottom, #ff3b3b 0 3px, transparent 3px 5px); }
+/* 안전기준 | 최소기준 (하루) */
+.cap-guess { display: flex; flex-wrap: wrap; gap: 2px 6px; font-size: 11px; letter-spacing: -.2px; }  /* 300px 칸에서 한 줄 (세 자리·메모리여도) */
+.cap-guess .sep { color: #555; }
 .peak-note { margin-top: 2px; color: var(--muted); }
 .peak-note b { color: var(--text); font-weight: 600; }
 .cap-live { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; font-size: 13px;
@@ -611,3 +616,18 @@ span.logclick:hover, .alerts .logclick:hover { text-decoration: underline; text-
   .cam-modal .modal { width: 100%; max-height: 92vh; border-radius: 14px 14px 0 0; }
   .cam-modal .modal-body { padding: 10px; }
 }
+
+/* ---------------- v2.14: 창이 떠 있으면 뒤 페이지 스크롤 잠금 ---------------- */
+html.modal-open, html.modal-open body { overflow: hidden; }
+.modal-body { overscroll-behavior: contain; }
+
+/* ---------------- v2.14: 오른쪽 서버 관제 칸 고정 (넓은 화면만) ---------------- */
+.pin-btn { border: 1px solid #555; background: transparent; color: var(--muted); border-radius: 999px;
+  padding: 2px 10px; font-size: 11.5px; font-weight: 600; line-height: 1.6; cursor: pointer; }
+.pin-btn:hover { color: var(--text); border-color: #777; }
+.pin-btn.on { background: #e5e5e5; border-color: #e5e5e5; color: #141414; }  /* 켜짐 = 채운 모양 (색만이 아니라 모양으로) */
+@media (min-width: 981px) {
+  .side.pinned { position: sticky; top: 84px; max-height: calc(100vh - 100px); overflow-y: auto; overscroll-behavior: contain;
+    scrollbar-width: thin; scrollbar-color: #444 transparent; padding-right: 2px; }
+}
+@media (max-width: 980px) { .pin-btn { display: none; } }

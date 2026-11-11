@@ -553,7 +553,7 @@ class Supervisor:
         self._labels: dict[str, tuple[float, str]] = {}
         self._slow_now: dict[str, float] = {}  # 지금 밀리는 중인 라이브 → 시작 시각
         # 음악 프로그램 채널별 묶음 (B안). 켜고 끄기는 LiveMax 가 다시 켜질 때(업데이트·재시작) 적용 — 도중에 바꾸면 꼬인다
-        self.shared_audio = bool(settings.get("audio_shared", False))
+        self.shared_audio = bool(settings.get("audio_shared", True))
         # 묶음 키 → {proc, port, seq, inst{라이브 id → {token, sig, since, ready}}, fails, next_try, started}
         self.groups: dict[str, dict] = {}
         self._glock = threading.Lock()
@@ -566,6 +566,7 @@ class Supervisor:
         self.done_today: dict[str, str] = {}
         self.last_planned = 0.0
         self.last_timer_start = 0.0
+        self.boot_pending: set[str] = set()  # 부팅 줄에서 차례를 기다리는, 이어 갈 라이브 (alive_at 유지용)
         self.last_m3u = 0.0
         self.notify = lambda *a, **k: False  # daemon 이 Notifier.send 로 바꿔 끼운다
 
@@ -729,16 +730,34 @@ class Supervisor:
         세션이 5분 안쪽으로 끊겼으면(업데이트·컨테이너 재시작) 같은 방송으로 이어 가고 타이머도 유지한다.
         더 오래 꺼져 있었으면 유튜브 방송은 이미 끝났으므로 새 세션으로 시작한다.
         타이머가 이미 지났으면: 반복 → 새 세션, 반복 아님 → 시작하지 않는다.
+
+        '꺼져 있던 시간'은 부팅을 시작한 순간 한 번만 잰다 (v2.14). 예전엔 라이브마다 자기 차례에 쟀기 때문에
+        50개를 10초 간격으로 켜면 뒤쪽 약 20개가 순서를 기다린 시간까지 '꺼진 시간'으로 쳐져 5분을 넘었고,
+        유튜브 방송은 이어지는데 방송 시간이 0으로 돌아갔다 (4일째 라이브가 2일로 표시).
+        이어 갈 라이브는 이때 alive_at 도 지금으로 적어 둬서, 줄 서 있는 동안 다시 재시작돼도 이어 간다.
         """
         gap = float(self.settings["supervisor"]["boot_start_gap_seconds"])
-        first = True
+        boot_at = time.time()
+        plan = []
         for lv in self.store.all():
             if not lv.enabled or not channels.live_key_path(self.paths, lv).exists():
                 continue
-            ses, now = self.session(lv.id), time.time()
+            ses = self.session(lv.id)
             if ses.get("next_start_at"):
                 continue  # 반복 대기 중 — loop 가 시각이 되면 시작
-            fresh = not ses.get("started_at") or now - float(ses.get("alive_at") or 0) > 300
+            fresh = not ses.get("started_at") or boot_at - float(ses.get("alive_at") or 0) > 300
+            if not fresh:
+                ses["alive_at"] = boot_at
+                self._write_session(lv.id, **ses)
+            plan.append((lv, fresh))
+        self.boot_pending = {lv.id for lv, fresh in plan if not fresh}
+        first = True
+        for lv, fresh in plan:
+            self.boot_pending.discard(lv.id)
+            lv = self.store.get(lv.id)
+            if not lv or not lv.enabled:
+                continue  # 줄 서 있는 동안 사용자가 정지·삭제함
+            ses, now = self.session(lv.id), time.time()
             end = None if fresh else lv.timer_end_at(ses.get("started_at"))
             if end and now >= end:
                 if lv.timer_mode == "duration" and lv.timer_repeat:
@@ -1040,6 +1059,9 @@ class Supervisor:
                 elif ses.get("started_at") and now - float(ses.get("alive_at") or 0) >= 60:
                     ses["alive_at"] = now
                     self._write_session(lv.id, **ses)
+            elif lv.id in self.boot_pending and ses.get("started_at") and now - float(ses.get("alive_at") or 0) >= 60:
+                ses["alive_at"] = now  # 부팅 줄에서 차례를 기다리는 중 — 유튜브 방송은 살아 있는 것으로 본다
+                self._write_session(lv.id, **ses)
             elif ses.get("next_start_at") and now >= float(ses["next_start_at"]):
                 if not lv.enabled or now - self.last_timer_start < 10:  # 동시 시작 금지 (11-6)
                     if not lv.enabled:

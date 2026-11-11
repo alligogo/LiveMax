@@ -128,3 +128,37 @@ def compute(cfg: dict, live_bitrates_kbps: list[int], month_tx_bytes: float | No
         month_tx_tb=month_tx_tb, projected_tb=projected_tb, limit_tb=limit_tb, target_tb=target_tb,
         usage_ratio=usage.get(limiting, 0.0), options=options, usage=usage,
     )
+
+
+SHORT_BY = {"ram": "메모리", "cpu": "CPU", "bandwidth": "회선", "traffic": "월 트래픽"}
+
+
+def max_guess(cap: Capacity, lives: int) -> tuple[int, str] | None:
+    """'예상 최대 N개 (자원)' = 지금 라이브 수 + 안전선 기준 가장 먼저 막히는 자원의 '몇 개 더' (최대 개수 설정은 빼고).
+    화면(app.js maxGuess)과 같은 계산."""
+    opts = [(v, k) for k, v in cap.options.items() if k in SHORT_BY]
+    if not opts:
+        return None
+    v, k = min(opts)
+    return lives + max(0, v), k
+
+
+class DayLow:
+    """'예상 최대'의 오늘 최솟값 (DESIGN 11-D 20 · v2.14) — 하루 중 가장 나빴던 15초 동안 몇 개까지였나.
+    수집기(15초)가 이미 잰 값으로 계산만 하므로 부담 없음. 켜 둔 라이브가 모두 송출 중일 때만 센다
+    (켜는 중·재시작 중의 순간 피크는 정상 과정이라 빼야 숫자가 쓸모 있다). 기억만 하므로 업데이트하면 다시 셈."""
+
+    def __init__(self):
+        self.day = None
+        self.low: tuple[int, str, float] | None = None  # (개수, 자원, 시각)
+
+    def update(self, day: float, guess: tuple[int, str] | None, now: float) -> None:
+        if day != self.day:
+            self.day, self.low = day, None
+        if guess and (self.low is None or guess[0] < self.low[0]):
+            self.low = (guess[0], guess[1], now)
+
+    def snapshot(self) -> dict:
+        if not self.low:
+            return {}
+        return {"guess_low": self.low[0], "guess_low_by": self.low[1], "guess_low_at": self.low[2]}

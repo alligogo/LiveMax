@@ -100,9 +100,9 @@ DEFAULTS: dict[str, Any] = {
     "fetch": {"mb_per_s": 20, "allow_private": False},  # 링크로 가져오기: 받는 속도 상한, 내부 주소 허용(테스트용)
     "harbor_port_base": 8101,
     "ui": {"lives_view": "grid"},  # 라이브 화면 보기 방식: grid(블록) | list(목록) | cctv(관제)
-    "audio_shared": False,  # 음악 프로그램(Liquidsoap)을 채널별로 하나만 — 메모리 절약 (DESIGN 11-D 19). 재시작 때 적용
+    "audio_shared": True,  # 음악 프로그램(Liquidsoap)을 채널별로 묶음 — 메모리 절약 (DESIGN 11-D 19, v2.14 부터 기본). 재시작 때 적용
     "audio_group_max": 10,  # 음악 묶음 하나에 넣는 라이브 최대 수 (채널 안에서 라이브 번호 순으로 나눔)
-    "max_lives": 40,  # 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
+    "max_lives": 50,  # 운영 표준 50 (DESIGN 11-E). 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
     "server_name": "",  # 예: LIVE 1 — 서버가 여러 대일 때 구분 (화면·알림)
 }
 

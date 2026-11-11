@@ -34,6 +34,8 @@ const fmt = {
     sec = Math.floor(sec); const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
     if (d >= 10) return `${d}일`; if (d) return `${d}일 ${hh}시간`; if (hh) return `${hh}:${pad(m)}:${pad(s)}`; return `${m}:${pad(s)}`;
   },
+  // 트래픽은 업체 기준 10진법 (1TB = 1000GB) — 업체 청구·한도와 같은 숫자 (v2.14). 파일 크기 등은 아래 bytes 그대로
+  bytesDec(b) { if (b == null) return "-"; const u = ["B", "KB", "MB", "GB", "TB", "PB"]; let i = 0; while (b >= 1000 && i < 5) { b /= 1000; i++; } return `${b.toFixed(i ? 1 : 0)} ${u[i]}`; },
   bytes(b) { if (b == null) return "-"; const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return `${b.toFixed(i ? 1 : 0)} ${u[i]}`; },
   num(v, d = 1, unit = "") { return v == null ? "-" : `${Number(v).toFixed(d)}${unit}`; },
 };
@@ -122,7 +124,7 @@ async function logout() { try { await api("POST", "/api/logout"); } catch (e) { 
 
 // ------------------------------------------------------------------ 로그인 / 비밀번호
 function showLogin() {
-  stopPoll(); closeModal();
+  stopPoll(); closeAllModals();
   const user = h("input", { class: "input", value: "admin", autocomplete: "username" });
   const pw = h("input", { class: "input", type: "password", autocomplete: "current-password", autofocus: true });
   const msg = h("div", { class: "msg err" });
@@ -166,8 +168,15 @@ function showChangePassword(forced) {
 }
 
 // ------------------------------------------------------------------ 모달
+// 창은 보통 하나씩 (새 창이 앞 창을 대신함). 단, 관제 상세 창(cam-modal) 위에서 연 창(로그·설정 등)은 그 위에 겹쳐 띄워서
+// 닫으면 상세 창이 그대로 남는다 (v2.14). 창이 떠 있는 동안 뒤 페이지는 스크롤되지 않게 잠근다.
+const modalRoot = () => $("#modal-root");
+const modalTop = () => modalRoot().lastElementChild;
+function syncModalLock() { document.documentElement.classList.toggle("modal-open", !!modalTop()); }
 function openModal(title, body, foot, opts = {}) {
-  closeModal();
+  const cam = modalRoot().querySelector(".cam-modal");
+  if (cam && !opts.cls?.includes("cam-modal")) { while (modalTop() !== cam) modalTop().remove(); }  // 상세 창 위에 겹침
+  else closeAllModals();
   // 창 밖을 눌러도 닫히지 않는다 (입력하던 내용이 날아가지 않게) — X 또는 취소 버튼으로만 닫힘.
   // 예외: 보기 전용 창(opts.backdrop — 관제 상세)은 바깥을 누르거나 ESC 로도 닫힌다
   const back = h("div", { class: "modal-back" + (opts.cls ? " " + opts.cls : "") },
@@ -176,13 +185,21 @@ function openModal(title, body, foot, opts = {}) {
         opts.locked ? null : h("button", { class: "iconbtn", style: "width:28px;height:28px;background:transparent", onclick: closeModal }, "✕")),
       h("div", { class: "modal-body" }, body),
       foot ? h("div", { class: "modal-foot" }, foot) : null));
-  if (opts.backdrop) back.addEventListener("click", (e) => { if (e.target === back) closeModal(); });
-  MODAL_ESC = !!opts.backdrop;
-  $("#modal-root").replaceChildren(back);
+  if (opts.backdrop) back.addEventListener("click", (e) => { if (e.target === back) closeModal(back); });
+  if (opts.backdrop) back.dataset.esc = "1";
+  modalRoot().append(back);
+  syncModalLock();
 }
-let MODAL_ESC = false;
-function closeModal() { $("#modal-root").replaceChildren(); CAM_OPEN = null; MODAL_ESC = false; }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && MODAL_ESC) closeModal(); });
+// 맨 위 창 하나만 닫는다 (el 을 주면 그 창). 상세 창 위의 로그를 닫으면 상세 창이 남는다
+function closeModal(el) {
+  const b = el instanceof Element ? el : modalTop();
+  if (!b) return;
+  if (b.classList.contains("cam-modal")) CAM_OPEN = null;
+  b.remove();
+  syncModalLock();
+}
+function closeAllModals() { modalRoot().replaceChildren(); CAM_OPEN = null; syncModalLock(); }
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modalTop()?.dataset.esc === "1") closeModal(); });
 
 // ------------------------------------------------------------------ 라이브 (메인)
 let lastOverview = null;
@@ -362,7 +379,7 @@ function renderLives(grid, ov) {
   if (CAM_OPEN && $("#modal-root .cam-detail")) {  // 상세 창이 떠 있으면 같은 주기로 내용도 새로
     const lv = ov.lives.find((x) => x.id === CAM_OPEN);
     if (lv) $("#modal-root .cam-detail").replaceChildren(camDetailBody(lv));
-    else closeModal();
+    else closeModal($("#modal-root .cam-modal"));
   }
   // 채널별로 묶어서: 채널 머리줄(로고·이름 ──── 설명) 아래에 그 채널의 라이브들
   const groups = (ov.channels || []).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id) }))
@@ -495,13 +512,21 @@ function timerLine(lv, now) {
 function toLocalInput(ts) { const d = new Date(ts * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; }
 function fmtHM(min) { const hh = Math.floor(min / 60), mm = min % 60; return hh ? `${hh}시간${mm ? " " + mm + "분" : ""}` : `${mm}분`; }
 
+// 오른쪽 서버 관제 칸 고정 (v2.14) — 이 브라우저에 기억. 고정하면 칸 높이를 화면에 맞추고 넘치는 부분은 칸 안에서 스크롤
+let SIDE_PIN = (() => { try { return localStorage.getItem("lm.sidePin") === "1"; } catch (e) { return false; } })();
+function setSidePin(v) {
+  SIDE_PIN = v;
+  try { localStorage.setItem("lm.sidePin", v ? "1" : "0"); } catch (e) { /* 무시 */ }
+  document.querySelectorAll(".side").forEach((el) => el.classList.toggle("pinned", v));
+}
 function renderSide(side, ov) {
+  side.classList.toggle("pinned", SIDE_PIN);
   const s = ov.system || {}, c = ov.capacity || {};
   const counts = liveCounts(ov);
   // 서버 박스 한 줄: 이름 · 지금 값 / 막대(실제 사용 ÷ 전체, 세로 눈금 = 안전선) / 설명. 먼저 막히는 자원은 이름 굵게
   // 안전선 넘으면 노랑·95% 넘으면 빨강 + 빗금(색만으로 구분하지 않게 — 색약 배려), 값 앞에 ⚠
   const over = (frac, safe) => (frac || 0) >= 0.95 ? "hi" : safe != null && (frac || 0) > safe ? "mid" : "";
-  // peak: 오늘 최고값 위치 (0~1) — 안전선(세로 막대)과 모양이 다른 작은 ▼ 로 (색만으로 구분하지 않게)
+  // peak: 오늘 최고값 위치 (0~1) — 빨간 점선 세로선 (안전선은 흰 실선 — 색만이 아니라 점선/실선 모양으로도 구분, 색약 배려)
   const bar = (frac, safe, kind, peak) => {
     const f = Math.max(0, Math.min(1, frac || 0));
     const cls = over(frac, safe) || "k-" + kind;
@@ -517,7 +542,7 @@ function renderSide(side, ov) {
     note ? h("div", { class: "cap-note" }, note) : null);
   // 오늘 최고값 (1초 단위로 잰 순간 피크 — 위 숫자는 15초 평균). 하루 기준은 일일 재시작 시각
   const peakNote = (txt, at) => h("div", { class: "peak-note", title: "오늘(일일 재시작 시각부터) 1초 단위로 잰 순간 최고값. 위의 큰 숫자는 15초 평균이라 이보다 낮습니다" },
-    "▼ 오늘 최고 ", h("b", {}, txt), at ? ` (${fmt.clock(at)})` : "");
+    h("i", { class: "peak-ico", "aria-hidden": "true" }), "오늘 최고 ", h("b", {}, txt), at ? ` (${fmt.clock(at)})` : "");
   const memT = s.mem_total_mb, memU = s.mem_used_mb || 0, swapU = s.swap_used_mb || 0, reserve = c.mem_reserve_mb ?? 700;
   const cpuT = c.cpu_target_pct ?? 50, portR = c.port_use_ratio ?? 0.5, diskW = c.disk_warn_pct ?? 85;
   // 지금 송신 속도 그대로 한 달(이번 달 일수) 내내 보낸다면 — 대략 예상
@@ -543,7 +568,10 @@ function renderSide(side, ov) {
   const st = [counts.st ? `시작 중 ${counts.st}` : null, counts.re ? `재시작 중 ${counts.re}` : null].filter(Boolean).join(" · ");
   side.replaceChildren(
     addBtn("d-only"),
-    h("div", { class: "card" }, h("div", { class: "card-head" }, "서버"),
+    h("div", { class: "card" }, h("div", { class: "card-head" }, "서버", h("span", { class: "spacer" }),
+      h("button", { class: "pin-btn" + (SIDE_PIN ? " on" : ""), "aria-pressed": SIDE_PIN ? "true" : "false",
+        title: SIDE_PIN ? "고정 풀기 — 라이브 목록과 같이 스크롤" : "고정 — 라이브 목록을 내려도 이 칸은 그 자리에 (넓은 화면에서만)",
+        onclick: () => { setSidePin(!SIDE_PIN); renderSide(side, ov); } }, SIDE_PIN ? "📌 고정됨" : "고정")),
       h("div", { class: "card-body" },
         h("div", { class: "big", style: "margin-bottom:10px" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "추가 가능 (안전기준)")),
         h("div", { class: "cap-live" + (c.limiting === "max" ? " lead" : "") },
@@ -553,7 +581,12 @@ function renderSide(side, ov) {
           st ? h("span", { class: "cap-st" }, st) : null,
           // 라이브 개수 막대 (최대 개수 대비) + 안전 기준으로 이 서버가 버틸 수 있는 총 라이브 수
           ov.max_lives ? h("div", { class: "cap-lbar" }, bar(ov.lives.length / ov.max_lives, null, "lives"),
-            maxGuess ? h("div", { class: "cap-note" }, `예상 최대 ${maxGuess.n}개 (${maxGuess.by})`) : null) : null),
+            maxGuess ? h("div", { class: "cap-note cap-guess" },
+              h("span", { title: "지금 상태로 안전선까지 — 메모리·CPU·회선 중 먼저 막히는 것 기준 ('최대 개수' 설정은 빼고)" },
+                `안전기준: ${maxGuess.n}개 (${maxGuess.by})`),
+              s.guess_low != null ? h("span", { class: "sep" }, "|") : null,
+              s.guess_low != null ? h("span", { title: `오늘(일일 재시작 시각부터) 가장 나빴던 15초 기준 — ${fmt.clock(s.guess_low_at)} · ${SHORT[s.guess_low_by] || s.guess_low_by}. 라이브를 켜는 중·재시작 중인 순간은 뺌. 업데이트하면 다시 셈` },
+                `최소기준 ${s.guess_low}개 (하루)`) : null) : null) : null),
         h("div", { class: "cap-rows" },
           row("mem", "메모리", memT ? `${fmt.num(memU / 1024, 1)} / ${fmt.num(memT / 1024, 1)} GB` : "-",
             // 남은 여유분은 스왑으로 옮겨진 몫까지 '쓰는 메모리'로 쳐서 계산 (여유가 부풀려 보이지 않게)
@@ -571,8 +604,8 @@ function renderSide(side, ov) {
             s.disk_total_gb ? (s.disk_used_gb || 0) / s.disk_total_gb : 0, diskW / 100, false)),
         h("div", { class: "cap-traffic" + (c.limiting === "traffic" ? " lead" : "") }, c.traffic_unlimited
           ? [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, "무제한")),
-             h("div", { class: "cap-note" }, `이번 달 ${s.month_tx_bytes != null ? fmt.bytes(s.month_tx_bytes) : "-"}`),
-             monthBytes != null ? h("div", { class: "cap-note" }, `지금 속도로 한 달 쓰면 약 ${fmt.bytes(monthBytes)}`) : null]
+             h("div", { class: "cap-note" }, `이번 달 ${s.month_tx_bytes != null ? fmt.bytesDec(s.month_tx_bytes) : "-"}`),
+             monthBytes != null ? h("div", { class: "cap-note" }, `지금 속도로 한 달 쓰면 약 ${fmt.bytesDec(monthBytes)}`) : null]
           : [h("div", { class: "cap-top" }, h("span", { class: "cap-k" }, "월 트래픽"), h("b", {}, `예상 ${fmt.num(c.projected_tb, 1)} / ${fmt.num(c.limit_tb, 0)} TB`)),
              bar(c.limit_tb ? c.projected_tb / c.limit_tb : 0, c.limit_tb ? c.target_tb / c.limit_tb : null, "traffic"),
              h("div", { class: "cap-note" }, `이번 달 ${fmt.num(c.month_tx_tb, 2)}TB · 라이브당 월 ${fmt.num(c.per_live_tb, 1)}TB`)]))),
@@ -1417,7 +1450,7 @@ async function showSystem() {
 
 function serverCard(s, card) {
   const name = h("input", { class: "input", value: s.settings.server_name || "", maxlength: 30, placeholder: "예: LIVE 1", style: "max-width:260px" });
-  const maxLives = h("input", { class: "input", type: "number", min: 1, max: 100, value: s.settings.max_lives ?? 40, style: "max-width:120px" });
+  const maxLives = h("input", { class: "input", type: "number", min: 1, max: 100, value: s.settings.max_lives ?? 50, style: "max-width:120px" });
   const port = h("input", { class: "input", type: "number", min: 10, max: 100000, value: s.settings.port_mbit ?? 1000, style: "max-width:120px" });
   const traffic = h("input", { class: "input", type: "number", min: 0, max: 10000, step: "any", value: s.settings.monthly_traffic_tb ?? 0, style: "max-width:120px" });
   // 안전선: 용량 계산("N개 더 추가 가능")과 서버 박스 막대의 세로 눈금 기준
@@ -1538,7 +1571,7 @@ function notifyCard(n, card) {
 
 // ------------------------------------------------------------------ 라우터
 async function route() {
-  closeModal();
+  closeAllModals();
   let sess;
   try { sess = await api("GET", "/api/session"); } catch (e) { return; }
   setServerName(sess.server_name);

@@ -257,6 +257,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         sysd = dict(core.collector.latest)
         if getattr(core, "peaks", None) is not None:
             sysd.update(core.peaks.snapshot())  # 오늘 최고 CPU·메모리 (1초 단위)
+        day_low = getattr(core.collector, "day_low", None)
+        if day_low is not None:
+            sysd.update(day_low.snapshot())  # '예상 최대'의 오늘 최솟값 (15초 단위)
         planned = [lv for lv in lives if lv["enabled"]]  # 송출 중이거나 켜 둔 라이브만 (대기중은 제외)
         on_air = [lv for lv in planned if lv["state"] == "running"]
         cap = capacity.compute(settings["capacity"], [_video_kbps(conn, lv) for lv in planned],
@@ -1045,7 +1048,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "reboot_packages": REBOOT_FLAG.with_suffix(".pkgs").read_text().split() if REBOOT_FLAG.with_suffix(".pkgs").exists() else [],
             "settings": {"restart_base_utc": settings["restart"]["base_utc"], "server_name": config.server_name(settings),
                          "max_lives": _max_lives(), "tls_relay": settings["output"]["tls_relay"]["enabled"],
-                         "audio_shared": bool(settings.get("audio_shared", False)),
+                         "audio_shared": bool(settings.get("audio_shared", True)),
                          "audio_shared_active": bool(getattr(sup, "shared_audio", False)),
                          "audio_group_max": int(settings.get("audio_group_max", 10) or 10),
                          "port_mbit": settings["capacity"].get("port_mbit", 1000),

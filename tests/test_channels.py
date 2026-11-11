@@ -145,7 +145,7 @@ def test_never_started_enabled_live_fixed_on_boot(paths, settings, monkeypatch):
 def test_max_lives_limit(client):
     """안전장치: 라이브 총 개수가 설정한 최대 개수(기본 15)에 닿으면 더 못 만든다."""
     _ready(client)
-    assert client.get("/api/system").json()["settings"]["max_lives"] == 40  # 기본값 (OVH VPS-2 실측 기준, DESIGN 11-D)
+    assert client.get("/api/system").json()["settings"]["max_lives"] == 50  # 기본값 = 운영 표준 (DESIGN 11-E)
     assert client.put("/api/system/settings", headers=ORIGIN, json={"max_lives": 0}).status_code == 400
     assert client.put("/api/system/settings", headers=ORIGIN, json={"max_lives": 2}).status_code == 200
     for i in (2, 3):
