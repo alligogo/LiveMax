@@ -76,7 +76,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "concat": {"hours": 24, "margin_minutes": 45},
     "supervisor": {
-        "boot_start_gap_seconds": 10,   # 컨테이너 시작 시 라이브 간 시작 간격
+        "boot_start_gap_seconds": 3,    # 컨테이너 시작 시 라이브 간 시작 간격 (v2.17: 10→3, 50개 약 8분→2.5분. 메모리 빠듯하면 _wait_for_memory 가 더 기다림)
         "restart_backoff_seconds": [1, 3, 10, 30, 60],  # 오래 잘 돌다 끊긴 경우 1초 뒤 재연결
     },
     # 일일 재시작: 15:00 UTC = 한국 자정 (미국 동부 오전 10시·서부 오전 7시 — 수면 음악 청취가 가장 적은 때) + 슬롯×2분
@@ -92,8 +92,11 @@ DEFAULTS: dict[str, Any] = {
     # 용량 계산 (DESIGN 11-D). 회선 속도·월 트래픽 한도는 업체마다 달라 설정 > 서버에서 바꾼다 (트래픽 0 = 무제한).
     # 안전 기준: 메모리 여유 700MB · CPU 평균 50% · 회선 80%. 라이브당 값은 서버 실측, 송출 중인 라이브가 없을 때만 아래 기본값.
     "capacity": {"monthly_traffic_tb": 0, "traffic_target_tb": 0, "port_mbit": 1000, "port_use_ratio": 0.5, "disk_warn_pct": 85,
-                 "cpu_target_pct": 50, "mem_reserve_mb": 700, "mem_base_mb": 550, "mem_per_live_mb": 150,
-                 "cpu_per_live_core_pct": 2.0, "audio_kbps": 128, "overhead_ratio": 0.03},
+                 "cpu_target_pct": 50, "mem_reserve_mb": 700, "mem_base_mb": 550, "mem_per_live_mb": 80,  # 라이브 0개일 때 기본 (음악 묶음 실측 60MB + 여유, v2.17: 150→80)
+                 "cpu_per_live_core_pct": 2.0, "audio_kbps": 128, "overhead_ratio": 0.03,
+                 # '추가 가능 1080p / 4K' 계산 기준 (v2.17, 설정에서 바꿈). 4K 소리 200k 는 넉넉히 잡은 계산용 값
+                 "p1080_video_kbps": 5000, "p1080_audio_kbps": 128, "p4k_video_kbps": 14000, "p4k_audio_kbps": 200,
+                 "p4k_extra_mem_mb": 20},
     "dashboard": {"username": "admin", "bind": "127.0.0.1", "port": 8080, "session_hours": 168,
                   "login_max_failures": 5, "login_block_minutes": 15, "max_upload_mb": 20000,
                   "upload_mb_per_s": 10},  # 웹 업로드 속도 상한 (서버 부담 줄이기, 모든 업로드 합산)

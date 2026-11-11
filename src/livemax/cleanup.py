@@ -180,6 +180,10 @@ def clean_runtime(paths: Paths, rep: Report, dry: bool, live_ids: set[str]) -> N
         return
     for p in paths.run_dir.iterdir():
         lid = p.name.split(".", 1)[0]
+        # 음악 묶음 파일(ch-<채널>[-n].members.json·.group.liq, solo-<라이브>.*)은 찌꺼기가 아니다 — 돌고 있는 묶음 프로그램이
+        # 1초마다 읽는다 (v2.17: 예전엔 매 시간 지워져 'members read failed' 1~4줄). 없어진 묶음 파일은 supervisor 가 직접 지운다
+        if lid.startswith(("ch-", "solo-")):
+            continue
         if p.is_file() and lid not in live_ids and lid != "system":
             safe_unlink(paths, p, rep, "런타임 찌꺼기", dry)
 

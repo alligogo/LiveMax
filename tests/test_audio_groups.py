@@ -227,6 +227,8 @@ def test_ffmpeg_reattaches_audio_after_group_crash(paths, settings):
         ff = subprocess.Popen(ffmpeg_cmd.build(_video(paths), url, f"tcp://127.0.0.1:{sink.port}", extra_out=["-flush_packets", "0"]),
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         assert _wait(lambda: sink.a > 50)
+        glog = paths.logs / "audio-g-ch-ch1.log"
+        assert _wait(lambda: glog.exists() and "▶" in glog.read_text(errors="replace"))  # v2.17: 곡 시작 줄이 남는다
         old = g["proc"]
         old.kill()  # 사고: 음악 프로그램이 갑자기 죽음
         assert _wait(lambda: g["proc"] is not None and g["proc"] is not old and g["proc"].poll() is None, timeout=15)  # 5초 주기를 안 기다림
@@ -271,11 +273,17 @@ def test_group_log_view_filters_and_names(client, paths, settings):
         "2026/11/09 01:00:03 [clock.live13_music:3] catchup\n"
         "2026/11/09 01:00:04 [group:2] ADD live13_2\n"
         "2026/11/09 01:00:05 [live13_2_out:3] new-format-line\n"
-        "2026/11/09 01:00:06 [live1_7_pl:3] other-new\n", encoding="utf-8")
+        "2026/11/09 01:00:06 [live1_7_pl:3] other-new\n"
+        "2026/11/09 01:00:07 [decoder:2] Decoding \"/data/media/audio/a/x.m4a\" ended: Ffmpeg_decoder.End_of_file.\n"
+        "2026/11/09 01:00:08 [live13_2_track:2] ▶ Last Summer Scent\n"
+        "2026/11/09 01:00:09 [live1_7_track:2] ▶ Other Song\n", encoding="utf-8")
     t = client.get("/api/logs", params={"name": "audio-live13"}).json()["text"]
     assert "song-b" in t and "song-a" not in t and "Liquidsoap 2.2" in t
     assert "LIVE 13 · live13 · 재생목록" in t and "음악 시계" in t and "live13_pl" not in t
     assert "음악 올림: LIVE 13 · live13" in t and "LIVE 13 · live13 · 출력:3] new-format-line" in t and "other-new" not in t
     assert "함께 도는 라이브 1개: LIVE 1" in t
+    # v2.17: 곡 끝 줄은 숨기고(개수만), 곡 시작은 '▶ 제목' 만, 다른 라이브 곡은 안 보임
+    assert "End_of_file" not in t and "곡 끝 기록 1줄 숨김" in t
+    assert "01:00:08 ▶ Last Summer Scent" in t and "Other Song" not in t
     t1 = client.get("/api/logs", params={"name": "audio-live1"}).json()["text"]
     assert "song-a" in t1 and "song-b" not in t1 and "catchup" not in t1

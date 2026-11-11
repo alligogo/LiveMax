@@ -537,6 +537,7 @@ class Relay:
         # ffmpeg 에서 받은 바이트 / 유튜브 쪽에 넘긴 바이트 / 받은 소리·영상 조각 수 (누적)
         self.stats = {"in": 0, "out": 0, "a": 0, "v": 0}
         self.feed: Feed | None = None
+        self.peer = "?"  # 지금 붙은 유튜브 수신 서버 IP (로그용)
         self.reconnecting = False
 
     def _pending(self) -> tuple[int, int, int]:
@@ -638,7 +639,7 @@ class Relay:
             slow["n"] += dt
             if not slow["logged"] and now - slow["t0"] >= SLOW_HOLD_S:
                 slow["logged"] = True
-                log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %.1f초 쌓임", delay)
+                log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %.1f초 쌓임 (수신 서버 %s)", delay, self.peer)
                 _emit({"event": "slow_start", "delay": round(delay, 1)})
         elif slow is not None:
             w["calm"] += 1
@@ -646,8 +647,8 @@ class Relay:
                 if slow["logged"]:
                     span = max(1.0, slow["n"])
                     kin, kout = slow["in"] * 8 / span / 1000, slow["out"] * 8 / span / 1000
-                    log.warning("유튜브 전송 밀림 끝 — %.0f초 동안, 최대 %.1f초 밀림, 유튜브로 %.0f kbps (입력 %.0f kbps)",
-                                span, slow["max"], kout, kin)
+                    log.warning("유튜브 전송 밀림 끝 — %.0f초 동안, 최대 %.1f초 밀림, 유튜브로 %.0f kbps (입력 %.0f kbps, 수신 서버 %s)",
+                                span, slow["max"], kout, kin, self.peer)
                     # 막힌 곳: 커널 대기열이 컸으면 회선, 중계기가 늦게 깨어났으면 서버(CPU 등)
                     where = "network" if slow["fill"] >= 0.3 and slow["lag"] < 1.0 else "server"
                     _emit({"event": "slow_end", "dur": round(span), "max_delay": round(slow["max"], 1),
@@ -672,6 +673,8 @@ class Relay:
         r, w = await asyncio.wait_for(asyncio.open_connection(
             c.get("connect_addr") or c["host"], int(c["port"]), ssl=ctx,
             server_hostname=c["host"] if ctx else None), 15)
+        peer = w.get_extra_info("peername")
+        self.peer = peer[0] if peer else "?"  # 붙은 유튜브 수신 서버 IP — 로그에 남겨 같은 서버 문제인지 가려낸다 (v2.17)
         sock = w.get_extra_info("socket")
         if sock is not None:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
@@ -773,8 +776,8 @@ class Relay:
                 self.pub = await self._publish()
                 base_out = 0
                 self.last_out = 0  # 새 연결은 시각 0부터
-                log.info("유튜브 송출 시작 (%s:%s%s, %.2f초)", c["host"], c["port"], " TLS" if c.get("tls") else "",
-                         time.monotonic() - t0)
+                log.info("유튜브 송출 시작 (%s:%s%s, 수신 서버 %s, %.2f초)", c["host"], c["port"], " TLS" if c.get("tls") else "",
+                         self.peer, time.monotonic() - t0)
             first_in = None
             while True:
                 pub = self.pub
@@ -822,7 +825,7 @@ class Relay:
                 self.last_out = 0
                 await self.pub.send_media(b"".join(self.pub.tag_bytes(t, 0, d) for t, _ts, d in feed.headers()))
                 gap = time.monotonic() - cut
-                log.warning("유튜브 재접속 성공 — 공백 %.1f초", gap)
+                log.warning("유튜브 재접속 성공 — 공백 %.1f초 (수신 서버 %s)", gap, self.peer)
                 _emit({"event": "reconnect", "gap": round(gap, 2)})
         except asyncio.IncompleteReadError:
             log.info("ffmpeg 연결 종료")

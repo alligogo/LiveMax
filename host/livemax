@@ -2,6 +2,8 @@
 # LiveMax 호스트 명령 — get.sh 가 /usr/local/bin/livemax 로 설치한다.
 #
 #   livemax update      최신 이미지로 교체 (데이터는 /opt/livemax/data 에 그대로)
+#   livemax rollback    직전 버전으로 되돌리기 (또는: livemax rollback <커밋 번호 40자리>)
+#   livemax version     지금 버전(커밋 번호)과 되돌릴 수 있는 버전
 #   livemax status      컨테이너 상태
 #   livemax logs [-f]   관리 프로그램 로그
 #   livemax restart     컨테이너 재시작 (모든 라이브가 순서대로 다시 시작)
@@ -10,6 +12,8 @@
 #   livemax tick        (타이머용) 웹의 업데이트 요청 처리 + 재부팅 필요 표시 동기화
 set -euo pipefail
 IMAGE="${LIVEMAX_IMAGE:-ghcr.io/alligogo/livemax:latest}"
+REPO_IMG="${IMAGE%:*}"            # ghcr.io/alligogo/livemax — 빌드마다 :<커밋 번호> 태그도 올라간다
+PREV_TAG="$REPO_IMG:previous"      # 업데이트 직전에 돌던 이미지 (되돌리기용 — 정리 대상에서 빠지게 태그로 붙잡아 둠)
 REPO_GIT="${LIVEMAX_REPO:-https://github.com/alligogo/LiveMax.git}"
 RAW="${LIVEMAX_RAW:-https://raw.githubusercontent.com/alligogo/LiveMax/main}"
 DATA="${LIVEMAX_DATA_DIR:-/opt/livemax/data}"
@@ -71,6 +75,23 @@ ensure_swap() {
   fi
 }
 
+# 지금 컨테이너의 버전(커밋 번호) — 이미지 안 LIVEMAX_VERSION
+current_version() {
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NAME" 2>/dev/null | sed -n 's/^LIVEMAX_VERSION=//p' | head -1
+}
+
+# 업데이트 직전: 지금 돌던 이미지를 :previous 로 붙잡고 버전을 적어 둔다 (v2.17 — 되돌리기)
+remember_previous() {
+  local img ver
+  img="$(docker inspect -f '{{.Image}}' "$NAME" 2>/dev/null)" || return 0
+  [[ -n "$img" ]] || return 0
+  docker tag "$img" "$PREV_TAG" 2>/dev/null || true
+  ver="$(current_version)"
+  mkdir -p "$DATA/state/host"
+  [[ -n "$ver" ]] && echo "$ver" > "$DATA/state/host/previous_version"
+  return 0
+}
+
 public_ip() { cat "$DATA/state/public_ip" 2>/dev/null || hostname -I | awk '{print $1}'; }
 
 cmd="${1:-status}"
@@ -79,11 +100,38 @@ case "$cmd" in
     need_root "$cmd"
     [[ "$cmd" == update ]] && self_update
     ensure_swap || true
+    [[ "$cmd" == update ]] && remember_previous
     pull_image
     run_container
     # 업데이트마다 이전 이미지(약 500MB)가 남는다 → 쓰지 않는 이미지 정리
     docker image prune -f >/dev/null 2>&1 || true
     echo "LiveMax 실행 중 — https://$(public_ip)"
+    ;;
+  rollback)
+    # 새 버전에 문제가 있을 때: 직전 버전(또는 지정한 커밋 번호)으로 컨테이너만 바꿔 띄운다. 데이터는 그대로.
+    # 다음 'livemax update' 를 하면 다시 최신으로 간다.
+    need_root "$cmd"
+    target="${2:-}"
+    if [[ -n "$target" ]]; then
+      [[ "$target" =~ ^[0-9a-f]{40}$ ]] || { echo "커밋 번호는 40자리 (livemax version 으로 확인)"; exit 1; }
+      IMAGE="$REPO_IMG:$target"
+      docker pull "$IMAGE" || { echo "그 버전 이미지를 받을 수 없습니다: $target"; exit 1; }
+    elif docker image inspect "$PREV_TAG" >/dev/null 2>&1; then
+      IMAGE="$PREV_TAG"
+    elif [[ -s "$DATA/state/host/previous_version" ]]; then
+      IMAGE="$REPO_IMG:$(cat "$DATA/state/host/previous_version")"
+      docker pull "$IMAGE" || { echo "직전 버전 이미지를 받을 수 없습니다"; exit 1; }
+    else
+      echo "되돌릴 직전 버전 기록이 없습니다 — livemax rollback <커밋 번호 40자리>"; exit 1
+    fi
+    echo "$(date -u +%FT%TZ) 되돌리기: $(current_version) → $IMAGE" >> "$DATA/logs/update.log"
+    run_container
+    echo "되돌렸습니다 — $(current_version) (다시 최신으로: livemax update)"
+    ;;
+  version)
+    echo "지금 버전: $(current_version)"
+    [[ -s "$DATA/state/host/previous_version" ]] && echo "직전 버전: $(cat "$DATA/state/host/previous_version") (livemax rollback)"
+    true
     ;;
   status)
     docker ps -a --filter "name=^${NAME}$" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
@@ -121,5 +169,5 @@ case "$cmd" in
     fi
     ;;
   *)
-    sed -n '2,11p' "$0"; exit 1 ;;
+    sed -n '2,13p' "$0"; exit 1 ;;
 esac

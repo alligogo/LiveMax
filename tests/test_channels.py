@@ -155,7 +155,7 @@ def test_max_lives_limit(client):
         r = client.post("/api/lives", headers=ORIGIN, json={"name": f"L{i}", "channel_id": "ch1", "key_id": kids[i], **LIVE})
         assert r.status_code == 200, r.text
     r = client.post("/api/lives", headers=ORIGIN, json={"name": "넘침", "channel_id": "ch1", "key_id": kids[2], **LIVE})
-    assert r.status_code == 400 and "최대 개수" in r.json()["error"]
+    assert r.status_code == 400 and "칸" in r.json()["error"]
     assert len(client.get("/api/overview").json()["lives"]) == 2
     cap = client.get("/api/overview").json()["capacity"]
     assert cap["can_add"] == 0 and cap["limiting"] == "max"
@@ -170,3 +170,38 @@ def test_keys_listed_in_name_order(client):
     labels = [k["label"] for k in client.get("/api/channels").json()["channels"][0]["keys"]]
     mine = [x for x in labels if x in ("10", "2", "다", "1", "가")]
     assert mine == ["1", "2", "10", "가", "다"]
+
+
+def test_4k_live_takes_two_slots(client, paths):
+    """v2.17: 라이브 최대 수는 '1080p 칸'. 4K 영상 폴더를 고른 라이브는 2칸, 칸이 넘치면 못 만들고 폴더를 4K 로 바꿔도 막는다."""
+    import json as _json
+
+    from livemax import db
+
+    _ready(client)
+    assert client.post("/api/media/video", json={"name": "4K Rain"}, headers=ORIGIN).json()["ok"]
+    with db.session(paths.db) as c:
+        c.execute("INSERT INTO media_files(path, kind, folder, name, info) VALUES (?,?,?,?,?)",
+                  ("/v/4k/a.mp4", "video", "4K Rain", "a.mp4", _json.dumps({"width": 3840, "height": 2160})))
+        c.execute("INSERT INTO media_files(path, kind, folder, name, info) VALUES (?,?,?,?,?)",
+                  ("/v/hd/a.mp4", "video", "Sax After Six", "a.mp4", _json.dumps({"width": 1920, "height": 1080})))
+    assert client.put("/api/system/settings", headers=ORIGIN, json={"max_lives": 3}).status_code == 200
+    for i in (2, 3, 4):
+        client.post("/api/channels/ch1/keys", headers=ORIGIN, json={"label": f"키{i}", "key": f"fake-000{i}-0000-0000-abc{i}"})
+    kids = [k["id"] for k in client.get("/api/channels").json()["channels"][0]["keys"]]
+    hd = dict(LIVE)
+    uhd = dict(LIVE, video_folders=["4K Rain"])
+    assert client.post("/api/lives", headers=ORIGIN, json={"name": "HD", "channel_id": "ch1", "key_id": kids[0], **hd}).status_code == 200
+    assert client.post("/api/lives", headers=ORIGIN, json={"name": "UHD", "channel_id": "ch1", "key_id": kids[1], **uhd}).status_code == 200
+    cap = client.get("/api/overview").json()["capacity"]
+    assert (cap["slots_used"], cap["lives_1080"], cap["lives_4k"]) == (3, 1, 1)
+    assert cap["can_add"] == 0 and set(cap["add_by_res"]) == {"1080p", "4k"} and cap["add_by_res"]["4k"]["n"] == 0
+    r = client.post("/api/lives", headers=ORIGIN, json={"name": "넘침", "channel_id": "ch1", "key_id": kids[2], **hd})
+    assert r.status_code == 400 and "칸" in r.json()["error"]
+    # 칸 하나 늘리고 HD 를 하나 더 만든 뒤, 그 HD 를 4K 폴더로 바꾸면 칸이 넘쳐 막힘
+    assert client.put("/api/system/settings", headers=ORIGIN, json={"max_lives": 4}).status_code == 200
+    r = client.post("/api/lives", headers=ORIGIN, json={"name": "HD2", "channel_id": "ch1", "key_id": kids[2], **hd})
+    assert r.status_code == 200
+    lid = r.json()["id"]
+    r = client.put(f"/api/lives/{lid}", headers=ORIGIN, json={"video_folders": ["4K Rain"], "apply": "later"})
+    assert r.status_code == 400 and "4K 라 2칸" in r.json()["error"]

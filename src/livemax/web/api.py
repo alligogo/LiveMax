@@ -197,6 +197,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "key_masked": key_masked, "key_label": _key_label(lv), "desired": desired,
             "idle_thumb": None if state == "running" else _idle_thumb(lv),
             "cpu": (core.collector.per_live.get(lv.id) or {}).get("cpu"),
+            "cpu_a": (core.collector.per_live.get(lv.id) or {}).get("cpu_a"),
+            "cpu_v": (core.collector.per_live.get(lv.id) or {}).get("cpu_v"),
             "rss_mb": (core.collector.per_live.get(lv.id) or {}).get("rss_mb"),
             **tinfo,
         }
@@ -267,11 +269,28 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                                (sysd.get("mem_used_mb") + (sysd.get("swap_used_mb") or 0)) if sysd.get("mem_used_mb") is not None else None,
                                sysd.get("mem_total_mb"),
                                live_cpu=[lv["cpu"] for lv in on_air if lv.get("cpu")], running=len(on_air))
-        # 안전장치: 설정한 최대 개수까지 남은 칸보다 많이 '추가 가능'으로 보이지 않게
-        left = max(0, _max_lives() - len(lives))
+        # 안전장치: 설정한 최대 칸까지 남은 칸보다 많이 '추가 가능'으로 보이지 않게 (4K 는 2칸)
+        used, n1080, n4k = _slots(conn, lives)
+        left = max(0, _max_lives() - used)
         if left < cap.can_add:
             cap.can_add, cap.limiting = left, "max"
-            cap.usage_ratio = len(lives) / max(1, _max_lives())
+            cap.usage_ratio = used / max(1, _max_lives())
+        # 해상도별 '몇 개 더' (둘 중 하나로 다 쓸 때) — CPU 는 음악 몫 + 영상 몫(1Mbps 당 실측) × 비트레이트
+        cc = settings["capacity"]
+        meas = [lv for lv in on_air if lv.get("cpu_v") is not None and (lv.get("bitrate_kbps") or 0) > 0]
+        a_core = (sum(lv.get("cpu_a") or 0 for lv in meas) / len(meas)) if meas else None
+        v_mbps = sum(lv["bitrate_kbps"] for lv in meas) / 1000 if meas else 0
+        v_per = (sum(lv["cpu_v"] for lv in meas) / v_mbps) if v_mbps else None
+        add_res = {}
+        for res, vk, ak, xm, w in (("1080p", cc.get("p1080_video_kbps", 5000), cc.get("p1080_audio_kbps", 128), 0, 1),
+                                   ("4k", cc.get("p4k_video_kbps", 14000), cc.get("p4k_audio_kbps", 200), cc.get("p4k_extra_mem_mb", 20), SLOT_4K)):
+            g = capacity.add_by_profile(cc, cap, vk, ak, xm, a_core, v_per)
+            if g is None:
+                continue
+            n, by = g
+            if left // w < n:
+                n, by = left // w, "max"
+            add_res[res] = {"n": n, "by": by}
         alerts = []
         for lv in lives:
             if lv["status"] in ("warn", "down"):
@@ -300,7 +319,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          "cpu_target_pct": settings["capacity"].get("cpu_target_pct", 50),
                          "port_use_ratio": settings["capacity"].get("port_use_ratio", 0.5),
                          "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85),
-                         "options": cap.options, "usage": cap.usage},
+                         "options": cap.options, "usage": cap.usage,
+                         "slots_used": used, "lives_1080": n1080, "lives_4k": n4k, "add_by_res": add_res},
             "max_lives": _max_lives(),
             "day_start": config.day_start(settings),  # 화면의 '(1일)' 숫자 기준 — 일일 재시작 시각(기본 한국 자정)
             "media": _media_totals(conn),
@@ -435,6 +455,42 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     _ov_cache = {"t": 0.0, "data": None}
 
+    # ---- 라이브 칸 (v2.17, DESIGN 11-G 4): 최대 개수는 '1080p 기준 칸'. 4K 라이브는 2칸 (안전선 1080p 50 : 4K 25).
+    # 4K 판단은 고른 비디오 폴더의 영상 해상도로 자동 — 폴더에 4K(세로 2160 이상 또는 가로 3840 이상)가 하나라도 있으면 4K (보수적)
+    SLOT_4K = 2
+
+    def _is_4k(conn, folders) -> bool:
+        folders = [f for f in (folders or []) if f]
+        if not folders:
+            return False
+        q = ",".join("?" * len(folders))
+        r = conn.execute(f"SELECT 1 FROM media_files WHERE kind='video' AND folder IN ({q}) AND "
+                         "(CAST(json_extract(info, '$.height') AS INTEGER) >= 2160 OR CAST(json_extract(info, '$.width') AS INTEGER) >= 3840) "
+                         "LIMIT 1", folders).fetchone()
+        return bool(r)
+
+    def _slots(conn, lives, skip: str | None = None) -> tuple[int, int, int]:
+        """(쓰는 칸, 1080p 라이브 수, 4K 라이브 수). lives: Live 또는 화면용 dict."""
+        n1, n4, cache = 0, 0, {}
+        for lv in lives:
+            lid = lv["id"] if isinstance(lv, dict) else lv.id
+            if lid == skip:
+                continue
+            vf = tuple(lv["video_folders"] if isinstance(lv, dict) else lv.video_folders)
+            if vf not in cache:
+                cache[vf] = _is_4k(conn, vf)
+            if cache[vf]:
+                n4 += 1
+            else:
+                n1 += 1
+        return n1 + n4 * SLOT_4K, n1, n4
+
+    def _slot_error(used: int, need: int) -> str:
+        left = max(0, _max_lives() - used)
+        kind = "4K 라 2칸" if need == SLOT_4K else "1칸"
+        return (f"라이브 칸이 부족합니다 — 남은 {left}칸, 이 라이브는 {kind}이 필요합니다 "
+                f"(최대 {_max_lives()}칸, 4K 는 2칸). 설정 > 서버에서 늘리거나 안 쓰는 라이브를 지우세요")
+
     def _max_lives() -> int:
         return int(settings.get("max_lives") or 50)
 
@@ -550,11 +606,16 @@ def create_app(core) -> FastAPI:  # core = daemon.App
 
     @app.post("/api/lives")
     def live_create(request: Request, b: dict = Body(default={})):
-        if len(store.all()) >= _max_lives():
-            return err(f"이 서버의 라이브 최대 개수({_max_lives()}개)에 도달했습니다 — 설정 > 서버에서 늘리거나 안 쓰는 라이브를 지우세요")
+        conn = request.state.conn
+        used = _slots(conn, store.all())[0]
+        if used >= _max_lives():
+            return err(f"이 서버의 라이브 칸({_max_lives()}칸)이 다 찼습니다 — 설정 > 서버에서 늘리거나 안 쓰는 라이브를 지우세요")
         lv = store.new(str(b.get("name", "")).strip()[:80])
         try:
             lv, apply = _live_payload(b, lv)
+            need = SLOT_4K if _is_4k(conn, lv.video_folders) else 1
+            if used + need > _max_lives():
+                return err(_slot_error(used, need))
             if not lv.key_id:
                 return err("채널과 스트림 키를 고르세요 (키는 채널 메뉴에서 등록)")
             lv.enabled = False  # 새 라이브는 '대기중' — 목록에서 시작을 눌러야 송출 (재부팅 때 저절로 시작되지 않게)
@@ -577,6 +638,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         before = lv.to_dict()
         try:
             lv, apply = _live_payload(b, lv)
+            if lv.video_folders != before["video_folders"]:
+                conn = request.state.conn
+                need = SLOT_4K if _is_4k(conn, lv.video_folders) else 1
+                used = _slots(conn, store.all(), skip=lv.id)[0]
+                if used + need > _max_lives():
+                    return err(_slot_error(used, need))
             store.save(lv)
         except (ConfigError, ValueError) as e:
             return err(str(e))
@@ -647,6 +714,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         lines = max(20, min(int(lines), 2000))
         members = sup.group_members(name[len("audio-"):]) if group else []
         read_n = lines * max(1, len(members)) if group else lines  # 걸러 내면 줄어드니 묶음 크기만큼 더 읽는다
+        if name.startswith("audio-"):
+            read_n *= 2  # 곡 끝 줄을 숨기므로 더 읽는다
         with open(f, "rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
@@ -654,14 +723,27 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             text = b"\n".join(fh.read().splitlines()[-read_n:]).decode("utf-8", "replace")
         if group:
             text = _group_log_view(text, name[len("audio-"):], members, lines)
+        elif name.startswith("audio-"):
+            text = _music_lines(text.splitlines(), lines)
         return {"name": name, "text": secrets.redact(text)}
+
+    # 음악 로그 화면 = '어떤 곡이 나왔나' + 오류만 (v2.17). 곡이 끝날 때마다 찍히는 줄(Liquidsoap 2.2.4 가 오류와 같은
+    # 등급 2로 찍음)은 화면에서만 숨긴다 — 파일엔 남음. 곡 시작 줄 '[live13_2_track:2] ▶ 제목' 은 '▶ 제목' 으로
+    _EOF_MARK = "Ffmpeg_decoder.End_of_file"
+    _TRACK_RE = re.compile(r"\[live\d+(?:_\d+)?_track:\d\] ")
+
+    def _music_lines(src: list[str], lines: int, head: str = "") -> str:
+        hidden = sum(1 for ln in src if _EOF_MARK in ln)
+        out = [_TRACK_RE.sub("", ln) for ln in src if _EOF_MARK not in ln][-lines:]
+        note = f"# 곡 끝 기록 {hidden}줄 숨김 (파일엔 남아 있음)" if hidden else ""
+        return "\n".join(x for x in (head, note) if x) + ("\n" if head or note else "") + "\n".join(out)
 
     # 음악 묶음 로그 (DESIGN 11-D 19): 한 파일에 그 묶음 라이브들 기록이 섞여 있다. Liquidsoap 은 줄마다 'live13_pl' 처럼
     # 내부 이름만 찍으므로, 보는 라이브의 줄과 공통 줄(어느 라이브 것도 아닌 줄)만 남기고 이름을 사람이 읽는 말로 바꾼다
     _SRC_KR = {"pl": "재생목록", "silence": "무음", "fallback": "전환", "xf": "크로스페이드", "music": "음악 시계",
-               "buf": "버퍼", "out": "출력"}
+               "buf": "버퍼", "out": "출력", "track": "곡"}
     # 이름 꼴: live13_pl (v2.12 까지) · live13_2_pl (v2.13 — 프로그램 안에서 겹치지 않게 번호가 붙음) · live13_2 (올림·내림 기록)
-    _SRC_RE = re.compile(r"\b(live\d+)_(?:(?:\d+_)?(pl|silence|fallback|xf|music|buf|out)|\d+)\b")
+    _SRC_RE = re.compile(r"\b(live\d+)_(?:(?:\d+_)?(pl|silence|fallback|xf|music|buf|out|track)|\d+)\b")
     _GROUP_KR = (("ADD FAILED", "음악 올리기 실패:"), ("ADD", "음악 올림:"), ("REMOVE", "음악 내림:"))
 
     def _short_label(live_id: str) -> str:
@@ -676,6 +758,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             ids = {m.group(1) for m in _SRC_RE.finditer(ln)}
             if ids and live_id not in ids:
                 continue
+            ln = _TRACK_RE.sub("", ln)  # 곡 시작 줄은 '▶ 제목' 만
             if "[group:" in ln:
                 for en, kr in _GROUP_KR:
                     if f"] {en} " in ln:
@@ -687,7 +770,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         names = ", ".join(sup.store.get(m).name if sup.store.get(m) else m for m in sorted(others, key=catalog.natural_key))
         head = f"# 음악 묶음 — {me}" + (f" · 같은 프로그램에서 함께 도는 라이브 {len(others)}개: {names}" if others else "")
         head += "\n# (이 라이브 기록과 묶음 공통 기록만 보여 줍니다)"
-        return head + "\n" + "\n".join(out[-lines:])
+        return _music_lines(out, lines, head)
 
     # ------------------------------------------------------------------ 미디어
     def _kind(kind: str) -> bool:
@@ -1069,7 +1152,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                          "mem_reserve_mb": settings["capacity"].get("mem_reserve_mb", 700),
                          "cpu_target_pct": settings["capacity"].get("cpu_target_pct", 50),
                          "port_use_pct": round(float(settings["capacity"].get("port_use_ratio", 0.5)) * 100),
-                         "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85)},
+                         "disk_warn_pct": settings["capacity"].get("disk_warn_pct", 85),
+                         "p1080_video_kbps": settings["capacity"].get("p1080_video_kbps", 5000),
+                         "p4k_video_kbps": settings["capacity"].get("p4k_video_kbps", 14000)},
             "sessions": [{"id": r["token_hash"], "ip": r["ip"], "ua": r["user_agent"], "last_seen": r["last_seen"],
                           "current": r["token_hash"] == sess["token_hash"]}
                          for r in conn.execute("SELECT * FROM sessions ORDER BY last_seen DESC").fetchall()],
@@ -1250,7 +1335,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         # + 안전선: 메모리 남길 여유(MB) · CPU 평균(%) · 회선 사용(%) · 디스크 경고(%)
         for key, lo, hi, label in (("port_mbit", 10, 100000, "회선 속도(Mbps)"), ("monthly_traffic_tb", 0, 10000, "월 트래픽 한도(TB)"),
                                    ("mem_reserve_mb", 100, 100000, "메모리 남길 여유(MB)"), ("cpu_target_pct", 10, 95, "CPU 안전선(%)"),
-                                   ("port_use_pct", 10, 100, "회선 안전선(%)"), ("disk_warn_pct", 50, 99, "디스크 안전선(%)")):
+                                   ("port_use_pct", 10, 100, "회선 안전선(%)"), ("disk_warn_pct", 50, 99, "디스크 안전선(%)"),
+                                   ("p1080_video_kbps", 500, 50000, "1080p 기준 영상(kbps)"), ("p4k_video_kbps", 1000, 100000, "4K 기준 영상(kbps)")):
             if key in b:
                 try:
                     v = float(b[key])
@@ -1324,8 +1410,10 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         for n in z.namelist():
             if not (n.startswith("lives/") and n.endswith(".yaml")):
                 continue
-            if len(store.all()) >= _max_lives():
-                return {"ok": True, "added": added, "message": f"{len(added)}개를 가져오다 라이브 최대 개수({_max_lives()}개)에 도달해 멈췄습니다"}
+            with db.session(paths.db) as c_:
+                full = _slots(c_, store.all())[0] >= _max_lives()
+            if full:
+                return {"ok": True, "added": added, "message": f"{len(added)}개를 가져오다 라이브 칸({_max_lives()}칸)이 다 차서 멈췄습니다"}
             src = live_from_dict(yaml.safe_load(z.read(n)))
             lv = store.new(src.name)  # 새 서버 기준으로 ID·포트·슬롯 재배정
             for k in ("video_folders", "audio_folders", "audio_mode", "norepeat_count", "crossfade",

@@ -185,8 +185,8 @@ def test_capacity_counts_lives_not_yet_on_air(settings):
 def test_capacity_defaults_with_no_lives(settings):
     cap = capacity.compute(settings["capacity"], [], None, 0.1, 1.2, 540, 7751,
                            now=datetime(2026, 11, 15, tzinfo=timezone.utc), running=0, cores=4)
-    assert cap.mem_per_live_mb == 150 and cap.limiting == "ram"
-    assert cap.can_add == int((7751 - 700 - 540) // 150)
+    assert cap.mem_per_live_mb == 80 and cap.limiting == "ram"
+    assert cap.can_add == int((7751 - 700 - 540) // 80)  # v2.17: 묶음 기본 80MB
 
 
 def test_mask_and_redact(caplog):

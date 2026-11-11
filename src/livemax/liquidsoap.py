@@ -303,6 +303,9 @@ def on_new_track(m) =
   fun (md) -> begin
     np = json.stringify({live=m.live, file=md["filename"], title=md["title"], artist=md["artist"], started=time()})
     file.write(data=np, m.np)
+    # 음악 로그 화면용 '어떤 곡이 나왔나' 한 줄 (v2.17)
+    t = if md["title"] != "" then md["title"] else path.basename(md["filename"]) end
+    log.severe(label=m.id ^ "_track", "▶ #{t}")
   end
 end
 # 그대로 내보내기 (기본 — AAC 를 디코딩 없이)

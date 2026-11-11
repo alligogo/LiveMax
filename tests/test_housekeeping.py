@@ -110,3 +110,15 @@ def test_update_checker(monkeypatch):
     st = updatecheck.UpdateChecker("a" * 40).check_once()
     assert st["status"] == "available" and st["latest"] == "b" * 40
     assert updatecheck.UpdateChecker("dev").check_once()["status"] == "dev"
+
+
+def test_runtime_cleanup_keeps_music_group_files(paths):
+    """v2.17: 매 시간 자동 정리가 음악 묶음 파일(ch-*.members.json·group.liq)을 찌꺼기로 지우던 문제."""
+    run = paths.run_dir
+    run.mkdir(parents=True, exist_ok=True)
+    keep = ["ch-ch4.members.json", "ch-ch4.group.liq", "ch-ch1-2.members.json", "solo-live7.members.json", "live1.m3u"]
+    for n in keep + ["live99.m3u", "old.tmp"]:
+        (run / n).write_text("x")
+    cleanup.clean_runtime(paths, cleanup.Report(), False, {"live1"})
+    left = sorted(p.name for p in run.iterdir())
+    assert left == sorted(keep)

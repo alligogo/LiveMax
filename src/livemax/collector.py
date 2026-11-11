@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 
 from . import capacity, config, db, sysmetrics
 from .paths import Paths
@@ -24,6 +25,7 @@ class Collector:
         self.per_live: dict[str, dict] = {}
         self._prev_proc: dict[int, int] = {}
         self.day_low = capacity.DayLow()  # '예상 최대'의 오늘 최솟값 (서버 박스 '최소기준')
+        self._low_win: deque = deque()  # 최소기준용 최근 5분 표본 (시각, CPU, 메모리, 송신)
 
     def run(self, stop: threading.Event) -> None:
         iface = sysmetrics.default_iface()
@@ -72,8 +74,13 @@ class Collector:
                     for x in pids:
                         if x not in cpu_of:
                             cpu_of[x] = self._cpu(x, dt, 0)  # 같은 pid 를 두 번 재면 두 번째가 0 이 된다
+                    vp = [x for x in (s.get("video_pid"), s.get("relay_pid")) if x]
+                    ap = s.get("audio_pid")
                     self.per_live[lid] = {
                         "cpu": sum(cpu_of[x] / share[x] for x in pids),
+                        # v2.17: 음악 몫(묶음이면 나눈 몫)과 영상 몫(ffmpeg + 중계기) — 해상도별 '추가 가능' 계산용
+                        "cpu_a": (cpu_of[ap] / share[ap]) if ap else 0.0,
+                        "cpu_v": sum(cpu_of[x] / share[x] for x in vp),
                         "rss_mb": sum((sysmetrics.proc_rss_mb(x) or 0) / share[x] for x in pids) or None,
                     }
                     fresh = now - (s.get("relay_at") or 0) < 40  # 중계기 알림이 최근 것일 때만 (꺼진 라이브의 옛 값 X)
@@ -107,15 +114,31 @@ class Collector:
                 if conn.in_transaction:  # 열린 트랜잭션이 잠금을 쥔 채 남지 않게
                     conn.execute("ROLLBACK")
 
+    LOW_WINDOW_S = 300  # 최소기준은 5분 평균 (v2.17) — 매일 1분 도는 우분투 보안 점검 같은 짧은 피크가 하루 숫자를 대표하지 않게
+    LOW_SETTLE_S = 300  # 라이브를 켜거나 재시작한 뒤 이만큼은 세지 않는다 (업데이트·추가·재시작 직후 마무리 부하)
+
     def _track_low(self, now, snap, cpu, mem_used, mem_total, tx, month_tx, running) -> None:
-        """서버 박스 '최소기준 N개 (하루)' — 화면이 꺼져 있는 새벽에도 세도록 수집기에서 (계산만, 부담 없음)."""
+        """서버 박스 '최소기준 N개 (하루)' — 화면이 꺼져 있는 새벽에도 세도록 수집기에서 (계산만, 부담 없음).
+        순간 피크는 'CPU 오늘 최고'(1초)가 보여 주므로, 여기선 '오래가는 나쁜 조건'(새벽 steal 수십 분, 꾸준한 상승)만."""
         try:
-            planned = [lv.id for lv in self.sup.store.all() if lv.enabled]
-            if not planned or any((snap.get(lid) or {}).get("state") != "running" for lid in planned):
-                return  # 켜는 중·재시작 중인 라이브가 있으면 세지 않는다
+            planned = [lid for lid in (lv.id for lv in self.sup.store.all() if lv.enabled)]
+            win = self._low_win
+            unsettled = not planned or any(
+                (snap.get(lid) or {}).get("state") != "running"
+                or now - float((snap.get(lid) or {}).get("ffmpeg_started_at") or 0) < self.LOW_SETTLE_S for lid in planned)
+            if unsettled:
+                win.clear()  # 켜는 중·재시작 중이거나 켠 지 5분 안 됨 → 그 앞뒤 표본은 섞지 않는다
+                return
+            win.append((now, cpu, mem_used, tx))
+            while win and now - win[0][0] > self.LOW_WINDOW_S:
+                win.popleft()
+            if now - win[0][0] < self.LOW_WINDOW_S - 20:  # 5분이 다 차야 센다
+                return
+            n = len(win)
+            avg = lambda i: sum((x[i] or 0) for x in win) / n  # noqa: E731
             audio = float(self.settings["capacity"].get("audio_kbps", 128))
             kbps = [max(500.0, float(snap[lid].get("kbps_in") or 5128) - audio) for lid in planned]
-            cap = capacity.compute(self.settings["capacity"], kbps, month_tx, tx, cpu, mem_used, mem_total,
+            cap = capacity.compute(self.settings["capacity"], kbps, month_tx, avg(3), avg(1), avg(2), mem_total,
                                    live_cpu=[self.per_live.get(lid, {}).get("cpu") for lid in planned], running=running)
             self.day_low.update(config.day_start(self.settings, now), capacity.max_guess(cap, len(planned)), now)
         except Exception:  # noqa: BLE001 — 표시용 숫자가 수집을 막지 않게

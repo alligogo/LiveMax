@@ -638,3 +638,17 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .el-row { display: flex; align-items: center; gap: 8px; }
 .el-row .el-num { width: 90px; text-align: center; font-size: 18px; font-variant-numeric: tabular-nums; }
 .el-row span { font-size: 18px; color: var(--muted); }
+/* v2.17: 방송 시간 수정 창의 타이머 안내 — 경고는 노랑·막힘은 빨강 + ⚠ (색만으로 구분하지 않게) */
+.el-timer { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: #2a2a2a; font-size: 12.5px; line-height: 1.6; }
+.el-timer b { font-variant-numeric: tabular-nums; }
+.el-timer.warn { background: rgba(250,204,21,.12); color: #fde68a; }
+.el-timer.bad { background: rgba(239,68,68,.16); color: #fca5a5; }
+.el-timer .ico svg { width: 12px; height: 12px; vertical-align: -1px; }
+/* v2.17: 추가 가능 1080p 또는 4K */
+.big.add-res .add-row { display: flex; align-items: flex-end; justify-content: center; gap: 14px; }
+.big.add-res .add-cell { display: flex; flex-direction: column; align-items: center; min-width: 70px; }
+.big.add-res .add-cell b { font-size: 36px; }
+.big.add-res .add-cell span { font-size: 12px; color: var(--text); font-weight: 600; }
+.big.add-res .add-row { align-items: stretch; }
+.big.add-res .add-sep { width: 1px; margin: 6px 4px; background: rgba(255,255,255,.18); }  /* 1080p | 4K 사이 얇은 반투명 선 */
+.big.add-res > span { display: block; margin-top: 4px; }

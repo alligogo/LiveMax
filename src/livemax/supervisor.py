@@ -649,6 +649,11 @@ class Supervisor:
         seconds = float(seconds)
         if not 0 <= seconds <= 3650 * 86400:
             raise ConfigError("방송 시간 범위 오류")
+        lv = self.store.get(live_id)
+        if lv and lv.timer_mode == "duration" and seconds >= int(lv.timer_minutes) * 60:
+            # 타이머 길이 이상으로 두면 저장하자마자 타이머 종료로 송출이 멈춘다 (v2.17)
+            h, m = divmod(int(lv.timer_minutes), 60)
+            raise ConfigError(f"타이머({h}시간 {m}분)보다 길게 할 수 없습니다 — 라이브 설정에서 타이머를 먼저 늘리세요")
         now = time.time()
         ses = self.session(live_id)
         ses["started_at"], ses["alive_at"] = now - seconds, now

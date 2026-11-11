@@ -166,6 +166,7 @@ def test_boot_queue_keeps_session_for_late_lives(sup, paths, monkeypatch):
 
     monkeypatch.setattr(sup.stop_event, "wait", wait)
     monkeypatch.setattr(sup, "_wait_for_memory", lambda io0, span: False)
+    monkeypatch.setitem(sup.settings["supervisor"], "boot_start_gap_seconds", 10)  # 예전 간격으로도 (최악 조건)
     t0 = clock[0] - 4 * 86400  # 4일째 방송
     for i in range(1, 51):
         lid = f"live{i}"
@@ -220,3 +221,16 @@ def test_set_elapsed_only_while_running(sup):
     assert abs(sup.session("live1")["started_at"] - time.time()) < 2
     sup.stop("live1")
     assert sup.session("live1") == {}
+
+
+def test_set_elapsed_blocked_beyond_duration_timer(sup):
+    """v2.17: 방송 시간 타이머보다 길게 고치면 저장하자마자 타이머 종료로 끊긴다 → 막는다. 짧게는 허용."""
+    from livemax.config import ConfigError
+
+    _save(sup, timer_mode="duration", timer_minutes=600)
+    sup.start("live1")
+    with pytest.raises(ConfigError, match="타이머"):
+        sup.set_elapsed("live1", 600 * 60)
+    sup.set_elapsed("live1", 8 * 3600)
+    sup._timers()
+    assert sup.procs["live1"].desired  # 2시간 남음 — 계속 송출

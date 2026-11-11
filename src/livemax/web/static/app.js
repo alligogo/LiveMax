@@ -415,7 +415,7 @@ function renderLives(grid, ov) {
 }
 const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => {
   const ov = lastOverview, max = ov?.max_lives;
-  if (max && ov.lives.length >= max) { toast(`이 서버의 라이브 최대 개수(${max}개)에 도달했습니다 — 설정 > 서버에서 늘리거나 안 쓰는 라이브를 지우세요`, true); return; }
+  if (max && (ov.capacity?.slots_used ?? ov.lives.length) >= max) { toast(`이 서버의 라이브 칸(${max}칸)이 다 찼습니다 — 설정 > 서버에서 늘리거나 안 쓰는 라이브를 지우세요`, true); return; }
   openLiveEditor(null);
 } }, h("span", { class: "plus", html: ICON.plus }), "라이브 추가");
 
@@ -522,6 +522,19 @@ function setSidePin(v) {
   try { localStorage.setItem("lm.sidePin", v ? "1" : "0"); } catch (e) { /* 무시 */ }
   document.querySelectorAll(".side").forEach((el) => el.classList.toggle("pinned", v));
 }
+// 서버 박스 큰 숫자 (v2.17): 남은 여유를 1080p 로 다 쓰면 N개, 4K 로 다 쓰면 M개 — 더한 값이 아니라 '또는'
+const RES_BY = { ram: "메모리", cpu: "CPU", bandwidth: "회선", traffic: "월 트래픽", max: "칸" };
+function addBig(c) {
+  const r = c.add_by_res || {};
+  if (!r["1080p"] && !r["4k"]) return h("div", { class: "big", style: "margin-bottom:10px" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "추가 가능 (안전기준)"));
+  const cell = (label, x) => h("div", { class: "add-cell", title: x ? `먼저 막히는 것: ${RES_BY[x.by] || x.by}` : "" },
+    h("b", {}, x ? x.n : "-"), h("span", {}, label));
+  return h("div", { class: "big add-res", style: "margin-bottom:10px" },
+    h("div", { class: "add-row", title: "남은 여유를 1080p 로 다 쓰면 왼쪽, 4K 로 다 쓰면 오른쪽 (더한 값 아님)" },
+      cell("1080p", r["1080p"]), h("i", { class: "add-sep", "aria-hidden": "true" }), cell("4K", r["4k"])),
+    h("span", {}, "추가 가능 (안전기준)"));
+}
+
 function renderSide(side, ov) {
   side.classList.toggle("pinned", SIDE_PIN);
   // 고정 위치 = 원래 자리(상단바 실제 높이 + 본문 위 여백) — 스크롤을 시작할 때 칸이 위로 밀리지 않게 (v2.15)
@@ -580,19 +593,21 @@ function renderSide(side, ov) {
         title: SIDE_PIN ? "고정 풀기 — 라이브 목록과 같이 스크롤" : "고정 — 라이브 목록을 내려도 이 칸은 그 자리에 (넓은 화면에서만)",
         onclick: () => { setSidePin(!SIDE_PIN); renderSide(side, ov); } }, SIDE_PIN ? "📌 고정됨" : "고정")),
       h("div", { class: "card-body" },
-        h("div", { class: "big", style: "margin-bottom:10px" }, h("b", {}, c.can_add ?? "-"), h("span", {}, "추가 가능 (안전기준)")),
+        addBig(c),
         h("div", { class: "cap-live" + (c.limiting === "max" ? " lead" : "") },
-          h("span", { class: "cap-k" }, "라이브 ", h("b", {}, ov.max_lives ? `${ov.lives.length}/${ov.max_lives}` : `${ov.lives.length}`)),
+          h("span", { class: "cap-k", title: "최대 개수는 1080p 기준 칸 — 4K 라이브는 2칸 (비디오 폴더 영상 해상도로 자동 판단)" }, "라이브 ",
+            h("b", {}, ov.max_lives ? `${c.slots_used ?? ov.lives.length}/${ov.max_lives}칸` : `${ov.lives.length}`),
+            c.lives_4k ? h("small", { class: "ps-sub" }, `1080p ${c.lives_1080} · 4K ${c.lives_4k}`) : null),
           h("span", {}, "정상 ", h("b", {}, counts.ok), " · 경고 ", h("b", { class: counts.warn ? "hot" : "" }, counts.warn),
             " · 중단 ", h("b", { class: counts.down ? "hot" : "" }, counts.down), h("small", { class: "ps-sub", title: "지금 상태 (하루 누적 아님)" }, "(지금)")),
           st ? h("span", { class: "cap-st" }, st) : null,
           // 라이브 개수 막대 (최대 개수 대비) + 안전 기준으로 이 서버가 버틸 수 있는 총 라이브 수
-          ov.max_lives ? h("div", { class: "cap-lbar" }, bar(ov.lives.length / ov.max_lives, null, "lives"),
+          ov.max_lives ? h("div", { class: "cap-lbar" }, bar((c.slots_used ?? ov.lives.length) / ov.max_lives, null, "lives"),
             maxGuess ? h("div", { class: "cap-note cap-guess" },
               h("span", { title: "지금 상태로 안전선까지 — 메모리·CPU·회선 중 먼저 막히는 것 기준 ('최대 개수' 설정은 빼고)" },
                 `안전기준: ${maxGuess.n}개 (${maxGuess.by})`),
               s.guess_low != null ? h("span", { class: "sep" }, "|") : null,
-              s.guess_low != null ? h("span", { title: `오늘(일일 재시작 시각부터) 가장 나빴던 15초 기준 — ${fmt.clock(s.guess_low_at)} · ${SHORT[s.guess_low_by] || s.guess_low_by}. 라이브를 켜는 중·재시작 중인 순간은 뺌. 업데이트하면 다시 셈` },
+              s.guess_low != null ? h("span", { title: `오늘(일일 재시작 시각부터) 가장 나빴던 5분 평균 기준 — ${fmt.clock(s.guess_low_at)} · ${SHORT[s.guess_low_by] || s.guess_low_by}. 라이브를 켜거나 재시작한 뒤 5분은 뺌 (순간 피크는 'CPU 오늘 최고'). 업데이트하면 다시 셈` },
                 `최소기준 ${s.guess_low}개 (하루)`) : null) : null) : null),
         h("div", { class: "cap-rows" },
           row("mem", "메모리", memT ? `${fmt.num(memU / 1024, 1)} / ${fmt.num(memT / 1024, 1)} GB` : "-",
@@ -725,12 +740,30 @@ function openElapsedEditor(lv) {
   const preview = h("div", { class: "muted small", style: "margin-top:8px" });
   const msg = h("div", { class: "msg err" });
   const total = () => (Number(hh.value) || 0) * 3600 + (Number(mm.value) || 0) * 60 + (Number(ss.value) || 0);
-  const upd = () => { const t = total(); preview.textContent = `= ${Math.floor(t / 86400)}일 ${Math.floor(t % 86400 / 3600)}시간 ${Math.floor(t % 3600 / 60)}분`; };
+  // 방송 시간 타이머(N시간 뒤 자동 종료)는 이 시간을 기준으로 한다 (v2.17): 남은 시간 '수정 전 → 수정 후',
+  // 타이머 길이 이상이면 저장하자마자 송출이 끝나므로 막는다
+  const limit = lv.timer_mode === "duration" ? Number(lv.timer_minutes || 0) * 60 : 0;
+  const timerBox = limit ? h("div", { class: "el-timer" }) : null;
+  const saveBtn = h("button", { class: "btn primary", onclick: () => save(total()) }, "저장");
+  const upd = () => {
+    const t = total();
+    preview.textContent = `= ${Math.floor(t / 86400)}일 ${Math.floor(t % 86400 / 3600)}시간 ${Math.floor(t % 3600 / 60)}분`;
+    if (!limit) return;
+    const before = Math.max(0, limit - sec), after = limit - t;
+    const over = after <= 0;
+    saveBtn.disabled = over;
+    timerBox.className = "el-timer " + (over ? "bad" : t !== sec ? "warn" : "");
+    timerBox.replaceChildren(
+      h("div", {}, "타이머 남은 시간 ", h("b", {}, fmt.dur(before)), " → ", h("b", {}, over ? "없음" : fmt.dur(after))),
+      over ? h("div", {}, ico("warn"), ` 타이머(${fmtHM(limit / 60)})보다 길게 할 수 없습니다 — 저장하면 바로 송출이 끝납니다. 라이브 설정에서 타이머를 먼저 늘리세요.`)
+        : t !== sec ? h("div", {}, ico("warn"), " 저장하면 자동 종료 시각도 같이 바뀝니다") : null);
+  };
   [hh, mm, ss].forEach((x) => x.addEventListener("input", upd));
   upd();
   const save = async (t) => {
     msg.textContent = "";
     if (Number(mm.value) > 59 || Number(ss.value) > 59 || t < 0) { msg.textContent = "분·초는 0~59"; return; }
+    if (limit && t >= limit) { msg.textContent = "타이머보다 길게 할 수 없습니다"; return; }
     try { await api("PUT", `/api/lives/${lv.id}/elapsed`, { seconds: t }); closeModal(); toast("방송 시간을 바꿨습니다"); softRefresh(); }
     catch (e) { msg.textContent = e.message; }
   };
@@ -738,13 +771,13 @@ function openElapsedEditor(lv) {
     h("div", { class: "el-row" }, hh, h("span", {}, ":"), mm, h("span", {}, ":"), ss),
     h("div", { class: "muted small", style: "margin-top:4px" }, "시간 : 분 : 초 (시간은 24 넘어도 됨 — 4일 = 96)"),
     preview,
-    lv.timer_mode === "duration" ? h("div", { class: "hint", style: "margin-top:8px" }, "방송 시간 타이머의 종료 시각도 이 기준으로 바뀝니다") : null,
+    timerBox,
     h("div", { class: "hint", style: "margin-top:8px" }, "송출은 그대로 — 화면의 숫자만 바뀝니다. 정지하면 0으로 돌아갑니다."),
     msg,
   ], [
     h("button", { class: "btn", onclick: () => save(0) }, "0으로"),
     h("span", { class: "spacer", style: "flex:1" }),
-    h("button", { class: "btn primary", onclick: () => save(total()) }, "저장"),
+    saveBtn,
   ]);
 }
 
@@ -1502,6 +1535,9 @@ function serverCard(s, card) {
   const [cpuT, cpuF] = safe("CPU 평균", "%", s.settings.cpu_target_pct, 10, 95, 50);
   const [portU, portF] = safe("회선 사용", "%", s.settings.port_use_pct, 10, 100, 50);
   const [diskW, diskF] = safe("디스크", "%", s.settings.disk_warn_pct, 50, 99, 85);
+  // '추가 가능 1080p / 4K' 계산 기준 (영상 비트레이트 — 소리는 1080p 128k · 4K 200k 로 넉넉히)
+  const [p1080, p1080F] = safe("1080p 영상", "kbps", s.settings.p1080_video_kbps, 500, 50000, 5000);
+  const [p4k, p4kF] = safe("4K 영상", "kbps", s.settings.p4k_video_kbps, 1000, 100000, 14000);
   // 음악 프로그램 채널별 묶음 (메모리 절약) — LiveMax 가 다시 켜질 때 적용
   const shared = h("input", { type: "checkbox" }); shared.checked = !!s.settings.audio_shared;
   const sharedLab = h("label", { class: "check" + (shared.checked ? " on" : "") }, shared,
@@ -1514,8 +1550,8 @@ function serverCard(s, card) {
   return card("서버",
     h("label", { class: "field" }, h("span", {}, "서버명"), name,
       h("div", { class: "hint" }, "로고 옆과 브라우저 탭 제목(LiveMax LIVE 1), 휴대폰 알림 제목에 붙어 서버를 구분합니다.")),
-    h("label", { class: "field" }, h("span", {}, "라이브 최대 개수"), maxLives,
-      h("div", { class: "hint" }, "안전장치 — 이 서버에 이 개수보다 많은 라이브를 만들 수 없습니다 (기본 50 — 운영 표준). 서버 사양을 올리면 늘리세요.")),
+    h("label", { class: "field" }, h("span", {}, "라이브 최대 칸 (1080p 기준)"), maxLives,
+      h("div", { class: "hint" }, "안전장치 — 1080p 라이브 1개 = 1칸, 4K 라이브 = 2칸 (비디오 폴더 영상 해상도로 자동). 예: 50칸 = 1080p 30 + 4K 10. 기본 50 (운영 표준).")),
     h("label", { class: "field" }, h("span", {}, "회선 속도 (Mbps)"), port,
       h("div", { class: "hint" }, "서버 업체가 보장하는 속도 (예: OVH VPS-2 = 1000, VPS-1 = 500). 용량 계산에서 아래 '회선 사용' 안전선까지 씁니다.")),
     h("label", { class: "field" }, h("span", {}, "월 트래픽 한도 (TB)"), traffic,
@@ -1523,6 +1559,9 @@ function serverCard(s, card) {
     h("div", { class: "field" }, h("span", {}, "안전선"),
       h("div", { class: "safe-grid" }, memF, cpuF, portF, diskF),
       h("div", { class: "hint" }, "'몇 개 더 추가 가능'은 메모리·CPU·회선이 이 선을 넘지 않는 만큼으로 계산합니다. 라이브 화면 서버 박스 막대의 세로 눈금이 이 선이에요. 디스크는 계산에 안 넣고 넘으면 색만 바뀝니다.")),
+    h("div", { class: "field" }, h("span", {}, "추가 가능 계산 기준"),
+      h("div", { class: "safe-grid" }, p1080F, p4kF),
+      h("div", { class: "hint" }, "서버 박스 '1080p N개 또는 4K M개'를 이 영상 비트레이트로 계산합니다. CPU 는 실측(음악 몫 + 영상 1Mbps 당 몫)으로, 4K 는 데이터 양에 비례한다고 보는 보수적 계산이에요.")),
     h("div", { class: "field" }, h("span", {}, "음악 프로그램"), sharedLab,
       h("div", { class: "hint" + (pendingShared ? " warn" : "") }, pendingShared
         ? `저장됨 — 다음 업데이트(또는 SSH 에서 sudo livemax restart) 때 적용됩니다. 지금은 ${s.settings.audio_shared_active ? "묶음" : "라이브마다 하나"}로 돌고 있어요.`
@@ -1534,6 +1573,7 @@ function serverCard(s, card) {
         await api("PUT", "/api/system/settings", { server_name: name.value, max_lives: Number(maxLives.value),
           port_mbit: Number(port.value), monthly_traffic_tb: Number(traffic.value),
           mem_reserve_mb: Number(memR.value), cpu_target_pct: Number(cpuT.value), port_use_pct: Number(portU.value), disk_warn_pct: Number(diskW.value),
+          p1080_video_kbps: Number(p1080.value), p4k_video_kbps: Number(p4k.value),
           audio_shared: shared.checked, audio_group_max: Number(groupMax.value) });
         setServerName(name.value); toast("저장했습니다"); showSystem();
       } catch (e) { toast(e.message, true); }
