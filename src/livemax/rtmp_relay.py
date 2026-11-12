@@ -538,6 +538,7 @@ class Relay:
         self.stats = {"in": 0, "out": 0, "a": 0, "v": 0}
         self.feed: Feed | None = None
         self.peer = "?"  # 지금 붙은 유튜브 수신 서버 IP (로그용)
+        self.sock = None
         self.reconnecting = False
 
     def _pending(self) -> tuple[int, int, int]:
@@ -573,6 +574,19 @@ class Relay:
                 "slow": None, "calm": 0, "emit": now,
                 "a": self.stats.get("a", 0), "v": self.stats.get("v", 0), "mute": 0.0, "mute_on": False,
                 "idle": 0.0, "idle_lv": 0}
+
+    def _tcp_info(self) -> tuple[float | None, int | None]:
+        """유튜브 연결의 왕복 시간(ms)과 누적 재전송 수 — 리눅스 계수기 읽기만 (v2.19, 경로 붐빔 가려내기)."""
+        sock = getattr(self, "sock", None)
+        if sock is None or not hasattr(socket, "TCP_INFO"):
+            return None, None
+        try:
+            b = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
+            rtt_us = struct.unpack_from("I", b, 68)[0]
+            total_retr = struct.unpack_from("I", b, 100)[0] if len(b) >= 104 else None
+            return round(rtt_us / 1000, 1), total_retr
+        except (OSError, struct.error):
+            return None, None
 
     def _watch_content(self, w: dict, dt: float, d_in: int) -> None:
         """영상·소리가 실제로 오는지. 영상만 오고 소리가 없으면 'no_audio', 아무것도 안 오면 'no_input' (송출 중일 때만)."""
@@ -659,7 +673,8 @@ class Relay:
         if now - w["emit"] >= STATS_S:
             w["emit"] = now
             span = sum(x[0] for x in w["win"]) or 1
-            _emit({"event": "stats", "kbps_in": round(sum(x[1] for x in w["win"]) * 8 / span / 1000),
+            rtt, retr = self._tcp_info()
+            _emit({"event": "stats", "rtt": rtt, "retr": retr, "kbps_in": round(sum(x[1] for x in w["win"]) * 8 / span / 1000),
                    "kbps_out": round(sum(x[2] for x in w["win"]) * 8 / span / 1000), "delay": round(delay, 2)})
 
     async def _open_upstream(self):
@@ -676,6 +691,8 @@ class Relay:
         peer = w.get_extra_info("peername")
         self.peer = peer[0] if peer else "?"  # 붙은 유튜브 수신 서버 IP — 로그에 남겨 같은 서버 문제인지 가려낸다 (v2.17)
         sock = w.get_extra_info("socket")
+        self.sock = sock
+        _emit({"event": "peer", "ip": self.peer})  # 관리 프로그램이 IP 별 분포를 센다 (v2.19)
         if sock is not None:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             for opt, val in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
@@ -721,6 +738,15 @@ class Relay:
         c = self.cfg
         if not c.get("connect_addr"):
             return
+        if c.get("load_file"):  # v2.19: 관리 프로그램이 모아 둔 IP 중 지금 가장 적게 붙은 곳으로 (한 IP 로 우르르 몰리지 않게)
+            from .ytingest import pick_from_file
+
+            new = pick_from_file(c["load_file"], c["host"], int(c["port"]), c["connect_addr"])
+            if new:
+                if new != c["connect_addr"]:
+                    log.info("유튜브 수신 서버 주소 바꿈 (가장 적게 붙은 곳): %s → %s", c["connect_addr"], new)
+                c["connect_addr"] = new
+                return
         try:
             infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(
                 c["host"], int(c["port"]), family=socket.AF_INET, type=socket.SOCK_STREAM), 3)
@@ -900,7 +926,9 @@ class RelayProc:
         self.proc = None
         self.port: int | None = None
 
-    def start(self, base_url: str, key: str, verify: bool = True, ipv4: bool = True, wait_s: float = 5.0) -> int | None:
+    def start(self, base_url: str, key: str, verify: bool = True, ipv4: bool = True, wait_s: float = 5.0,
+              picker=None, load_file: str | None = None) -> int | None:
+        """picker(host, port) → IP: 관리 프로그램의 수신 IP 모음에서 가장 적게 붙은 곳 (v2.19). 없으면 DNS 로 고르게."""
         import subprocess
         from urllib.parse import urlparse
 
@@ -916,7 +944,8 @@ class RelayProc:
         cfg = {"listen_port": self.port, "host": host, "port": port, "app": app, "key": key,
                "tcurl": f"{u.scheme}://{host}:{port}/{app}", "tls": tls, "verify": verify,
                "cafile": tls_relay.CA_FILE if os.path.exists(tls_relay.CA_FILE) else None,
-               "connect_addr": tls_relay.resolve_ipv4(host, port, spread=self.live_id) if ipv4 else None, "log": str(self.log_path)}
+               "connect_addr": ((picker(host, port) if picker else None) or tls_relay.resolve_ipv4(host, port, spread=self.live_id))
+               if ipv4 else None, "load_file": load_file, "log": str(self.log_path)}
         self.proc = subprocess.Popen([sys.executable, "-m", "livemax.rtmp_relay"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         import threading

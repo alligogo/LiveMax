@@ -110,7 +110,7 @@ let pollTimer = null;
 function stopPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
 
 function shell(active, ...content) {
-  const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/channels", "채널", "channels"], ["#/system", "설정", "system"]];
+  const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/channels", "채널", "channels"], ["#/health", "검진", "health"], ["#/system", "설정", "system"]];
   return h("div", {},
     h("header", { class: "topbar" },
       h("a", { class: "brand", href: "#/" }, brandParts()),
@@ -620,7 +620,13 @@ function renderSide(side, ov) {
           row("cpu", "CPU", fmt.num(s.cpu_pct, 1, "%"), [`라이브당 약 ${fmt.num(c.cpu_per_live_pct, 1)}% · steal ${fmt.num(s.steal_pct, 2, "%")}`,
               s.cpu_peak_pct ? peakNote(`${fmt.num(s.cpu_peak_pct, 0)}%`, s.cpu_peak_at) : null],
             (s.cpu_pct || 0) / 100, cpuT / 100, c.limiting === "cpu", s.cpu_peak_pct ? s.cpu_peak_pct / 100 : null),
-          row("net", "회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, `라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps`,
+          row("net", "회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, [`라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps`,
+            // 유튜브 수신 IP 분포 (v2.19): 한 곳에 몰리면 그 수신 서버가 멈칫할 때 함께 밀림 → 경고
+            ov.ingest?.total ? (() => {
+              const g = ov.ingest, hot = g.max > Math.max(10, g.total * 0.3);
+              return h("div", { class: "ing-line" + (hot ? " hot" : ""), title: Object.entries(g.load || {}).map(([ip, n]) => `${ip}  ${n}개`).join("\n") },
+                hot ? ico("warn") : null, ` 유튜브 IP ${g.used}곳 (모음 ${g.ips}) · 한 곳 최대 ${g.max}개`);
+            })() : null],
             c.port_mbit ? (s.net_tx_mbps || 0) / c.port_mbit : 0, portR, c.limiting === "bandwidth"),
           row("disk", "디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-", diskFit,
             s.disk_total_gb ? (s.disk_used_gb || 0) / s.disk_total_gb : 0, diskW / 100, false)),
@@ -1580,6 +1586,119 @@ function serverCard(s, card) {
     } }, "저장"));
 }
 
+
+// ------------------------------------------------------------------ 건강검진 (v2.19)
+// 판정은 '시청자가 끊김·무음을 겪었을 가능성' 기준. 서버 숫자는 최적화 참고로 따로 (접힘).
+const HV = { ok: ["✓", "정상"], warn: ["△", "주의"], bad: ["✗", "시청자 영향"] };
+const H_KIND = { slow: "밀림", reconnect: "유튜브 재접속", no_audio: "소리 없음", no_input: "입력 없음", stall: "중계기 멈춤", down: "송출 중단" };
+let HEALTH_SEL = null, HEALTH_ITEM = "bad";
+const hAvail = (r) => (r.avail == null ? "-" : `${(r.avail * 100).toFixed(r.avail >= 0.9999 ? 4 : 2)}%`);
+const hKst = (ts) => { const d = new Date(ts * 1000 + 9 * 3600 * 1000); return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`; };
+// 10일 추이 항목: [키, 이름, 값 뽑기, 단위]
+const H_ITEMS = [
+  ["bad", "✗ 시청자 영향", (r) => r.counts.bad, "건"],
+  ["warn", "△ 영향 가능", (r) => r.counts.warn, "건"],
+  ["avail", "시청자 기준 가동률", (r) => (r.avail == null ? null : +(r.avail * 100).toFixed(4)), "%"],
+  ["prog", "우리 프로그램 원인", (r) => r.counts.ours_program, "건"],
+  ["cpu", "CPU 평균", (r) => r.server.cpu_avg, "%"],
+  ["cpumax", "CPU 5분 평균 최고", (r) => r.server.cpu5_max, "%"],
+  ["steal", "steal 최고", (r) => r.server.steal_max, "%"],
+  ["retr", "재전송률 평균", (r) => r.server.retrans_avg, "%"],
+  ["rtt", "유튜브 왕복 시간", (r) => r.server.rtt_avg, "ms"],
+  ["minor", "짧은 밀림 (내부 처리)", (r) => r.server.minor, "건"],
+];
+
+async function showHealth() {
+  if (samePage("health")) return PAGE.refresh();
+  stopPoll();
+  const body = h("div", { class: "health" }, h("div", { class: "muted small", style: "padding:20px" }, "불러오는 중…"));
+  mount(shell("health", body));
+  const refresh = async () => {
+    let d;
+    try { d = await api("GET", "/api/health"); } catch (e) { body.replaceChildren(h("div", { class: "card empty" }, h("div", { class: "card-body muted" }, e.message))); return; }
+    renderHealth(body, d);
+  };
+  PAGE.name = "health"; PAGE.refresh = refresh; PAGE.root = body;
+  await refresh();
+  pollTimer = setInterval(refresh, 60000);
+}
+
+function renderHealth(root, d) {
+  const days = [...(d.days || []), d.now];
+  if (!HEALTH_SEL || !days.some((x) => x.day === HEALTH_SEL)) HEALTH_SEL = d.days?.length ? d.days[d.days.length - 1].day : "지금";
+  const sel = days.find((x) => x.day === HEALTH_SEL) || d.now;
+  const prevVer = (i) => (i > 0 ? days[i - 1].version : null);
+  const strip = h("div", { class: "hd-strip" }, days.map((r, i) => {
+    const [mk, lb] = HV[r.verdict] || HV.ok;
+    const upd = prevVer(i) && r.version && prevVer(i) !== r.version;
+    return h("button", { class: `hd-day v-${r.verdict}` + (r.day === HEALTH_SEL ? " on" : ""), title: lb,
+      onclick: () => { HEALTH_SEL = r.day; renderHealth(root, d); } },
+      h("span", { class: "hd-date" }, r.day === "지금" ? "지금 (24시간)" : r.day.slice(5)),
+      h("b", { class: "hd-mk" }, mk), h("span", { class: "hd-av" }, hAvail(r)),
+      h("span", { class: "hd-ver" + (upd ? " upd" : "") }, upd ? `업데이트 ${String(r.version).slice(0, 7)}` : String(r.version || "").slice(0, 7)));
+  }));
+  const c = sel.counts, s = sel.server;
+  const evRow = (e) => h("div", { class: `hd-ev s-${e.sev}` },
+    h("span", { class: "hd-ev-mk" }, (HV[e.sev] || ["·"])[0]), h("span", { class: "hd-ev-t" }, hKst(e.ts)),
+    h("span", { class: "hd-ev-n" }, e.name || e.live || "-"),
+    h("span", {}, H_KIND[e.kind] || e.kind, e.kind === "slow" ? ` 최대 ${e.max_delay}초 (${Math.round(e.sec || 0)}초 동안)` : e.sec != null ? ` ${(+e.sec).toFixed(1)}초` : "",
+      e.together > 1 ? ` · 같은 순간 ${e.together}개` : ""),
+    h("span", { class: "hd-ev-c" }, e.cause || ""));
+  const bad = sel.events.filter((e) => e.sev === "bad"), warn = sel.events.filter((e) => e.sev === "warn");
+  const [vmk, vlb] = HV[sel.verdict] || HV.ok;
+  const head = h("div", { class: `card hd-head v-${sel.verdict}` }, h("div", { class: "card-body" },
+    h("div", { class: "hd-big" }, h("b", {}, vmk, " ", vlb), h("span", {}, sel.day === "지금" ? "최근 24시간 (아직 저장 전)" : `${sel.day} 아침 검진 (지난 24시간)`)),
+    h("div", { class: "hd-kpis" },
+      h("div", {}, h("b", {}, hAvail(sel)), h("span", {}, "시청자 기준 가동률")),
+      h("div", {}, h("b", {}, c.bad), h("span", {}, `✗ 시청자 영향 (${sel.thresholds.crit_s}초+)`)),
+      h("div", {}, h("b", {}, c.warn), h("span", {}, `△ 영향 가능 (${sel.thresholds.warn_s}초+)`)),
+      h("div", {}, h("b", {}, c.ours_program), h("span", {}, "우리 프로그램 원인 (고칠 것)"))),
+    Object.keys(sel.causes || {}).length ? h("div", { class: "hd-causes" }, "원인: ",
+      Object.entries(sel.causes).sort((a, b) => b[1] - a[1]).map(([k, v]) => h("span", { class: "hd-cause" + (k === "우리 프로그램" ? " ours" : "") }, `${k} ${v}`))) : null));
+  const evCard = h("div", { class: "card" }, h("div", { class: "card-head" }, "시청자 경험 — 사건"),
+    h("div", { class: "card-body" }, (bad.length || warn.length) ? [...bad, ...warn].map(evRow)
+      : h("div", { class: "muted small" }, "시청자 영향·영향 가능 사건 없음"),
+      h("p", { class: "hint", style: "margin-top:10px" },
+        `짧은 밀림(내부 처리) ${s.minor}건 · 업데이트·재시작 직후(우리가 한 일) ${s.ours}건은 판정에서 뺐습니다.`)));
+  // 시간대 히트맵: 10일 × 24시간 (한국), 칸 = ✗ + △ 건수
+  const hm = h("div", { class: "hd-hm" },
+    h("div", { class: "hd-hm-row hd-hm-top" }, h("span", {}), ...Array.from({ length: 24 }, (_, i) => h("span", {}, i % 3 === 0 ? String(i) : ""))),
+    ...days.map((r) => h("div", { class: "hd-hm-row" }, h("span", { class: "hd-hm-d" }, r.day === "지금" ? "지금" : r.day.slice(5)),
+      ...Array.from({ length: 24 }, (_, i) => {
+        const v = r.hourly?.[i] || r.hourly?.[String(i)] || [0, 0, 0];
+        const n = v[0] + v[1], lvl = v[0] ? "b" : v[1] ? "w" : "";
+        return h("span", { class: "hd-hm-c " + lvl, title: `${r.day} ${i}시 — ✗ ${v[0]} · △ ${v[1]} · 라이브 평균 ${v[2]}개` }, n ? String(n) : "");
+      }))));
+  const hmCard = h("div", { class: "card" }, h("div", { class: "card-head" }, "시간대 (한국) — 10일"),
+    h("div", { class: "card-body" }, hm, h("p", { class: "hint" }, "칸 숫자 = 그 시간 ✗+△ 건수 (✗ 있으면 진한 칸). 한국 0~7시 = 캐나다 동부(OVH 서버) 오전 10시~오후 5시.")));
+  // 10일 추이 (항목을 누르면 바뀜)
+  const it = H_ITEMS.find((x) => x[0] === HEALTH_ITEM) || H_ITEMS[0];
+  const vals = days.map((r) => { try { return it[2](r); } catch (e) { return null; } });
+  const mx = Math.max(1e-9, ...vals.filter((v) => v != null).map(Number));
+  const trend = h("div", { class: "card" }, h("div", { class: "card-head" }, "10일 추이"),
+    h("div", { class: "card-body" },
+      h("div", { class: "seg hd-items" }, H_ITEMS.map(([k, lb]) => h("button", { class: k === it[0] ? "on" : "", onclick: () => { HEALTH_ITEM = k; renderHealth(root, d); } }, lb))),
+      h("div", { class: "hd-bars" }, days.map((r, i) => {
+        const v = vals[i];
+        const frac = v == null ? 0 : it[0] === "avail" ? Math.max(0.02, 1 - (100 - v) * 50) : Math.max(0.02, Number(v) / mx);
+        return h("div", { class: "hd-bar" }, h("span", { class: "hd-bar-v" }, v == null ? "-" : `${v}${it[3]}`),
+          h("i", { style: `height:${Math.round(frac * 100)}%` }), h("span", { class: "hd-bar-d" }, r.day === "지금" ? "지금" : r.day.slice(5)));
+      }))));
+  const ing = s.ingest || {};
+  const srv = h("details", { class: "card hd-srv" }, h("summary", { class: "card-head" }, "서버 상태 (최적화 참고)",
+    sel.warn_server?.length ? h("span", { class: "hd-sw" }, ico("warn"), " ", sel.warn_server.join(" · ")) : h("span", { class: "faint small", style: "margin-left:8px" }, "✓")),
+    h("div", { class: "card-body hd-kv" },
+      ...[["CPU", `평균 ${s.cpu_avg ?? "-"}% · 5분 평균 최고 ${s.cpu5_max ?? "-"}% · 순간 최고 ${s.cpu_max ?? "-"}%`],
+        ["steal", `평균 ${s.steal_avg ?? "-"}% · 최고 ${s.steal_max ?? "-"}%`],
+        ["메모리", s.mem_max_mb ? `최고 ${(s.mem_max_mb / 1024).toFixed(1)} / ${(s.mem_total_mb / 1024).toFixed(1)} GB` : "-"],
+        ["디스크", s.disk_pct != null ? `${s.disk_pct}%` : "-"],
+        ["재전송률", s.retrans_avg != null ? `평균 ${s.retrans_avg}% · 최고 ${s.retrans_max}%` : "- (v2.19 부터 기록)"],
+        ["유튜브 왕복", s.rtt_avg != null ? `평균 ${s.rtt_avg}ms` + (Object.keys(s.ip_rtt || {}).length ? " · " + Object.entries(s.ip_rtt).map(([ip, v]) => `${ip} ${v}ms`).join(" · ") : "") : "- (v2.19 부터 기록)"],
+        ["유튜브 IP", ing.ips ? `쓸 수 있는 ${ing.ips}곳 · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개` : "-"],
+        ["라이브", `평균 ${s.lives_avg}개 송출`]].map(([k, v]) => h("div", {}, h("span", {}, k), h("b", {}, v)))));
+  root.replaceChildren(strip, head, evCard, hmCard, trend, srv);
+}
+
 function notifyCard(n, card) {
   // 휴대폰 알림: 보낼 알림 종류는 공통, 받는 곳은 Pushbullet · 텔레그램 (둘 다 켜도 됨)
   const toggle = (checked, label) => {
@@ -1613,8 +1732,28 @@ function notifyCard(n, card) {
   };
   const btn = (label, fn, dis, cls) => h("button", { class: "btn " + (cls || ""), disabled: !!dis, onclick: fn }, label);
   const call = async (method, url, body, after) => { try { const r = await api(method, url, body); toast(r.message); if (after) showSystem(); } catch (e) { toast(e.message, true); } };
+  const hc = n.health || { time_kst: "07:00", notify_mode: "daily", warn_s: 5, crit_s: 8 };
+  const hTime = h("input", { class: "input", type: "time", value: hc.time_kst, style: "max-width:140px" });
+  const hMode = h("select", { class: "input", style: "max-width:220px" },
+    h("option", { value: "daily", selected: hc.notify_mode === "daily" }, "매일 (안 오면 그 자체가 신호)"),
+    h("option", { value: "problem", selected: hc.notify_mode === "problem" }, "시청자 영향·주의 있을 때만"));
+  const hWarn = h("input", { class: "input", type: "number", min: 1, max: 60, value: hc.warn_s, style: "max-width:90px" });
+  const hCrit = h("input", { class: "input", type: "number", min: 2, max: 120, value: hc.crit_s, style: "max-width:90px" });
+  const healthSec = h("div", { class: "notify-sec" },
+    h("div", { class: "notify-h" }, "건강검진 ", h("span", { class: "faint small" }, "— 매일 지난 24시간을 시청자 기준으로 (메뉴 '검진')")),
+    h("div", { class: "row", style: "gap:10px;align-items:center;flex-wrap:wrap" }, h("span", {}, "검진·알림 시각 (한국)"), hTime, hMode),
+    h("div", { class: "row", style: "gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px" },
+      h("span", {}, "밀림"), hWarn, h("span", {}, "초 이상 = △ 영향 가능 ·"), hCrit, h("span", {}, "초 이상 = ✗ 시청자 영향")),
+    h("p", { class: "hint" }, "알림을 끄려면 위 '보낼 알림'에서 '건강검진'을 끄세요 (검진 자체는 매일 돌고 기록됩니다). 기준 초는 유튜브 '나쁨' 기록과 맞춰 가며 조정 — 11-11 9.4초 밀림에 유튜브 '나쁨'."),
+    h("button", { class: "btn", onclick: async () => {
+      try {
+        await api("PUT", "/api/system/settings", { health_time_kst: hTime.value, health_notify_mode: hMode.value,
+          health_warn_s: Number(hWarn.value), health_crit_s: Number(hCrit.value) });
+        toast("건강검진 설정을 저장했습니다");
+      } catch (e) { toast(e.message, true); }
+    } }, "건강검진 설정 저장"));
   return card("휴대폰 알림",
-    h("span", { class: "flabel" }, "보낼 알림 (Pushbullet · 텔레그램 공통)"), cats,
+    h("span", { class: "flabel" }, "보낼 알림 (Pushbullet · 텔레그램 공통)"), cats, healthSec,
     h("p", { class: "hint" }, `알림 제목 앞에 [${n.label}] 이 붙습니다 (서버명은 왼쪽 '서버' 칸). 같은 내용은 10분에 한 번, 시간당 최대 20건까지만 보냅니다.`),
 
     h("div", { class: "notify-sec" },
@@ -1663,6 +1802,7 @@ async function route() {
   if (r.startsWith("media/audio")) return showMedia("audio");
   if (r.startsWith("system")) return showSystem();
   if (r.startsWith("channels")) return showChannels();
+  if (r.startsWith("health")) return showHealth();
   return showLives();
 }
 window.addEventListener("hashchange", route);

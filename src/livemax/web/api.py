@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from .. import capacity, catalog, channels, config, db, filenames, liquidsoap, notify, secrets, thumbs
+from .. import capacity, catalog, channels, config, db, filenames, health, liquidsoap, notify, secrets, thumbs
 from ..config import ConfigError, Live, live_from_dict
 from ..state import read_json
 from . import auth
@@ -310,6 +310,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return {
             "server_time": time.time(), "version": core.version, "uptime_since": core.started_at,
             "lives": lives, "system": sysd, "channels": [_channel_brief(c) for c in chstore.all()],
+            "ingest": sup.yt_pool.summary() if getattr(sup, "yt_pool", None) else None,  # 유튜브 수신 IP 분포 (v2.19)
             "capacity": {"can_add": cap.can_add, "limiting": cap.limiting, "projected_tb": cap.projected_tb,
                          "limit_tb": cap.limit_tb, "target_tb": cap.target_tb, "usage_ratio": cap.usage_ratio, "month_tx_tb": cap.month_tx_tb,
                          "per_live_tb": cap.per_live_tb, "per_live_mbps": cap.per_live_mbps, "lives": len(planned),
@@ -1129,6 +1130,15 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         return {"ok": True, "message": "업로드 완료 — 규격 검증 중"}
 
     # ------------------------------------------------------------------ 시스템 / 설정
+    # ------------------------------------------------------------------ 건강검진 (v2.19)
+    @app.get("/api/health")
+    def health_get(request: Request):
+        conn = request.state.conn
+        now = health.compute(conn, settings, time.time(), core.version, names=sup.short_names(),
+                             ingest=sup.yt_pool.summary() if getattr(sup, "yt_pool", None) else None)
+        now["day"] = "지금"
+        return {"days": health.days(conn), "now": now, "settings": health.cfg(settings)}
+
     @app.get("/api/system")
     def system(request: Request):
         conn = request.state.conn
@@ -1211,7 +1221,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 "tg_enabled": bool(cfg.get("telegram_enabled")), "tg_token_masked": secrets.mask(tgt) if tgt else "",
                 "tg_chat": cfg.get("telegram_chat_name", "") if cfg.get("telegram_chat_id") else "",
                 "tg_commands": bool(cfg.get("telegram_commands", True)), "tg_last_error": notifier.tg_last_error,
-                "catalog": [{"key": k, "label": lb, "desc": ds} for k, lb, ds, _ in notify.CATEGORIES]}
+                "catalog": [{"key": k, "label": lb, "desc": ds} for k, lb, ds, _ in notify.CATEGORIES],
+                "health": health.cfg(settings)}
 
     @app.put("/api/system/notify")
     def notify_settings(request: Request, b: dict = Body(default={})):
@@ -1363,6 +1374,31 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         if "audio_shared" in b:  # 음악 프로그램 채널별 묶음 — LiveMax 가 다시 켜질 때 적용
             config.save_settings_override(paths, ["audio_shared"], bool(b["audio_shared"]))
             settings["audio_shared"] = bool(b["audio_shared"])
+        if any(k in b for k in ("health_time_kst", "health_notify_mode", "health_warn_s", "health_crit_s")):
+            hc = dict(health.cfg(settings))
+            if "health_time_kst" in b:
+                try:
+                    config.hhmm_to_minutes(b["health_time_kst"])
+                except ConfigError:
+                    return err("검진 시각 형식 오류 (예: 07:00)")
+                hc["time_kst"] = str(b["health_time_kst"]).strip()
+            if "health_notify_mode" in b:
+                if b["health_notify_mode"] not in ("daily", "problem"):
+                    return err("검진 알림 조건 오류")
+                hc["notify_mode"] = b["health_notify_mode"]
+            for k, lo, hi in (("warn_s", 1, 60), ("crit_s", 2, 120)):
+                if f"health_{k}" in b:
+                    try:
+                        v = float(b[f"health_{k}"])
+                    except (TypeError, ValueError):
+                        return err("검진 기준 초는 숫자로 입력하세요")
+                    if not lo <= v <= hi:
+                        return err(f"검진 기준 초는 {lo}~{hi} 사이로 입력하세요")
+                    hc[k] = int(v) if v == int(v) else v
+            if float(hc["warn_s"]) >= float(hc["crit_s"]):
+                return err("'영향 가능' 기준은 '시청자 영향' 기준보다 작아야 합니다")
+            config.save_settings_override(paths, ["health"], hc)
+            settings["health"] = hc
         if b.get("lives_view") in ("grid", "list", "cctv"):
             config.save_settings_override(paths, ["ui", "lives_view"], b["lives_view"])
             settings.setdefault("ui", {})["lives_view"] = b["lives_view"]

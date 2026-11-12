@@ -7,6 +7,7 @@ latest 에 최신 값을 들고 있어 웹 API 가 바로 읽고, SQLite 시계�
 from __future__ import annotations
 
 import logging
+import json
 import threading
 import time
 from collections import deque
@@ -25,7 +26,8 @@ class Collector:
         self.per_live: dict[str, dict] = {}
         self._prev_proc: dict[int, int] = {}
         self.day_low = capacity.DayLow()  # '예상 최대'의 오늘 최솟값 (서버 박스 '최소기준')
-        self._low_win: deque = deque()  # 최소기준용 최근 5분 표본 (시각, CPU, 메모리, 송신)
+        self._low_win: deque = deque()
+        self.latest_net: dict = {}  # 재전송률 · 유튜브 왕복 시간 (v2.19)  # 최소기준용 최근 5분 표본 (시각, CPU, 메모리, 송신)
 
     def run(self, stop: threading.Event) -> None:
         iface = sysmetrics.default_iface()
@@ -33,6 +35,7 @@ class Collector:
         prev_net = sysmetrics.read_net(iface) if iface else (0, 0)
         prev_t = time.monotonic()
         month_tx, last_vn, last_emerg = None, 0.0, 0.0
+        prev_tcp = sysmetrics.read_tcp_counters()
         conn = db.connect(self.paths.db)
         interval = float(self.settings["collector"]["interval_seconds"])
         while not stop.wait(interval):
@@ -94,10 +97,27 @@ class Collector:
                                "disk_total_gb": d_total, "disk_pct": d_pct, "net_tx_mbps": tx, "net_rx_mbps": rx,
                                "month_tx_bytes": month_tx, "lives_running": running, "iface": iface}
                 self._track_low(now, snap, cpu, mem_used + (swap_used or 0), mem_total, tx, month_tx, running)
+                # 경로 측정 (v2.19, 건강검진): 서버 전체 TCP 재전송률 + 유튜브 수신 IP 별 왕복 시간
+                tcp = sysmetrics.read_tcp_counters()
+                retrans = None
+                if tcp and prev_tcp and tcp[0] > prev_tcp[0]:
+                    retrans = 100.0 * (tcp[1] - prev_tcp[1]) / (tcp[0] - prev_tcp[0])
+                prev_tcp = tcp
+                per_ip: dict[str, list] = {}
+                for s_ in snap.values():
+                    if s_.get("state") == "running" and s_.get("peer") and s_.get("rtt_ms") is not None:
+                        per_ip.setdefault(s_["peer"], []).append(float(s_["rtt_ms"]))
+                rtts = [x for v in per_ip.values() for x in v]
+                self.latest_net = {"retrans_pct": retrans, "rtt_avg": sum(rtts) / len(rtts) if rtts else None,
+                                   "rtt_max": max(rtts) if rtts else None,
+                                   "per_ip": {ip: [len(v), round(sum(v) / len(v), 1)] for ip, v in per_ip.items()}}
                 # 한 번의 짧은 트랜잭션으로 (라이브 15개면 예전엔 쓰기 16번)
                 conn.execute("BEGIN")
                 conn.executemany("INSERT INTO metrics_live(ts, live_id, state, speed, cpu_pct, rss_mb, out_time_s,"
                                  " kbps_in, kbps_out, delay_s) VALUES (?,?,?,?,?,?,?,?,?,?)", live_rows)
+                conn.execute("INSERT INTO net_metrics(ts, retrans_pct, rtt_avg, rtt_max, per_ip) VALUES (?,?,?,?,?)",
+                             (now, retrans, self.latest_net["rtt_avg"], self.latest_net["rtt_max"],
+                              json.dumps(self.latest_net["per_ip"])))
                 conn.execute(
                     "INSERT INTO metrics_system(ts, cpu_pct, steal_pct, iowait_pct, mem_used_mb, mem_total_mb, disk_used_gb,"
                     " disk_total_gb, net_tx_mbps, net_rx_mbps, month_tx_gb, lives_running) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",

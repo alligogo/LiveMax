@@ -107,6 +107,21 @@ CREATE TABLE IF NOT EXISTS allow_ips (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY, value TEXT
 );
+
+-- 건강검진 (v2.19): 시청자 영향을 가릴 사건 기록 · 경로 측정 · 하루 검진 결과 (10일 보관)
+CREATE TABLE IF NOT EXISTS incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL, live_id TEXT, kind TEXT NOT NULL,
+    sec REAL, max_delay REAL, peer TEXT, where_ TEXT, note TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_incidents_ts ON incidents(ts);
+CREATE TABLE IF NOT EXISTS net_metrics (
+    ts REAL NOT NULL, retrans_pct REAL, rtt_avg REAL, rtt_max REAL, per_ip TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_net_metrics_ts ON net_metrics(ts);
+CREATE TABLE IF NOT EXISTS health_days (
+    day TEXT PRIMARY KEY, ts REAL NOT NULL, data TEXT NOT NULL
+);
 """
 
 

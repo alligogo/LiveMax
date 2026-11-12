@@ -191,3 +191,16 @@ class PeakTracker:
                 self.sample(time.time())
             except Exception:  # noqa: BLE001 — 측정 실패가 다른 일을 막지 않게
                 pass
+
+
+def read_tcp_counters() -> tuple[int, int] | None:
+    """(보낸 TCP 조각 누적, 다시 보낸 조각 누적) — /proc/net/snmp. 재전송률이 오르면 서버→유튜브 경로가 붐비는 것 (v2.19)."""
+    try:
+        with open("/proc/net/snmp") as f:
+            rows = [ln.split() for ln in f if ln.startswith("Tcp:")]
+        if len(rows) < 2:
+            return None
+        d = dict(zip(rows[0][1:], rows[1][1:]))
+        return int(d["OutSegs"]), int(d["RetransSegs"])
+    except (OSError, KeyError, ValueError):
+        return None

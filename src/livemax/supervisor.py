@@ -33,7 +33,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import channels, concat, config, db, ffmpeg_cmd, liquidsoap, rtmp_relay, secrets, sysmetrics, tls_relay
+from . import channels, concat, config, db, ffmpeg_cmd, liquidsoap, rtmp_relay, ytingest, secrets, sysmetrics, tls_relay
 from .config import ConfigError, LiveStore
 from .logsetup import UTCFormatter, FMT
 from .paths import Paths
@@ -334,7 +334,9 @@ class LiveProc:
                     lport = self.relay.port  # 살아 있는 중계기 재사용 → 유튜브 연결 그대로 (영상 교체·일일 재시작)
                 else:
                     lm = rtmp_relay.RelayProc(live.id, paths.logs, on_event=self._relay_event)
-                    lport = lm.start(base, key, verify=bool(rcfg.get("verify", True)), ipv4=bool(rcfg.get("ipv4", True)))
+                    lport = lm.start(base, key, verify=bool(rcfg.get("verify", True)), ipv4=bool(rcfg.get("ipv4", True)),
+                                     picker=lambda h, pt, lid=live.id: self.sup.yt_pool.pick(lid, h, pt),
+                                     load_file=str(self.sup.yt_pool.load_file))
                     if lport:
                         lm.sig = sig
                         self.relay = lm
@@ -395,13 +397,18 @@ class LiveProc:
         """새 중계기가 유튜브에 혼자 다시 붙었을 때 — 송출 프로그램은 안 멈췄지만 끊김으로 기록한다 (카드·관제·로그)."""
         kind = ev.get("event")
         if kind == "stats":  # 15초마다: 유튜브로 실제 나간 양·밀린 시간 (DB 기록용, 로그 없음)
-            self.set(kbps_in=ev.get("kbps_in"), kbps_out=ev.get("kbps_out"), delay_s=ev.get("delay"), relay_at=time.time())
+            self.set(kbps_in=ev.get("kbps_in"), kbps_out=ev.get("kbps_out"), delay_s=ev.get("delay"), relay_at=time.time(),
+                     rtt_ms=ev.get("rtt"), tcp_retr=ev.get("retr"))
             self._track_blip(float(ev.get("delay") or 0))
+            return
+        if kind == "peer":  # 중계기가 붙은 유튜브 수신 서버 IP (v2.19 — IP 별 분포)
+            self.set(peer=ev.get("ip"))
             return
         if kind == "slow_start":  # 2초 넘게 5초 이상 밀림 — 로그는 끝날 때 한 번만, 동시 밀림 판정에만 쓴다
             self.sup.note_slow(self.id, True, ev.get("peer"))
             return
         if kind == "no_audio":  # 영상만 가고 소리가 없다 — ffmpeg 가 음악 연결을 잃음 (스스로 다시 붙기에 실패한 뒤)
+            self.sup.incident(self.id, "no_audio", sec=ev.get("sec"), peer=self.st.get("peer"))
             self._auto_restart("소리 없음", f"영상만 송출되고 소리가 {ev.get('sec')}초째 없음 — 송출 프로그램을 다시 띄워 음악을 다시 붙임")
             return
         if kind == "audio_back":
@@ -409,6 +416,7 @@ class LiveProc:
             return
         if kind == "no_input":
             sec = float(ev.get("sec") or 0)
+            self.sup.incident(self.id, "no_input", sec=sec, peer=self.st.get("peer"))
             if sec >= 30:
                 self._auto_restart("입력 없음", f"송출 프로그램이 {sec:.0f}초째 아무것도 안 보냄 — 다시 띄움")
             else:
@@ -418,6 +426,7 @@ class LiveProc:
             self.event("warn", f"송출 프로그램이 다시 보내기 시작 — {ev.get('sec')}초 동안 유튜브로 영상·소리가 안 나감")
             return
         if kind == "stall":
+            self.sup.incident(self.id, "stall", sec=ev.get("sec"), peer=self.st.get("peer"), where="server")
             msg = f"중계기가 {ev.get('sec')}초 멈춤 — 그동안 유튜브로 못 보냄 (서버 처리 지연, 회선 아님)"
             if float(ev.get("sec") or 0) >= 3:
                 self.event("warn", msg)
@@ -428,6 +437,8 @@ class LiveProc:
             self.sup.note_slow(self.id, False)
             now = time.time()
             dur, mx = float(ev.get("dur") or 0), float(ev.get("max_delay") or 0)
+            self.sup.incident(self.id, "slow", sec=dur, max_delay=mx, peer=ev.get("peer") or self.st.get("peer"),
+                              where=ev.get("where"), ts=now - dur)
             where = {"network": "서버→유튜브 회선", "server": "서버 처리 지연"}.get(ev.get("where"), "")
             msg = (f"유튜브 전송 밀림 {ev.get('dur')}초 — 최대 {ev.get('max_delay')}초 밀림, "
                    f"유튜브로 {ev.get('kbps_out')}kbps (보낼 양 {ev.get('kbps_in')}kbps)"
@@ -446,6 +457,7 @@ class LiveProc:
         if kind == "reconnect":
             self.sup.note_slow(self.id, False)
             gap = float(ev.get("gap") or 0)
+            self.sup.incident(self.id, "reconnect", sec=gap, peer=self.st.get("peer"))
             if gap <= QUIET_GAP_S:  # 유튜브 정비 등으로 끊겼다가 바로 붙음 — 시청자 영향 없음
                 self.restarts.append((time.time(), f"{QUIET_RECONNECT} {gap:.1f}초"))
                 self.log.info("유튜브가 연결을 끊음 → 중계기가 %.1f초 만에 다시 접속 (송출 프로그램은 계속)", gap)
@@ -554,6 +566,8 @@ class Supervisor:
         self._labels: dict[str, tuple[float, str]] = {}
         self._slow_now: dict[str, float] = {}  # 지금 밀리는 중인 라이브 → 시작 시각
         self._slow_peer: dict[str, str] = {}  # 그 라이브가 붙은 유튜브 수신 서버 IP (v2.18)
+        # 유튜브 수신 IP 모음 + 가장 적게 붙은 IP 로 (v2.19)
+        self.yt_pool = ytingest.IngestPool(paths, self._peers, cafile=tls_relay.CA_FILE)
         # 음악 프로그램 채널별 묶음 (B안). 켜고 끄기는 LiveMax 가 다시 켜질 때(업데이트·재시작) 적용 — 도중에 바꾸면 꼬인다
         self.shared_audio = bool(settings.get("audio_shared", True))
         # 묶음 키 → {proc, port, seq, inst{라이브 id → {token, sig, since, ready}}, fails, next_try, started}
@@ -571,6 +585,35 @@ class Supervisor:
         self.boot_pending: set[str] = set()  # 부팅 줄에서 차례를 기다리는, 이어 갈 라이브 (alive_at 유지용)
         self.last_m3u = 0.0
         self.notify = lambda *a, **k: False  # daemon 이 Notifier.send 로 바꿔 끼운다
+
+    def short_names(self) -> dict[str, str]:
+        """라이브 ID → 'LIVE 5 (채널)' (검진·알림용)."""
+        out = {}
+        for lv in self.store.all():
+            lab = self.live_label(lv.id)
+            parts = lab.split(" · ")
+            out[lv.id] = parts[-2] if len(parts) >= 2 else lab
+        return out
+
+    def _peers(self) -> dict[str, str]:
+        """라이브 → 지금 붙어 있는 유튜브 수신 IP (새 중계기가 살아 있는 라이브만)."""
+        out = {}
+        for lid, p in list(self.procs.items()):
+            r = getattr(p, "relay", None)
+            if p.desired and isinstance(r, rtmp_relay.RelayProc) and r.alive() and p.st.get("peer"):
+                out[lid] = p.st["peer"]
+        return out
+
+    def incident(self, live_id: str | None, kind: str, sec=None, max_delay=None, peer=None, where=None, note=None,
+                 ts: float | None = None) -> None:
+        """건강검진용 사건 기록 (v2.19) — 실패해도 송출엔 영향 없게."""
+        try:
+            with db.session(self.paths.db) as c:
+                c.execute("INSERT INTO incidents(ts, live_id, kind, sec, max_delay, peer, where_, note) VALUES (?,?,?,?,?,?,?,?)",
+                          (ts or time.time(), live_id, kind, float(sec) if sec is not None else None,
+                           float(max_delay) if max_delay is not None else None, peer, where, note))
+        except Exception:  # noqa: BLE001
+            log.debug("사건 기록 실패", exc_info=True)
 
     def note_slow(self, live_id: str, on: bool, peer: str | None = None) -> None:
         """라이브 여러 개가 같은 순간 밀리면 서버·회선(우리) 문제 → 휴대폰 알림 (DESIGN 11-D 11).
@@ -764,6 +807,7 @@ class Supervisor:
         """
         gap = float(self.settings["supervisor"]["boot_start_gap_seconds"])
         boot_at = time.time()
+        self.incident(None, "boot")  # 업데이트·재부팅 — 검진에서 이 뒤 몇 분은 '우리가 한 일' 로
         plan = []
         for lv in self.store.all():
             if not lv.enabled or not channels.live_key_path(self.paths, lv).exists():
@@ -1170,6 +1214,7 @@ class Supervisor:
             p.down_notified = True
             msg = p.st.get("message") or p.st.get("state") or ""
             self.notify("down", f"{name}: 송출 중단", f"{int(now - p.bad_since)}초째 송출 안 됨 — {msg}", dedupe_s=0)
+            self.incident(lv.id, "down", sec=now - p.bad_since, note=msg)
 
     def _planned_restarts(self) -> None:
         now = datetime.now(timezone.utc)
@@ -1190,4 +1235,5 @@ class Supervisor:
                     return
                 self.done_today[lv.id] = day
                 self.last_planned = time.time()
+                self.incident(lv.id, "planned_restart")
                 p.restart("일일 재시작")
