@@ -198,8 +198,9 @@ class LiveProc:
         (self.sup.paths.run_dir / f"{self.id}.next.json").unlink(missing_ok=True)
         self.event("info", f"정지 ({reason})")
 
-    def restart(self, reason: str, audio_too: bool = False) -> None:
-        """그 라이브만 재시작. audio_too=False 면 영상(ffmpeg)만 — 음악 흐름 유지."""
+    def restart(self, reason: str, audio_too: bool = False, move_ip: bool = False) -> None:
+        """그 라이브만 재시작. audio_too=False 면 영상(ffmpeg)만 — 음악 흐름 유지.
+        move_ip: 중계기도 새로 띄워 덜 붐비는 유튜브 수신 IP 로 옮긴다 (자정 재시작 때만, v2.20 — 유튜브 재접속 공백이 조금 더 생김)."""
         self.restarts.append((time.time(), reason))
         self.event("warn" if "정지" in reason or "speed" in reason else "info", f"재시작: {reason}")
         if audio_too and not self.sup.shared_audio:
@@ -210,7 +211,9 @@ class LiveProc:
             self.sup.groups_kick()  # 묶음 모드: 재생 방식·크로스페이드가 바뀌면 이 라이브 음악만 새 주소로 다시 올린다 (다른 라이브는 그대로)
         self.pending_reason = reason
         self.set(state="restarting", message=reason)
-        self._kill_video(keep_relay=True)
+        if move_ip:
+            self.set(peer=None)
+        self._kill_video(keep_relay=not move_ip)
 
     @staticmethod
     def _kill(p: subprocess.Popen | None, sig=signal.SIGTERM, wait: float = 8) -> None:
@@ -1235,5 +1238,8 @@ class Supervisor:
                     return
                 self.done_today[lv.id] = day
                 self.last_planned = time.time()
-                self.incident(lv.id, "planned_restart")
-                p.restart("일일 재시작")
+                move = self.yt_pool.should_move(p.st.get("peer")) if isinstance(p.relay, rtmp_relay.RelayProc) else False
+                self.incident(lv.id, "planned_restart", note="유튜브 IP 옮김" if move else None, peer=p.st.get("peer"))
+                if move:
+                    p.log.info("일일 재시작 — 유튜브 수신 IP %s 가 붐벼 덜 붐비는 곳으로 옮김", p.st.get("peer"))
+                p.restart("일일 재시작", move_ip=move)

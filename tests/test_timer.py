@@ -12,6 +12,7 @@ class FakeProc:
         self.desired = False
         self.st = {"state": "stopped"}
         self.events, self.restarted = [], []
+        self.relay = None
 
     def start(self):
         self.desired = True
@@ -27,8 +28,9 @@ class FakeProc:
     def event(self, level, msg):
         self.events.append(msg)
 
-    def restart(self, reason, audio_too=False):
+    def restart(self, reason, audio_too=False, move_ip=False):
         self.restarted.append(reason)
+        self.moved = move_ip
 
 
 @pytest.fixture
@@ -234,3 +236,22 @@ def test_set_elapsed_blocked_beyond_duration_timer(sup):
     sup.set_elapsed("live1", 8 * 3600)
     sup._timers()
     assert sup.procs["live1"].desired  # 2시간 남음 — 계속 송출
+
+
+def test_planned_restart_moves_crowded_ip(sup, settings, monkeypatch):
+    """v2.20: 자정 재시작 때 붐비는 유튜브 IP 에 있는 라이브는 중계기까지 새로 띄워 덜 붐비는 곳으로."""
+    from datetime import datetime, timezone
+
+    from livemax import rtmp_relay
+
+    _save(sup)
+    sup.start("live1")
+    p = sup.procs["live1"]
+    p.relay = object.__new__(rtmp_relay.RelayProc)
+    p.st["peer"] = "142.250.69.140"
+    p.log = __import__("logging").getLogger("t")
+    monkeypatch.setattr(sup.yt_pool, "should_move", lambda ip: ip == "142.250.69.140")
+    now = datetime.now(timezone.utc)
+    monkeypatch.setitem(settings["restart"], "base_utc", now.strftime("%H:%M"))
+    sup._planned_restarts()
+    assert p.restarted == ["일일 재시작"] and p.moved is True

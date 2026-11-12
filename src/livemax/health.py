@@ -199,9 +199,19 @@ def days(conn) -> list[dict]:
 MARK = {"ok": "✓ 정상", "warn": "△ 주의", "bad": "✗ 시청자 영향"}
 
 
+def avail_text(rep: dict) -> str:
+    """영향이 없으면 100%, 있으면 99.9986% 처럼 필요한 자리까지만 (v2.20)."""
+    a = rep.get("avail")
+    if a is None:
+        return "-"
+    if not rep.get("impact_s") or a >= 0.99999995:
+        return "100%"
+    return f"{a * 100:.4f}".rstrip("0").rstrip(".") + "%"
+
+
 def message(rep: dict) -> tuple[str, str]:
     c = rep["counts"]
-    av = f"{rep['avail'] * 100:.4f}%" if rep.get("avail") is not None else "-"
+    av = avail_text(rep)
     s = rep["server"]
     title = f"검진 {MARK[rep['verdict']]}"
     lines = [f"{rep['day'][5:]} · 시청자 기준 가동률 {av} · ✗ {c['bad']}건 △ {c['warn']}건",

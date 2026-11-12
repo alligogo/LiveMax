@@ -110,7 +110,7 @@ let pollTimer = null;
 function stopPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
 
 function shell(active, ...content) {
-  const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/channels", "채널", "channels"], ["#/health", "검진", "health"], ["#/system", "설정", "system"]];
+  const nav = [["#/", "라이브", "lives"], ["#/media/video", "비디오", "video"], ["#/media/audio", "음악", "audio"], ["#/channels", "채널", "channels"], ["#/health", "서버", "health"], ["#/system", "설정", "system"]];
   return h("div", {},
     h("header", { class: "topbar" },
       h("a", { class: "brand", href: "#/" }, brandParts()),
@@ -1592,7 +1592,12 @@ function serverCard(s, card) {
 const HV = { ok: ["✓", "정상"], warn: ["△", "주의"], bad: ["✗", "시청자 영향"] };
 const H_KIND = { slow: "밀림", reconnect: "유튜브 재접속", no_audio: "소리 없음", no_input: "입력 없음", stall: "중계기 멈춤", down: "송출 중단" };
 let HEALTH_SEL = null, HEALTH_ITEM = "bad";
-const hAvail = (r) => (r.avail == null ? "-" : `${(r.avail * 100).toFixed(r.avail >= 0.9999 ? 4 : 2)}%`);
+// 가동률: 영향이 없으면 100%, 있으면 99.9986% 처럼 필요한 자리까지만 (v2.20)
+const hAvail = (r) => {
+  if (r.avail == null) return "-";
+  if (!r.impact_s || r.avail >= 0.99999995) return "100%";
+  return `${(r.avail * 100).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}%`;
+};
 const hKst = (ts) => { const d = new Date(ts * 1000 + 9 * 3600 * 1000); return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`; };
 // 10일 추이 항목: [키, 이름, 값 뽑기, 단위]
 const H_ITEMS = [
@@ -1740,7 +1745,7 @@ function notifyCard(n, card) {
   const hWarn = h("input", { class: "input", type: "number", min: 1, max: 60, value: hc.warn_s, style: "max-width:90px" });
   const hCrit = h("input", { class: "input", type: "number", min: 2, max: 120, value: hc.crit_s, style: "max-width:90px" });
   const healthSec = h("div", { class: "notify-sec" },
-    h("div", { class: "notify-h" }, "건강검진 ", h("span", { class: "faint small" }, "— 매일 지난 24시간을 시청자 기준으로 (메뉴 '검진')")),
+    h("div", { class: "notify-h" }, "건강검진 ", h("span", { class: "faint small" }, "— 매일 지난 24시간을 시청자 기준으로 (메뉴 '서버')")),
     h("div", { class: "row", style: "gap:10px;align-items:center;flex-wrap:wrap" }, h("span", {}, "검진·알림 시각 (한국)"), hTime, hMode),
     h("div", { class: "row", style: "gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px" },
       h("span", {}, "밀림"), hWarn, h("span", {}, "초 이상 = △ 영향 가능 ·"), hCrit, h("span", {}, "초 이상 = ✗ 시청자 영향")),

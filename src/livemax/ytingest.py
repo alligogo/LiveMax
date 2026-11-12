@@ -30,6 +30,10 @@ POOL_TTL_S = 48 * 3600   # DNS 에서 이만큼 다시 안 보이면 모음에�
 REFRESH_S = 3600         # DNS 다시 묻기·살아 있는지 확인 간격
 RESERVE_S = 120          # 고른 뒤 중계기가 '붙었다' 고 알려 오기 전까지 그 IP 몫으로 셈 (부팅 때 줄줄이 켜도 몰리지 않게)
 LOAD_WRITE_S = 10        # 중계기용 현재 분포 파일 갱신 간격
+MIN_IPS = 4              # 모음이 이보다 적으면 켜기 전에 넉넉히 모은다 (v2.20 — 업데이트 순간 DNS 가 1개만 줘서 50개가 한 IP 로 간 일)
+BOOT_COOLDOWN_S = 600    # 넉넉히 모으기는 이 간격 안에 다시 안 함
+DOH = ("https://dns.google/resolve?name={host}&type=A",            # 구글 공개 DNS (우리 서버 위치 기준으로 답함)
+       "https://cloudflare-dns.com/dns-query?name={host}&type=A")  # 클라우드플레어
 
 
 def ip_key(a: str) -> tuple:
@@ -44,6 +48,22 @@ def _resolve(host: str, port: int) -> list[str]:
     return sorted({i[4][0] for i in infos}, key=ip_key)
 
 
+def _doh(host: str, timeout: float = 3.0) -> list[str]:
+    """공개 DNS(HTTPS)에도 물어 IP 를 더 모은다 — 시스템 DNS 가 1~2개만 줄 때. 받은 IP 는 접속 때 인증서로 진짜 유튜브인지 확인된다."""
+    import urllib.request
+
+    out: set[str] = set()
+    for url in DOH:
+        try:
+            req = urllib.request.Request(url.format(host=host), headers={"accept": "application/dns-json", "user-agent": "livemax"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                d = json.loads(r.read().decode())
+            out.update(a["data"] for a in d.get("Answer", []) if a.get("type") == 1 and a.get("data"))
+        except Exception:  # noqa: BLE001 — 공개 DNS 가 안 되면 시스템 DNS 만으로
+            continue
+    return sorted(out, key=ip_key)
+
+
 def _tls_ok(ip: str, host: str, port: int, cafile: str | None = None, timeout: float = 5.0) -> bool:
     """TLS 인사만 해 보고 닫는다 (인증서는 호스트 이름으로 확인 — 진짜 유튜브 수신 서버인지)."""
     try:
@@ -56,7 +76,8 @@ def _tls_ok(ip: str, host: str, port: int, cafile: str | None = None, timeout: f
 
 
 class IngestPool:
-    def __init__(self, paths: Paths, peers_fn=None, resolve=None, tls_ok=None, cafile: str | None = None):
+    def __init__(self, paths: Paths, peers_fn=None, resolve=None, tls_ok=None, cafile: str | None = None, doh=None,
+                 sleep=time.sleep):
         self.file = paths.state / "ingest_pool.json"        # 모음 (재시작해도 남김)
         self.load_file = paths.run_dir / "ingest_load.json"  # 중계기용 지금 분포
         self.peers_fn = peers_fn or (lambda: {})            # () -> {라이브 ID: 지금 붙은 IP}
@@ -65,6 +86,10 @@ class IngestPool:
         self.lock = threading.Lock()
         self.hosts: dict[str, dict[str, dict]] = {}  # "host:port" → {IP: {"seen", "ok", "checked"}}
         self.reserved: dict[str, tuple[str, float]] = {}  # 라이브 ID → (고른 IP, 시각)
+        self._doh = doh if doh is not None else _doh
+        self._sleep = sleep
+        self._boot_lock = threading.Lock()
+        self._boot_at: dict[str, float] = {}
         self._load()
 
     # ---------------------------------------------------------------- 저장
@@ -113,6 +138,63 @@ class IngestPool:
         with self.lock:
             self._save()
 
+    def ensure(self, host: str, port: int) -> None:
+        """모음이 MIN_IPS 보다 적으면 넉넉히 모은다: 시스템 DNS 를 몇 번 더 묻고 공개 DNS 에도 묻고, 새 IP 는 TLS 인사로 바로 확인.
+        업데이트 직후 처음 고를 때 한 번 (몇 초) — 그 사이 다른 라이브는 기다렸다가 같은 결과를 쓴다."""
+        key = f"{host}:{port}"
+        if len(self.healthy(host, port)) >= MIN_IPS:
+            return
+        with self._boot_lock:
+            if len(self.healthy(host, port)) >= MIN_IPS or time.time() - self._boot_at.get(key, 0) < BOOT_COOLDOWN_S:
+                return
+            self._boot_at[key] = time.time()
+            found: set[str] = set()
+            for i in range(3):
+                try:
+                    found.update(self._resolve(host, port))
+                except OSError:
+                    pass
+                if i < 2:
+                    self._sleep(0.5)
+            try:
+                found.update(self._doh(host) or [])
+            except Exception:  # noqa: BLE001
+                pass
+            now = time.time()
+            with self.lock:
+                pool = self.hosts.setdefault(key, {})
+                new = [ip for ip in found if ip not in pool]
+                for ip in found:
+                    pool.setdefault(ip, {"seen": now, "ok": True, "checked": None})["seen"] = now
+            if new:  # 새로 찾은 IP 는 바로 TLS 인사 (동시에, 몇 초 안에)
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    res = dict(zip(new, ex.map(lambda ip: bool(self._tls_ok(ip, host, port)), new)))
+                with self.lock:
+                    for ip, ok in res.items():
+                        e = self.hosts[key].get(ip)
+                        if e is not None:
+                            e["ok"], e["checked"] = ok, now
+            with self.lock:
+                self._save()
+            log.info("유튜브 수신 IP 넉넉히 모음: %d곳 (새로 %d곳)", len(self.healthy(host, port)), len(new))
+
+    def should_move(self, ip: str | None) -> bool:
+        """자정 재시작 때 이 IP 의 라이브를 덜 붐비는 IP 로 옮길까 (v2.20 — 업데이트 없이도 매일 밤 고르게).
+        옮기면 이 IP 는 1 줄고 다른 곳은 1 늘므로, 차이가 2 이상일 때만."""
+        if not ip:
+            return False
+        with self.lock:
+            keys = [k for k, pool in self.hosts.items() if ip in pool]
+        cnt = self.load()
+        for key in keys:
+            host, _, port = key.rpartition(":")
+            others = [x for x in self.healthy(host, int(port or 0)) if x != ip]
+            if others and cnt.get(ip, 0) - min(cnt.get(x, 0) for x in others) >= 2:
+                return True
+        return False
+
     def healthy(self, host: str, port: int) -> list[str]:
         with self.lock:
             pool = self.hosts.get(f"{host}:{port}", {})
@@ -141,6 +223,7 @@ class IngestPool:
 
         if not self.healthy(host, port):
             self.refresh(host, port, check=False)  # 처음: DNS 만 묻고 바로 (TLS 확인은 1시간 주기에서)
+        self.ensure(host, port)  # 모음이 적으면 넉넉히 (v2.20)
         ips = [ip for ip in self.healthy(host, port) if ip != exclude] or self.healthy(host, port)
         if not ips:
             return None
@@ -201,6 +284,7 @@ class IngestPool:
                     for key in keys:
                         host, _, port = key.rpartition(":")
                         self.refresh(host, int(port or 0))
+                        self.ensure(host, int(port or 0))
                 self.write_load()
             except Exception:  # noqa: BLE001 — 모음 갱신 실패가 송출을 막지 않게
                 log.exception("수신 IP 모음 갱신 실패")

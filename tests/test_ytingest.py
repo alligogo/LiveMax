@@ -10,7 +10,8 @@ IPS2 = ["64.233.178.134", "74.125.197.134"]
 
 def _pool(paths, dns, ok=lambda ip: True):
     peers: dict = {}
-    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: list(dns[0]), tls_ok=lambda ip, h, p: ok(ip))
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: list(dns[0]), tls_ok=lambda ip, h, p: ok(ip),
+                               doh=lambda h: [], sleep=lambda s: None)
     return pool, peers
 
 
@@ -53,3 +54,28 @@ def test_reconnect_picks_least_loaded_not_next(paths, tmp_path):
     assert ytingest.pick_from_file(f, "a.rtmps.youtube.com", 443, IPS6[0]) == IPS6[2]
     assert ytingest.pick_from_file(f, "a.rtmps.youtube.com", 443, IPS6[2]) == IPS6[0]  # 자기 IP 는 빼고
     assert ytingest.pick_from_file(tmp_path / "없음.json", "a.rtmps.youtube.com", 443, IPS6[0]) is None
+
+
+def test_bootstrap_when_dns_gives_one_ip(paths):
+    """v2.20: 업데이트 순간 시스템 DNS 가 IP 를 1개만 줘도 켜기 전에 넉넉히 모은다 (DNS 여러 번 + 공개 DNS)."""
+    answers = iter([["74.125.197.134"], ["74.125.197.134"], ["64.233.178.134"], ["74.125.197.134"]])
+    peers: dict = {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: next(answers, ["74.125.197.134"]),
+                               tls_ok=lambda ip, h, p: ip != "9.9.9.9", doh=lambda h: IPS6[:4] + ["9.9.9.9"], sleep=lambda s: None)
+    for i in range(1, 51):
+        pool.pick(f"live{i}", "a.rtmps.youtube.com", 443)
+    cnt = pool.load()
+    assert "9.9.9.9" not in cnt  # TLS 인사 실패한 IP 는 안 씀
+    assert len(cnt) == 6 and max(cnt.values()) <= 9  # 50개 ÷ 6곳
+
+
+def test_should_move_only_when_crowded(paths):
+    dns = [IPS2]
+    pool, peers = _pool(paths, dns)
+    pool.refresh("a.rtmps.youtube.com", 443, now=1000.0)
+    peers.update({f"live{i}": IPS2[0] for i in range(10)})
+    peers.update({f"live{i}": IPS2[1] for i in range(10, 19)})
+    assert not pool.should_move(IPS2[0])  # 10 vs 9 — 옮겨도 9 vs 10, 이득 없음
+    peers.update({f"live{i}": IPS2[0] for i in range(19, 22)})
+    assert pool.should_move(IPS2[0]) and not pool.should_move(IPS2[1])  # 13 vs 9
+    assert not pool.should_move(None)
