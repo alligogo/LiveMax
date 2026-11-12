@@ -269,8 +269,12 @@ class IngestPool:
             host, _, port = key.rpartition(":")
             ips.update(self.healthy(host, int(port or 0)))
         used = {ip: n for ip, n in cnt.items() if ip}
+        total, mx = sum(used.values()), max(used.values()) if used else 0
+        # 심하게 몰림 (v2.21): 유튜브가 준 IP 로 고르게 나눈 수보다 눈에 띄게 많을 때만. IP 가 적은 건 유튜브가 정하는 일이라 경고 안 함
+        fair = -(-total // max(1, len(ips))) if total else 0
+        crowded = bool(total) and len(ips) >= 2 and mx > fair + max(3, -(-fair // 4))
         return {"ips": len(ips), "used": len(used), "load": dict(sorted(used.items(), key=lambda x: -x[1])),
-                "max": max(used.values()) if used else 0, "total": sum(used.values())}
+                "max": mx, "total": total, "fair": fair, "crowded": crowded}
 
     def run(self, stop: threading.Event) -> None:
         last = 0.0

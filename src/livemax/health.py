@@ -140,8 +140,8 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
     if server["retrans_avg"] is not None and server["retrans_avg"] >= 1:
         warn_server.append(f"재전송률 평균 {server['retrans_avg']}%")
     ing = ingest or {}
-    if ing.get("total") and ing.get("max", 0) > max(10, ing["total"] * 0.3):
-        warn_server.append(f"유튜브 IP 한 곳에 {ing['max']}개 몰림")
+    if ing.get("crowded"):  # 고르게 나눈 수(fair)보다 눈에 띄게 몰렸을 때만 (v2.21)
+        warn_server.append(f"유튜브 IP 한 곳에 {ing['max']}개 몰림 (고르게 나누면 {ing.get('fair')}개)")
 
     hourly = {h: [0, 0, 0.0] for h in range(24)}  # KST 시 → [✗, △, 그 시간 평균 라이브 수]
     for r in counted:

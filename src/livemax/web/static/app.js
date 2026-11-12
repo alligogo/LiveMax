@@ -622,11 +622,9 @@ function renderSide(side, ov) {
             (s.cpu_pct || 0) / 100, cpuT / 100, c.limiting === "cpu", s.cpu_peak_pct ? s.cpu_peak_pct / 100 : null),
           row("net", "회선", `${fmt.num(s.net_tx_mbps, 0)} / ${fmt.num(c.port_mbit, 0)} Mbps`, [`라이브당 ${fmt.num(c.per_live_mbps, 1)}Mbps`,
             // 유튜브 수신 IP 분포 (v2.19): 한 곳에 몰리면 그 수신 서버가 멈칫할 때 함께 밀림 → 경고
-            ov.ingest?.total ? (() => {
-              const g = ov.ingest, hot = g.max > Math.max(10, g.total * 0.3);
-              return h("div", { class: "ing-line" + (hot ? " hot" : ""), title: Object.entries(g.load || {}).map(([ip, n]) => `${ip}  ${n}개`).join("\n") },
-                hot ? ico("warn") : null, ` 유튜브 IP ${g.used}곳 (모음 ${g.ips}) · 한 곳 최대 ${g.max}개`);
-            })() : null],
+            // 유튜브 IP 는 심하게 몰렸을 때만 (v2.21 — 평소 분포는 '서버' 메뉴의 서버 상태에서)
+            ov.ingest?.crowded ? h("div", { class: "ing-line hot", title: Object.entries(ov.ingest.load || {}).map(([ip, n]) => `${ip}  ${n}개`).join("\n") },
+              ico("warn"), ` 유튜브 IP 한 곳에 ${ov.ingest.max}개 몰림 (고르게 나누면 ${ov.ingest.fair}개)`) : null],
             c.port_mbit ? (s.net_tx_mbps || 0) / c.port_mbit : 0, portR, c.limiting === "bandwidth"),
           row("disk", "디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-", diskFit,
             s.disk_total_gb ? (s.disk_used_gb || 0) / s.disk_total_gb : 0, diskW / 100, false)),
@@ -1690,7 +1688,7 @@ function renderHealth(root, d) {
           h("i", { style: `height:${Math.round(frac * 100)}%` }), h("span", { class: "hd-bar-d" }, r.day === "지금" ? "지금" : r.day.slice(5)));
       }))));
   const ing = s.ingest || {};
-  const srv = h("details", { class: "card hd-srv" }, h("summary", { class: "card-head" }, "서버 상태 (최적화 참고)",
+  const srv = h("details", { class: "card hd-srv", open: true }, h("summary", { class: "card-head" }, "서버 상태 (최적화 참고)",
     sel.warn_server?.length ? h("span", { class: "hd-sw" }, ico("warn"), " ", sel.warn_server.join(" · ")) : h("span", { class: "faint small", style: "margin-left:8px" }, "✓")),
     h("div", { class: "card-body hd-kv" },
       ...[["CPU", `평균 ${s.cpu_avg ?? "-"}% · 5분 평균 최고 ${s.cpu5_max ?? "-"}% · 순간 최고 ${s.cpu_max ?? "-"}%`],

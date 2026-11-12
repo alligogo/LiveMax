@@ -79,3 +79,19 @@ def test_should_move_only_when_crowded(paths):
     peers.update({f"live{i}": IPS2[0] for i in range(19, 22)})
     assert pool.should_move(IPS2[0]) and not pool.should_move(IPS2[1])  # 13 vs 9
     assert not pool.should_move(None)
+
+
+def test_crowded_only_when_far_above_fair(paths):
+    """v2.21: IP 가 2곳뿐이라 25/25 인 건 정상(유튜브가 정하는 일) — 고르게 나눈 수보다 눈에 띄게 몰렸을 때만 '몰림'."""
+    pool, peers = _pool(paths, [IPS2])
+    pool.refresh("a.rtmps.youtube.com", 443, now=1000.0)
+    peers.update({f"live{i}": IPS2[i % 2] for i in range(50)})
+    s = pool.summary()
+    assert (s["fair"], s["max"], s["crowded"]) == (25, 25, False)
+    peers.update({f"live{i}": IPS2[0] for i in range(30)})  # 35 / 15
+    assert pool.summary()["crowded"] is True
+    pool1, peers1 = _pool(paths, [[IPS2[0]]])
+    pool1.hosts.clear()
+    pool1.refresh("a.rtmps.youtube.com", 443, now=1000.0)
+    peers1.update({f"live{i}": IPS2[0] for i in range(50)})
+    assert pool1.summary()["crowded"] is False  # IP 가 1곳뿐이면 할 수 있는 게 없음 — 경고 안 함
