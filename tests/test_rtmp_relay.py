@@ -461,3 +461,58 @@ def test_ingest_ips_spread_evenly(monkeypatch):
     assert max(counts.values()) <= 9 and min(counts.values()) >= 8  # 50개 ÷ 6 = 8~9
     assert all(tls_relay.resolve_ipv4("a.rtmps.youtube.com", 443, spread=k) == v for k, v in pick.items())  # 순서 무관
     assert tls_relay.resolve_ipv4("a.rtmps.youtube.com", 443) in ips  # spread 없으면 예전처럼
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg 없음")
+def test_relay_switches_ingest_ip_on_signal_without_restarting_ffmpeg(tmp_path: Path):
+    """v2.22: 자정 옮기기 — 돌고 있는 중계기에 SIGUSR1 → 분포 파일의 가장 적게 붙은 다른 IP 로 다시 접속.
+    ffmpeg 는 끝까지 안 멈추고(v2.20 은 중계기를 새로 띄우다 ffmpeg 가 옛 주소에 붙어 rc=145), 새 IP 쪽은 키프레임부터."""
+    import signal as _sig
+
+    clip = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30", "-f", "lavfi",
+                    "-i", "sine=f=440:sample_rate=48000", "-t", "12", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-g", "60", "-bf", "0", "-c:a", "aac", "-shortest", str(clip)], check=True)
+    sink_port, relay_port = _free_port(), _free_port()
+    outs = {ip: tmp_path / f"out-{ip}.flv" for ip in ("127.0.0.1", "127.0.0.2")}
+    sinks = [subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-listen", "1", "-i", f"rtmp://{ip}:{sink_port}/live2/k",
+                               "-c", "copy", "-f", "flv", str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+             for ip, out in outs.items()]
+    load = tmp_path / "load.json"
+    load.write_text(json.dumps({"hosts": {f"127.0.0.1:{sink_port}": {"ips": ["127.0.0.1", "127.0.0.2"],
+                                                                    "load": {"127.0.0.1": 5, "127.0.0.2": 1}}}}))
+    log = tmp_path / "relay.log"
+    relay = subprocess.Popen([sys.executable, "-m", "livemax.rtmp_relay"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
+    pub = None
+    try:
+        time.sleep(1)
+        relay.stdin.write((json.dumps({"listen_port": relay_port, "host": "127.0.0.1", "port": sink_port, "app": "live2",
+                                       "key": "k", "tcurl": f"rtmp://127.0.0.1:{sink_port}/live2", "tls": False,
+                                       "connect_addr": "127.0.0.1", "load_file": str(load), "log": str(log)}) + "\n").encode())
+        relay.stdin.close()
+        time.sleep(1.5)
+        pub = subprocess.Popen(["ffmpeg", "-v", "error", "-re", "-i", str(clip), "-c", "copy", "-flush_packets", "0",
+                                "-f", "flv", f"tcp://127.0.0.1:{relay_port}"])
+        time.sleep(4)
+        relay.send_signal(_sig.SIGUSR1)  # 옮겨
+        assert pub.wait(timeout=30) == 0  # ffmpeg 는 재시작 없이 끝까지
+        time.sleep(0.5)
+        relay.kill()
+        for s in sinks:
+            s.wait(timeout=20)
+    finally:
+        for p in [relay, pub, *sinks]:
+            if p and p.poll() is None:
+                p.kill()
+    text = log.read_text(encoding="utf-8")
+    assert "유튜브 수신 IP 옮김 (계획): 127.0.0.1 → 127.0.0.2" in text and "계획된 옮김" in text
+    events = [json.loads(x) for x in relay.stdout.read().decode().splitlines() if x.strip().startswith("{")]
+    rec = [e for e in events if e.get("event") == "reconnect"]
+    assert rec and rec[-1]["planned"] is True and rec[-1]["gap"] < 3
+    assert any(e.get("event") == "peer" and e.get("ip") == "127.0.0.2" for e in events)
+    flags = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=flags",
+                            "-of", "csv=p=0", str(outs["127.0.0.2"])], capture_output=True, text=True, check=True).stdout.split()
+    assert flags and flags[0].startswith("K")  # 새 IP 쪽은 키프레임부터
+    dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(outs["127.0.0.2"]), "-f", "null", "-"], capture_output=True, text=True)
+    assert dec.stderr.strip() == ""

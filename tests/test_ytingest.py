@@ -95,3 +95,41 @@ def test_crowded_only_when_far_above_fair(paths):
     pool1.refresh("a.rtmps.youtube.com", 443, now=1000.0)
     peers1.update({f"live{i}": IPS2[0] for i in range(50)})
     assert pool1.summary()["crowded"] is False  # IP 가 1곳뿐이면 할 수 있는 게 없음 — 경고 안 함
+
+
+# 11-13 실측 모음 (왕복 ms) — 가까운 4곳 · 먼 4곳(65ms 대: 시청자 영향 사건 두 번 모두 142.250.69.140)
+REAL = {"74.125.197.134": 2.4, "64.233.178.134": 8.8, "192.178.192.134": 8.8, "142.250.139.134": 9.0,
+        "142.250.137.134": 65.6, "142.250.69.140": 65.8, "142.250.69.44": 65.4, "142.250.69.76": 65.8}
+
+
+def test_prefers_near_fast_ips_and_moves_off_far(paths, tmp_path):
+    """v2.22: 가깝고 빠른 IP(가장 빠른 곳의 2배 이내 또는 15ms 이하)만 쓰고, 그 안에서 가장 적게 붙은 곳 · 같으면 더 빠른 곳."""
+    peers: dict = {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: sorted(REAL), doh=lambda h: [],
+                               tls_ok=lambda ip, h, p: (True, REAL[ip]), sleep=lambda s: None)
+    pool.refresh("a.rtmps.youtube.com", 443, now=1000.0)
+    assert set(pool.near("a.rtmps.youtube.com", 443)) == {"74.125.197.134", "64.233.178.134", "192.178.192.134", "142.250.139.134"}
+    for i in range(1, 51):
+        pool.pick(f"live{i}", "a.rtmps.youtube.com", 443)
+    cnt = pool.load()
+    assert set(cnt) <= set(pool.near("a.rtmps.youtube.com", 443))  # 먼 IP 에는 하나도 안 붙음
+    assert sorted(cnt.values()) == [12, 12, 13, 13]
+    # 먼 IP 에 붙어 있던 라이브는 자정에 옮김 대상, 가까운 IP 는 붐빌 때만
+    assert pool.should_move("142.250.69.140") and not pool.should_move("74.125.197.134")
+    # 중계기용 파일엔 가까운 IP 만 → 다시 접속·옮김도 먼 곳으로 안 감
+    pool.write_load()
+    d = __import__("json").loads(pool.load_file.read_text())
+    assert set(d["hosts"]["a.rtmps.youtube.com:443"]["ips"]) == set(pool.near("a.rtmps.youtube.com", 443))
+    s = pool.summary()
+    assert s["near"] == 4 and s["ips"] == 8 and s["far_used"] == 0
+
+
+def test_single_near_ip_takes_all_rather_than_far(paths):
+    """가까운 곳이 1곳뿐이면 먼 곳으로 나누지 않고 그 1곳에 (속도가 분산보다 중요 — 사용자 결정)."""
+    rt = {"74.125.197.134": 2.3, "142.250.69.44": 65.2}
+    peers: dict = {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: sorted(rt), doh=lambda h: [],
+                               tls_ok=lambda ip, h, p: (True, rt[ip]), sleep=lambda s: None)
+    for i in range(1, 11):
+        assert pool.pick(f"live{i}", "a.rtmps.youtube.com", 443) == "74.125.197.134"
+    assert pool.summary()["crowded"] is False  # 할 수 있는 게 없으면 경고 안 함

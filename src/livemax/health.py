@@ -41,6 +41,8 @@ def _sev(r, warn_s: float, crit_s: float) -> str:
         return "bad" if sec >= 3 else "warn" if sec >= 1 else "minor"
     if k in ("no_audio", "down"):
         return "bad"
+    if k == "ffmpeg_exit":  # 예상 밖 종료 = 우리 프로그램 문제 — 짧아도 고칠 대상이라 최소 △ (v2.22)
+        return "bad" if sec >= crit_s else "warn"
     if k == "no_input":
         return "bad" if sec >= 10 else "warn"
     if k == "stall":
@@ -69,11 +71,11 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
                 or any(0 <= r["ts"] - t <= OURS_RESTART_S for t in planned.get(r["live_id"] or "", [])))
 
     for r in evs:
-        r["sev"] = "ours" if ours(r) else _sev(r, warn_s, crit_s)
+        r["sev"] = "ours" if (r["kind"] == "ip_move" or ours(r)) else _sev(r, warn_s, crit_s)
     net = [r for r in evs if r["kind"] in ("slow", "reconnect") and r["sev"] != "ours"]
     for r in evs:
         k = r["kind"]
-        if k in ("no_audio", "no_input", "stall") or (k == "slow" and r.get("where_") == "server"):
+        if k in ("no_audio", "no_input", "stall", "ffmpeg_exit") or (k == "slow" and r.get("where_") == "server"):
             r["cause"] = "우리 프로그램"
         elif k == "down":
             r["cause"] = "송출 중단"
@@ -226,7 +228,8 @@ def message(rep: dict) -> tuple[str, str]:
     for (t, kind, cause), es in order[:4]:
         e = max(es, key=lambda x: float(x["max_delay"] or x["sec"] or 0))
         what = {"slow": f"밀림 최대 {e['max_delay']}초", "reconnect": f"유튜브 재접속 {e['sec']}초", "no_audio": "소리 없음",
-                "no_input": f"입력 없음 {e['sec']}초", "stall": f"중계기 멈춤 {e['sec']}초", "down": "송출 중단"}.get(kind, kind)
+                "no_input": f"입력 없음 {e['sec']}초", "stall": f"중계기 멈춤 {e['sec']}초", "down": "송출 중단",
+                "ffmpeg_exit": f"송출 프로그램 종료 {e['sec']}초"}.get(kind, kind)
         who = e["name"] + (f" 외 {len(es) - 1}개" if len(es) > 1 else "")
         lines.append(f"· {t} {who} {what}" + (f" — {cause}" if cause else ""))
     if len(order) > 4:

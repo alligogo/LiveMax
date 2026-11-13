@@ -27,6 +27,7 @@ import hmac
 import json
 import logging
 import os
+import signal
 import socket
 import ssl
 import struct
@@ -539,6 +540,7 @@ class Relay:
         self.feed: Feed | None = None
         self.peer = "?"  # 지금 붙은 유튜브 수신 서버 IP (로그용)
         self.sock = None
+        self.switch_req = False  # v2.22: 관리 프로그램이 SIGUSR1 로 '덜 붐비고 빠른 수신 IP 로 옮겨' 요청 (ffmpeg 는 그대로)
         self.reconnecting = False
 
     def _pending(self) -> tuple[int, int, int]:
@@ -809,8 +811,17 @@ class Relay:
             first_in = None
             while True:
                 pub = self.pub
+                planned = False
                 # --- 보내기: 버퍼에 쌓인 태그를 모아 한 번에 (100ms 마다 깨어남 — CPU 절약)
                 while not pub.closed.is_set():
+                    if self.switch_req:  # 계획된 옮김: 지금 연결을 닫고 아래 '다시 접속' 길로 (ffmpeg·버퍼는 그대로)
+                        self.switch_req = False
+                        new = self._switch_target()
+                        if new and new != c.get("connect_addr"):
+                            log.info("유튜브 수신 IP 옮김 (계획): %s → %s", c.get("connect_addr"), new)
+                            c["connect_addr"] = new
+                            planned = True
+                            break
                     tags = feed.take()
                     if tags:
                         if first_in is None:
@@ -835,9 +846,10 @@ class Relay:
                         keep = True
                         return
                     await asyncio.sleep(BATCH_S)
-                # --- 유튜브가 끊음 → 빠른 재접속
+                # --- 유튜브가 끊음(또는 계획된 옮김) → 빠른 재접속
                 cut = time.monotonic()
-                log.warning("유튜브 쪽 연결이 끊김 — 중계기만 바로 다시 접속 (ffmpeg 는 계속)")
+                if not planned:
+                    log.warning("유튜브 쪽 연결이 끊김 — 중계기만 바로 다시 접속 (ffmpeg 는 계속)")
                 await pub.close()
                 self.reconnecting = True
                 try:
@@ -853,8 +865,9 @@ class Relay:
                 self.last_out = 0
                 await self.pub.send_media(b"".join(self.pub.tag_bytes(t, 0, d) for t, _ts, d in feed.headers()))
                 gap = time.monotonic() - cut
-                log.warning("유튜브 재접속 성공 — 공백 %.1f초 (수신 서버 %s)", gap, self.peer)
-                _emit({"event": "reconnect", "gap": round(gap, 2)})
+                (log.info if planned else log.warning)("유튜브 재접속 성공%s — 공백 %.1f초 (수신 서버 %s)",
+                                                       " (계획된 옮김)" if planned else "", gap, self.peer)
+                _emit({"event": "reconnect", "gap": round(gap, 2), "planned": planned})
         except asyncio.IncompleteReadError:
             log.info("ffmpeg 연결 종료")
             keep = True
@@ -876,7 +889,23 @@ class Relay:
                 self.pub = None
             self.busy = False
 
+    def _on_switch(self) -> None:
+        self.switch_req = True
+
+    def _switch_target(self) -> str | None:
+        """옮길 IP: 관리 프로그램의 분포 파일에서 (가깝고 빠른 IP 중) 가장 적게 붙은 곳, 지금 IP 제외."""
+        c = self.cfg
+        if not c.get("load_file") or not c.get("connect_addr"):
+            return None
+        from .ytingest import pick_from_file
+
+        return pick_from_file(c["load_file"], c["host"], int(c["port"]), c["connect_addr"])
+
     async def serve(self) -> None:
+        try:  # v2.22: 옮기기는 중계기를 끄지 않고 신호로 (v2.20 은 끄고 새로 띄워 ffmpeg 가 옛 주소로 붙다 실패 — rc=145)
+            asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, self._on_switch)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
         srv = await asyncio.start_server(self.handle, "127.0.0.1", int(self.cfg["listen_port"]))
         log.info("중계 대기 127.0.0.1:%s → %s:%s", self.cfg["listen_port"], self.cfg["host"], self.cfg["port"])
         watcher = asyncio.create_task(self.watch())
@@ -983,6 +1012,16 @@ class RelayProc:
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+    def request_switch(self) -> bool:
+        """덜 붐비고 빠른 수신 IP 로 옮기라고 신호 (중계기·ffmpeg 는 그대로, 유튜브 연결만 다시)."""
+        if not self.alive():
+            return False
+        try:
+            os.kill(self.proc.pid, signal.SIGUSR1)
+            return True
+        except OSError:
+            return False
 
     def stop(self) -> None:
         import subprocess

@@ -112,6 +112,8 @@ class LiveProc:
         self.lm_block_until = 0.0
         self.low_speed_since: float | None = None
         self.pending_reason: str | None = None
+        self.crash_at: tuple[float, int] | None = None  # 예상 밖 ffmpeg 종료 (시각, rc) — 다시 뜰 때 공백을 검진 사건으로
+        self.move_at = 0.0  # 이 시각에 중계기에 '수신 IP 옮겨' 신호 (자정 재시작 30초 뒤, v2.22)
         self.intentional = False  # 마지막 ffmpeg 종료가 의도한 재시작이었나 (백오프 생략)
         self.first_run = False  # 시작 버튼(또는 부팅) 뒤 아직 한 번도 송출이 안 붙었나 — 화면에 '재시작' 대신 '시작 중'
         self.bad_since: float | None = None  # 송출하려는데 송출이 안 되는 상태가 시작된 시각 (알림용)
@@ -198,9 +200,8 @@ class LiveProc:
         (self.sup.paths.run_dir / f"{self.id}.next.json").unlink(missing_ok=True)
         self.event("info", f"정지 ({reason})")
 
-    def restart(self, reason: str, audio_too: bool = False, move_ip: bool = False) -> None:
-        """그 라이브만 재시작. audio_too=False 면 영상(ffmpeg)만 — 음악 흐름 유지.
-        move_ip: 중계기도 새로 띄워 덜 붐비는 유튜브 수신 IP 로 옮긴다 (자정 재시작 때만, v2.20 — 유튜브 재접속 공백이 조금 더 생김)."""
+    def restart(self, reason: str, audio_too: bool = False) -> None:
+        """그 라이브만 재시작. audio_too=False 면 영상(ffmpeg)만 — 음악 흐름 유지."""
         self.restarts.append((time.time(), reason))
         self.event("warn" if "정지" in reason or "speed" in reason else "info", f"재시작: {reason}")
         if audio_too and not self.sup.shared_audio:
@@ -211,9 +212,7 @@ class LiveProc:
             self.sup.groups_kick()  # 묶음 모드: 재생 방식·크로스페이드가 바뀌면 이 라이브 음악만 새 주소로 다시 올린다 (다른 라이브는 그대로)
         self.pending_reason = reason
         self.set(state="restarting", message=reason)
-        if move_ip:
-            self.set(peer=None)
-        self._kill_video(keep_relay=not move_ip)
+        self._kill_video(keep_relay=True)
 
     @staticmethod
     def _kill(p: subprocess.Popen | None, sig=signal.SIGTERM, wait: float = 8) -> None:
@@ -363,6 +362,11 @@ class LiveProc:
             self.first_run = False
             self.set(state="running", message="", transport=out.mode, ffmpeg_started_at=started,
                      progress_at=started)
+            if self.crash_at:  # 예상 밖 종료 뒤 다시 떴다 — 그 사이 유튜브로 영상이 안 갔다 (+ 첫 영상까지 약 1초)
+                t_crash, rc0 = self.crash_at
+                self.crash_at = None
+                self.sup.incident(self.id, "ffmpeg_exit", sec=round(started - t_crash + 1, 1), peer=self.st.get("peer"),
+                                  note=f"rc={rc0}", ts=t_crash)
             threading.Thread(target=self._read_stderr, args=(self.video,), daemon=True).start()
             self._read_progress(self.video)
             rc = self.video.wait()
@@ -389,6 +393,7 @@ class LiveProc:
                 self.lm_fails = 0
             if self.desired and not reason:
                 self.restarts.append((time.time(), f"송출 끊김 rc={rc}"))
+                self.crash_at = (time.time(), rc)
                 self.event("error", f"ffmpeg 종료 rc={rc} (가동 {int(ran)}초) — 재기동")
                 self.sup.notify("restart", f"{live.name}: 송출 프로그램 종료 — 자동 재시작", f"ffmpeg rc={rc}, 가동 {int(ran)}초")
                 self.set(state="restarting", message=f"ffmpeg 종료 rc={rc}")
@@ -460,6 +465,11 @@ class LiveProc:
         if kind == "reconnect":
             self.sup.note_slow(self.id, False)
             gap = float(ev.get("gap") or 0)
+            if ev.get("planned"):  # 자정 재시작 뒤 가깝고 덜 붐비는 수신 IP 로 옮김 — 일부러 한 일 (끊김·알림·한도에 안 셈)
+                self.restarts.append((time.time(), f"일일 재시작 · 유튜브 IP 옮김 {gap:.1f}초"))
+                self.sup.incident(self.id, "ip_move", sec=gap, peer=self.st.get("peer"))
+                self.log.info("유튜브 수신 IP 옮김 — 공백 %.1f초 (일일 재시작 뒤, 계획된 일)", gap)
+                return
             self.sup.incident(self.id, "reconnect", sec=gap, peer=self.st.get("peer"))
             if gap <= QUIET_GAP_S:  # 유튜브 정비 등으로 끊겼다가 바로 붙음 — 시청자 영향 없음
                 self.restarts.append((time.time(), f"{QUIET_RECONNECT} {gap:.1f}초"))
@@ -1150,9 +1160,23 @@ class Supervisor:
                     self.proc(lv.id).set(state="stopped", message=str(e))
 
     # ---------------------------------------------------------------- 주기 작업 (감시 + 타이머 + 일일 재시작)
+    def _due_moves(self, now: float) -> None:
+        """예약된 '수신 IP 옮겨' 신호 보내기 (v2.22)."""
+        for p in list(self.procs.values()):
+            if p.move_at and now >= p.move_at:
+                p.move_at = 0.0
+                r = getattr(p, "relay", None)
+                if p.desired and p.st.get("state") == "running" and isinstance(r, rtmp_relay.RelayProc):
+                    self.yt_pool.write_load()  # 중계기가 읽을 분포를 최신으로
+                    r.request_switch()
+
     def loop(self) -> None:
         while not self.stop_event.wait(5):
             now = time.time()
+            try:
+                self._due_moves(now)
+            except Exception:  # noqa: BLE001
+                log.exception("수신 IP 옮기기 실패")
             if self.shared_audio:
                 try:
                     self.groups_tick()
@@ -1239,7 +1263,8 @@ class Supervisor:
                 self.done_today[lv.id] = day
                 self.last_planned = time.time()
                 move = self.yt_pool.should_move(p.st.get("peer")) if isinstance(p.relay, rtmp_relay.RelayProc) else False
-                self.incident(lv.id, "planned_restart", note="유튜브 IP 옮김" if move else None, peer=p.st.get("peer"))
-                if move:
-                    p.log.info("일일 재시작 — 유튜브 수신 IP %s 가 붐벼 덜 붐비는 곳으로 옮김", p.st.get("peer"))
-                p.restart("일일 재시작", move_ip=move)
+                self.incident(lv.id, "planned_restart", note="유튜브 IP 옮김 예정" if move else None, peer=p.st.get("peer"))
+                p.restart("일일 재시작")
+                if move:  # 재시작이 끝난 뒤(30초) 돌고 있는 중계기에 신호 — ffmpeg·중계기는 그대로, 유튜브 연결만 옮김
+                    p.move_at = time.time() + 30
+                    p.log.info("일일 재시작 — 유튜브 수신 IP %s 가 멀거나 붐벼 30초 뒤 옮김", p.st.get("peer"))

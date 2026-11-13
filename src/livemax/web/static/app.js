@@ -1588,7 +1588,8 @@ function serverCard(s, card) {
 // ------------------------------------------------------------------ 건강검진 (v2.19)
 // 판정은 '시청자가 끊김·무음을 겪었을 가능성' 기준. 서버 숫자는 최적화 참고로 따로 (접힘).
 const HV = { ok: ["✓", "정상"], warn: ["△", "주의"], bad: ["✗", "시청자 영향"] };
-const H_KIND = { slow: "밀림", reconnect: "유튜브 재접속", no_audio: "소리 없음", no_input: "입력 없음", stall: "중계기 멈춤", down: "송출 중단" };
+const H_KIND = { slow: "밀림", reconnect: "유튜브 재접속", no_audio: "소리 없음", no_input: "입력 없음", stall: "중계기 멈춤", down: "송출 중단",
+  ffmpeg_exit: "송출 프로그램 예상 밖 종료", ip_move: "유튜브 IP 옮김 (계획)" };
 let HEALTH_SEL = null, HEALTH_ITEM = "bad";
 // 가동률: 영향이 없으면 100%, 있으면 99.9986% 처럼 필요한 자리까지만 (v2.20)
 const hAvail = (r) => {
@@ -1627,13 +1628,14 @@ async function showHealth() {
 }
 
 function renderHealth(root, d) {
-  const days = [...(d.days || []), d.now];
+  const days = [...(d.days || []), d.now];  // 시간순 (추이 그래프용)
+  const recent = days.slice().reverse();      // 최신이 먼저 (날짜 칸·히트맵 — v2.22)
   if (!HEALTH_SEL || !days.some((x) => x.day === HEALTH_SEL)) HEALTH_SEL = d.days?.length ? d.days[d.days.length - 1].day : "지금";
   const sel = days.find((x) => x.day === HEALTH_SEL) || d.now;
-  const prevVer = (i) => (i > 0 ? days[i - 1].version : null);
-  const strip = h("div", { class: "hd-strip" }, days.map((r, i) => {
+  const prevVer = (r) => { const i = days.indexOf(r); return i > 0 ? days[i - 1].version : null; };
+  const strip = h("div", { class: "hd-strip" }, recent.map((r) => {
     const [mk, lb] = HV[r.verdict] || HV.ok;
-    const upd = prevVer(i) && r.version && prevVer(i) !== r.version;
+    const upd = prevVer(r) && r.version && prevVer(r) !== r.version;
     return h("button", { class: `hd-day v-${r.verdict}` + (r.day === HEALTH_SEL ? " on" : ""), title: lb,
       onclick: () => { HEALTH_SEL = r.day; renderHealth(root, d); } },
       h("span", { class: "hd-date" }, r.day === "지금" ? "지금 (24시간)" : r.day.slice(5)),
@@ -1666,7 +1668,7 @@ function renderHealth(root, d) {
   // 시간대 히트맵: 10일 × 24시간 (한국), 칸 = ✗ + △ 건수
   const hm = h("div", { class: "hd-hm" },
     h("div", { class: "hd-hm-row hd-hm-top" }, h("span", {}), ...Array.from({ length: 24 }, (_, i) => h("span", {}, i % 3 === 0 ? String(i) : ""))),
-    ...days.map((r) => h("div", { class: "hd-hm-row" }, h("span", { class: "hd-hm-d" }, r.day === "지금" ? "지금" : r.day.slice(5)),
+    ...recent.map((r) => h("div", { class: "hd-hm-row" }, h("span", { class: "hd-hm-d" }, r.day === "지금" ? "지금" : r.day.slice(5)),
       ...Array.from({ length: 24 }, (_, i) => {
         const v = r.hourly?.[i] || r.hourly?.[String(i)] || [0, 0, 0];
         const n = v[0] + v[1], lvl = v[0] ? "b" : v[1] ? "w" : "";
@@ -1697,7 +1699,8 @@ function renderHealth(root, d) {
         ["디스크", s.disk_pct != null ? `${s.disk_pct}%` : "-"],
         ["재전송률", s.retrans_avg != null ? `평균 ${s.retrans_avg}% · 최고 ${s.retrans_max}%` : "- (v2.19 부터 기록)"],
         ["유튜브 왕복", s.rtt_avg != null ? `평균 ${s.rtt_avg}ms` + (Object.keys(s.ip_rtt || {}).length ? " · " + Object.entries(s.ip_rtt).map(([ip, v]) => `${ip} ${v}ms`).join(" · ") : "") : "- (v2.19 부터 기록)"],
-        ["유튜브 IP", ing.ips ? `쓸 수 있는 ${ing.ips}곳 · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개` : "-"],
+        ["유튜브 IP", ing.ips ? `가깝고 빠른 ${ing.near ?? ing.ips}곳 (모음 ${ing.ips}) · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개`
+          + (ing.far_used ? ` · 먼 곳에 ${ing.far_used}개 (자정에 옮김)` : "") : "-"],
         ["라이브", `평균 ${s.lives_avg}개 송출`]].map(([k, v]) => h("div", {}, h("span", {}, k), h("b", {}, v)))));
   root.replaceChildren(strip, head, evCard, hmCard, trend, srv);
 }

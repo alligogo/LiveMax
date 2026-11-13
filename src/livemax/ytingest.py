@@ -30,6 +30,8 @@ POOL_TTL_S = 48 * 3600   # DNS 에서 이만큼 다시 안 보이면 모음에�
 REFRESH_S = 3600         # DNS 다시 묻기·살아 있는지 확인 간격
 RESERVE_S = 120          # 고른 뒤 중계기가 '붙었다' 고 알려 오기 전까지 그 IP 몫으로 셈 (부팅 때 줄줄이 켜도 몰리지 않게)
 LOAD_WRITE_S = 10        # 중계기용 현재 분포 파일 갱신 간격
+NEAR_MS = 15             # 가까운 IP: 가장 빠른 곳의 2배 이내 또는 이 값 이하 (v2.22 — 먼 IP 65ms 에서 시청자 영향 사건 두 번)
+NEAR_X = 2.0
 MIN_IPS = 4              # 모음이 이보다 적으면 켜기 전에 넉넉히 모은다 (v2.20 — 업데이트 순간 DNS 가 1개만 줘서 50개가 한 IP 로 간 일)
 BOOT_COOLDOWN_S = 600    # 넉넉히 모으기는 이 간격 안에 다시 안 함
 DOH = ("https://dns.google/resolve?name={host}&type=A",            # 구글 공개 DNS (우리 서버 위치 기준으로 답함)
@@ -64,15 +66,29 @@ def _doh(host: str, timeout: float = 3.0) -> list[str]:
     return sorted(out, key=ip_key)
 
 
-def _tls_ok(ip: str, host: str, port: int, cafile: str | None = None, timeout: float = 5.0) -> bool:
-    """TLS 인사만 해 보고 닫는다 (인증서는 호스트 이름으로 확인 — 진짜 유튜브 수신 서버인지)."""
+def _tls_ok(ip: str, host: str, port: int, cafile: str | None = None, timeout: float = 5.0) -> tuple[bool, float | None]:
+    """TLS 인사만 해 보고 닫는다 (인증서는 호스트 이름으로 확인 — 진짜 유튜브 수신 서버인지).
+    왕복 시간: TCP 접속에 걸린 시간 3번의 가운데 값 (ms) — 가깝고 빠른 IP 를 고르는 데 쓴다 (v2.22)."""
     try:
         ctx = ssl.create_default_context(cafile=cafile if cafile and os.path.exists(cafile) else None)
-        with socket.create_connection((ip, port), timeout=timeout) as s:
-            with ctx.wrap_socket(s, server_hostname=host):
-                return True
+        rtts = []
+        for i in range(3):
+            t0 = time.monotonic()
+            with socket.create_connection((ip, port), timeout=timeout) as s:
+                rtts.append((time.monotonic() - t0) * 1000)
+                if i == 0:
+                    with ctx.wrap_socket(s, server_hostname=host):
+                        pass
+        return True, round(sorted(rtts)[1], 1)
     except (OSError, ssl.SSLError):
-        return False
+        return False, None
+
+
+def _norm(res) -> tuple[bool, float | None]:
+    """tls_ok 결과: (성공, 왕복 ms) — 예전 꼴(성공만)도 받는다."""
+    if isinstance(res, tuple):
+        return bool(res[0]), (float(res[1]) if res[1] is not None else None)
+    return bool(res), None
 
 
 class IngestPool:
@@ -128,13 +144,15 @@ class IngestPool:
             todo = [ip for ip, e in pool.items()
                     if check and (e.get("checked") is None or now - float(e["checked"]) >= REFRESH_S - 60)]
         for ip in todo:
-            ok = bool(self._tls_ok(ip, host, port))
+            ok, rtt = _norm(self._tls_ok(ip, host, port))
             with self.lock:
                 e = self.hosts.get(key, {}).get(ip)
                 if e is not None:
                     if e.get("ok", True) != ok:
                         log.info("유튜브 수신 서버 %s %s", ip, "다시 정상" if ok else "응답 없음 — 당분간 안 씀")
                     e["ok"], e["checked"] = ok, now
+                    if rtt is not None:
+                        e["rtt"] = rtt
         with self.lock:
             self._save()
 
@@ -170,15 +188,54 @@ class IngestPool:
                 from concurrent.futures import ThreadPoolExecutor
 
                 with ThreadPoolExecutor(max_workers=8) as ex:
-                    res = dict(zip(new, ex.map(lambda ip: bool(self._tls_ok(ip, host, port)), new)))
+                    res = dict(zip(new, ex.map(lambda ip: _norm(self._tls_ok(ip, host, port)), new)))
                 with self.lock:
-                    for ip, ok in res.items():
+                    for ip, (ok, rtt) in res.items():
                         e = self.hosts[key].get(ip)
                         if e is not None:
                             e["ok"], e["checked"] = ok, now
+                            if rtt is not None:
+                                e["rtt"] = rtt
             with self.lock:
                 self._save()
             log.info("유튜브 수신 IP 넉넉히 모음: %d곳 (새로 %d곳)", len(self.healthy(host, port)), len(new))
+
+    def rtt_of(self, host: str, port: int) -> dict[str, float]:
+        with self.lock:
+            pool = self.hosts.get(f"{host}:{port}", {})
+            return {ip: float(e["rtt"]) for ip, e in pool.items() if e.get("ok", True) and e.get("rtt") is not None}
+
+    def near(self, host: str, port: int) -> list[str]:
+        """가깝고 빠른 IP (v2.22): 가장 빠른 곳의 2배 이내 또는 15ms 이하. 왕복 시간을 아직 모르면 살아 있는 IP 전부.
+        가까운 곳이 1곳뿐이어도 먼 곳으로 나누지 않는다 — 분산보다 가깝고 빠른 게 중요 (사용자 결정)."""
+        ips = self.healthy(host, port)
+        rtt = {ip: v for ip, v in self.rtt_of(host, port).items() if ip in ips}
+        if not rtt:
+            return ips
+        best = min(rtt.values())
+        lim = max(NEAR_MS, best * NEAR_X)
+        return sorted((ip for ip, v in rtt.items() if v <= lim), key=lambda ip: (rtt[ip], ip_key(ip)))
+
+    def _measure_missing(self, host: str, port: int) -> None:
+        """왕복 시간을 모르는 살아 있는 IP 를 바로 잰다 (처음 고를 때 — 동시에, 1초 안팎)."""
+        key = f"{host}:{port}"
+        with self.lock:
+            miss = [ip for ip, e in self.hosts.get(key, {}).items() if e.get("ok", True) and e.get("rtt") is None]
+        if not miss:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            res = dict(zip(miss, ex.map(lambda ip: _norm(self._tls_ok(ip, host, port)), miss)))
+        now = time.time()
+        with self.lock:
+            for ip, (ok, rtt) in res.items():
+                e = self.hosts.get(key, {}).get(ip)
+                if e is not None:
+                    e["ok"], e["checked"] = ok, now
+                    if rtt is not None:
+                        e["rtt"] = rtt
+            self._save()
 
     def should_move(self, ip: str | None) -> bool:
         """자정 재시작 때 이 IP 의 라이브를 덜 붐비는 IP 로 옮길까 (v2.20 — 업데이트 없이도 매일 밤 고르게).
@@ -190,7 +247,10 @@ class IngestPool:
         cnt = self.load()
         for key in keys:
             host, _, port = key.rpartition(":")
-            others = [x for x in self.healthy(host, int(port or 0)) if x != ip]
+            near = self.near(host, int(port or 0))
+            if near and ip not in near:  # 먼 IP 에 붙어 있음 → 가까운 곳으로 (v2.22)
+                return True
+            others = [x for x in near if x != ip]
             if others and cnt.get(ip, 0) - min(cnt.get(x, 0) for x in others) >= 2:
                 return True
         return False
@@ -224,9 +284,12 @@ class IngestPool:
         if not self.healthy(host, port):
             self.refresh(host, port, check=False)  # 처음: DNS 만 묻고 바로 (TLS 확인은 1시간 주기에서)
         self.ensure(host, port)  # 모음이 적으면 넉넉히 (v2.20)
-        ips = [ip for ip in self.healthy(host, port) if ip != exclude] or self.healthy(host, port)
+        self._measure_missing(host, port)  # 왕복 시간 모르는 IP 를 바로 재고 (v2.22)
+        near = self.near(host, port)
+        ips = [ip for ip in near if ip != exclude] or near
         if not ips:
             return None
+        rtt = self.rtt_of(host, port)
         cnt = self.load()
         cnt.pop(None, None)
         if live_id in self.peers_fn():  # 다시 고르는 라이브 자신의 몫은 빼고 센다
@@ -235,6 +298,9 @@ class IngestPool:
                 cnt[cur] -= 1
         low = min(cnt.get(ip, 0) for ip in ips)
         ties = [ip for ip in ips if cnt.get(ip, 0) == low]
+        if rtt:  # 같으면 더 빠른 곳 (왕복 시간 차이 1ms 안은 같은 걸로 보고 라이브 번호로 돌림)
+            fastest = min(rtt.get(ip, 1e9) for ip in ties)
+            ties = [ip for ip in ties if rtt.get(ip, 1e9) <= fastest + 1.0]
         ip = ties[spread_index(live_id) % len(ties)]
         with self.lock:
             self.reserved[live_id] = (ip, time.time())
@@ -249,7 +315,7 @@ class IngestPool:
         d = {"ts": time.time(), "hosts": {}}
         for key in keys:
             host, _, port = key.rpartition(":")
-            ips = self.healthy(host, int(port or 0))
+            ips = self.near(host, int(port or 0))
             d["hosts"][key] = {"ips": ips, "load": {ip: cnt.get(ip, 0) for ip in ips}}
         try:
             self.load_file.parent.mkdir(parents=True, exist_ok=True)
@@ -265,16 +331,21 @@ class IngestPool:
         with self.lock:
             keys = list(self.hosts)
         ips: set[str] = set()
+        near: set[str] = set()
+        rtt: dict[str, float] = {}
         for key in keys:
             host, _, port = key.rpartition(":")
             ips.update(self.healthy(host, int(port or 0)))
+            near.update(self.near(host, int(port or 0)))
+            rtt.update(self.rtt_of(host, int(port or 0)))
         used = {ip: n for ip, n in cnt.items() if ip}
         total, mx = sum(used.values()), max(used.values()) if used else 0
         # 심하게 몰림 (v2.21): 유튜브가 준 IP 로 고르게 나눈 수보다 눈에 띄게 많을 때만. IP 가 적은 건 유튜브가 정하는 일이라 경고 안 함
-        fair = -(-total // max(1, len(ips))) if total else 0
-        crowded = bool(total) and len(ips) >= 2 and mx > fair + max(3, -(-fair // 4))
-        return {"ips": len(ips), "used": len(used), "load": dict(sorted(used.items(), key=lambda x: -x[1])),
-                "max": mx, "total": total, "fair": fair, "crowded": crowded}
+        fair = -(-total // max(1, len(near))) if total else 0
+        crowded = bool(total) and len(near) >= 2 and mx > fair + max(3, -(-fair // 4))
+        return {"ips": len(ips), "near": len(near), "used": len(used), "load": dict(sorted(used.items(), key=lambda x: -x[1])),
+                "max": mx, "total": total, "fair": fair, "crowded": crowded,
+                "far_used": sum(n for ip, n in used.items() if near and ip not in near), "rtt": rtt}
 
     def run(self, stop: threading.Event) -> None:
         last = 0.0
