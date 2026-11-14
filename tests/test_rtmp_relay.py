@@ -579,6 +579,9 @@ def test_relay_moves_to_other_site_before_it_gets_bad(tmp_path: Path):
     assert rec and rec[-1]["gap"] < 3, text
     slow_end = [e for e in events if e.get("event") == "slow_end"]
     assert not slow_end or max(e["max_delay"] for e in slow_end) < 9  # 유튜브 '나쁨'(9초대) 전에 피함
+    # v2.24: 기록은 '문제가 난 IP' 로 (옮겨 간 새 IP 가 아니라)
+    assert rec[-1]["from"] == "127.0.0.1", rec
+    assert all(e["peer"] == "127.0.0.1" for e in slow_end), slow_end
     dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out2), "-f", "null", "-"], capture_output=True, text=True)
     assert dec.stderr.strip() == ""
 
@@ -593,6 +596,7 @@ def test_relay_stalled_write_skips_graceful_close_and_blocked_site(tmp_path: Pat
     assert "쓰기가 막힌 지역을 건너뜀: 127.0.0.1 → 127.0.0.2" in text, text
     rec = [e for e in events if e.get("event") == "reconnect"]
     assert rec and rec[-1]["auto"] is False and rec[-1]["gap"] < 3  # 예전: 17.5초
+    assert rec[-1]["from"] == "127.0.0.1", rec
 
 
 

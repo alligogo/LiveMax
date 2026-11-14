@@ -650,7 +650,8 @@ class Relay:
             w["calm"] = 0
             if slow is None:
                 slow = w["slow"] = {"t0": now, "max": delay, "in": 0, "out": 0, "n": 0, "logged": False,
-                                    "kern": 0, "app": 0, "lag": 0.0, "fill": 0.0}
+                                    "kern": 0, "app": 0, "lag": 0.0, "fill": 0.0,
+                                    "peer": self.peer}  # v2.24: 밀림이 '시작된' IP (끝날 땐 다른 지역으로 옮겨 있을 수 있음)
             slow["max"] = max(slow["max"], delay)
             slow["kern"], slow["app"] = max(slow["kern"], kern), max(slow["app"], app)
             slow["fill"] = max(slow["fill"], kern / cap if cap else 0.0)
@@ -661,7 +662,7 @@ class Relay:
             if not slow["logged"] and now - slow["t0"] >= SLOW_HOLD_S:
                 slow["logged"] = True
                 log.warning("유튜브 전송 밀림 시작 — 못 보낸 영상 %.1f초 쌓임 (수신 서버 %s)", delay, self.peer)
-                _emit({"event": "slow_start", "delay": round(delay, 1), "peer": self.peer})
+                _emit({"event": "slow_start", "delay": round(delay, 1), "peer": slow["peer"]})
         elif slow is not None:
             w["calm"] += 1
             if w["calm"] >= SLOW_HOLD_S or not self.busy:
@@ -672,7 +673,7 @@ class Relay:
                                 span, slow["max"], kout, kin, self.peer)
                     # 막힌 곳: 커널 대기열이 컸으면 회선, 중계기가 늦게 깨어났으면 서버(CPU 등)
                     where = "network" if slow["fill"] >= 0.3 and slow["lag"] < 1.0 else "server"
-                    _emit({"event": "slow_end", "dur": round(span), "max_delay": round(slow["max"], 1), "peer": self.peer,
+                    _emit({"event": "slow_end", "dur": round(span), "max_delay": round(slow["max"], 1), "peer": slow["peer"],
                            "kbps_out": round(kout), "kbps_in": round(kin), "where": where,
                            "kern_kb": slow["kern"] // 1024, "app_kb": slow["app"] // 1024, "lag": round(slow["lag"], 1)})
                 w["slow"], w["calm"] = None, 0
@@ -856,6 +857,7 @@ class Relay:
                     await asyncio.sleep(BATCH_S)
                 # --- 유튜브가 끊음 · 쓰기 막힘 · 계획된 옮김 · 막히기 전에 옮기기 → 빠른 재접속
                 cut = time.monotonic()
+                was = self.peer  # v2.24: 문제가 난 IP — 기록은 다시 붙은 IP 가 아니라 이것으로
                 auto = self.auto_target is not None
                 if auto:
                     c["connect_addr"], self.auto_target = self.auto_target, None
@@ -891,7 +893,7 @@ class Relay:
                 (log.info if planned else log.warning)("유튜브 재접속 성공%s — 공백 %.1f초 (수신 서버 %s)",
                                                        " (계획된 옮김)" if planned else " (막히기 전에 옮김)" if auto else "",
                                                        gap, self.peer)
-                _emit({"event": "reconnect", "gap": round(gap, 2), "planned": planned, "auto": auto})
+                _emit({"event": "reconnect", "gap": round(gap, 2), "planned": planned, "auto": auto, "from": was})
         except asyncio.IncompleteReadError:
             log.info("ffmpeg 연결 종료")
             keep = True

@@ -84,9 +84,13 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
             near = [x for x in net if abs(x["ts"] - r["ts"]) <= CLUSTER_S]
             lives = {x["live_id"] for x in near}
             # v2.23: 지역 단위 (11-14 02:23: IP 3곳이었지만 같은 9ms 지역 — '여러 IP 동시 = 회선' 은 틀린 분류였다)
-            sites = {site_of.get(x["peer"], x["peer"]) for x in near if x["peer"]}
+            per_site: dict = {}
+            for x in near:
+                if x["peer"]:
+                    per_site.setdefault(site_of.get(x["peer"], x["peer"]), set()).add(x["live_id"])
             here = site_of.get(r["peer"], f"IP {r['peer']}") if r["peer"] else "유튜브·경로"
-            if len(lives) >= 3 and len(sites) >= 2:
+            # v2.24: '회선' 은 두 지역 이상이 각각 3개 넘게 같이 막혔을 때만 (한쪽에 작은 밀림 하나 섞인 건 그 지역 문제)
+            if len(lives) >= 3 and sum(1 for v in per_site.values() if len(v) >= 3) >= 2:
                 r["cause"] = "회선 (여러 지역 동시)"
             elif len(lives) >= 3:
                 r["cause"] = f"유튜브 {here} 경로 혼잡"

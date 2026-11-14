@@ -27,9 +27,10 @@ def test_verdict_causes_and_ours(paths, settings):
         # 같은 IP 에 붙은 3개가 같은 순간 길게 밀림 → ✗, 원인 '유튜브 IP'
         for lid in ("live32", "live35", "live36"):
             _ins(c, t, lid, "slow", sec=20, max_delay=15, peer="142.250.69.140", where="network")
-        # 여러 IP 의 3개가 같은 순간 → '회선'
+        # 두 곳(지역)에서 각각 3개씩 같은 순간 → '회선' (v2.24: 한 곳에 1개씩 섞인 건 회선 아님)
         t2 = end - 3 * 3600
-        for lid, ip in (("live1", "1.1.1.1"), ("live2", "2.2.2.2"), ("live3", "3.3.3.3")):
+        for lid, ip in (("live1", "1.1.1.1"), ("live2", "1.1.1.1"), ("live3", "1.1.1.1"),
+                        ("live11", "2.2.2.2"), ("live12", "2.2.2.2"), ("live13", "2.2.2.2")):
             _ins(c, t2, lid, "slow", sec=8, max_delay=6, peer=ip, where="network")
         _ins(c, end - 2 * 3600, "live9", "slow", sec=5, max_delay=3, peer="x")  # 짧음 → ✓ 내부 처리
         _ins(c, end - 3600, "live7", "no_audio", sec=8)  # 우리 프로그램 → ✗
@@ -37,9 +38,9 @@ def test_verdict_causes_and_ours(paths, settings):
         _ins(c, end - 1800, None, "boot")
         _ins(c, end - 1700, "live4", "slow", sec=30, max_delay=20, peer="y")
         rep = health.compute(c, settings, end, "v-test", names={"live32": "LIVE 32 (MilSim)"})
-    assert rep["verdict"] == "bad" and rep["counts"]["bad"] == 4 and rep["counts"]["warn"] == 3
+    assert rep["verdict"] == "bad" and rep["counts"]["bad"] == 4 and rep["counts"]["warn"] == 6
     assert rep["counts"]["minor"] == 1 and rep["counts"]["ours"] == 1 and rep["counts"]["ours_program"] == 1
-    assert rep["causes"]["유튜브 IP 142.250.69.140 경로 혼잡"] == 3 and rep["causes"]["회선 (여러 지역 동시)"] == 3
+    assert rep["causes"]["유튜브 IP 142.250.69.140 경로 혼잡"] == 3 and rep["causes"]["회선 (여러 지역 동시)"] == 6
     assert any(e["name"] == "LIVE 32 (MilSim)" for e in rep["events"])
     assert 0.999 < rep["avail"] < 1 and rep["server"]["cpu_avg"] == 33.0
     title, body = health.message(rep)
@@ -104,6 +105,7 @@ def test_same_site_is_path_congestion_not_line(paths, settings):
         for i in range(22):
             _ins(c, t + i, f"live{i}", "slow", sec=20, max_delay=10 + i, peer=ips[i % 3], where="network")
         _ins(c, t + 30, "live40", "auto_move", sec=0.4, peer="74.125.197.134")
+        _ins(c, t + 10, "live41", "slow", sec=6, max_delay=3, peer="74.125.197.134")  # 지역 A 작은 밀림 1개 섞임 → 그래도 지역 B 문제
         rep = health.compute(c, settings, end, ingest={"site_of": site_of})
     assert rep["causes"] == {"유튜브 지역 B (8ms대) 경로 혼잡": 22}
     assert (rep["lives_ok"], rep["lives_total"], rep["longest_s"]) == (28, 50, 31.0)

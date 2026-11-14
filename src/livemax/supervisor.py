@@ -465,9 +465,10 @@ class LiveProc:
         if kind == "reconnect":
             self.sup.note_slow(self.id, False)
             gap = float(ev.get("gap") or 0)
+            bad_ip = ev.get("from") or self.st.get("peer")  # v2.24: 문제가 난 IP (다시 붙은 새 IP 가 아니라)
             if ev.get("auto"):  # v2.23 밀림이 쌓여 막히기 전에 다른 지역으로 옮김 — 대응한 것 (밀림 자체는 따로 기록됨)
                 self.restarts.append((time.time(), f"{QUIET_RECONNECT} {gap:.1f}초 (막히기 전에 다른 지역으로)"))
-                self.sup.incident(self.id, "auto_move", sec=gap, peer=self.st.get("peer"))
+                self.sup.incident(self.id, "auto_move", sec=gap, peer=bad_ip)
                 self.log.warning("유튜브 지역이 막혀 다른 지역으로 옮김 — 공백 %.1f초 (수신 서버 %s)", gap, self.st.get("peer"))
                 return
             if ev.get("planned"):  # 자정 재시작 뒤 가깝고 덜 붐비는 수신 IP 로 옮김 — 일부러 한 일 (끊김·알림·한도에 안 셈)
@@ -475,7 +476,7 @@ class LiveProc:
                 self.sup.incident(self.id, "ip_move", sec=gap, peer=self.st.get("peer"))
                 self.log.info("유튜브 수신 IP 옮김 — 공백 %.1f초 (일일 재시작 뒤, 계획된 일)", gap)
                 return
-            self.sup.incident(self.id, "reconnect", sec=gap, peer=self.st.get("peer"))
+            self.sup.incident(self.id, "reconnect", sec=gap, peer=bad_ip)
             if gap <= QUIET_GAP_S:  # 유튜브 정비 등으로 끊겼다가 바로 붙음 — 시청자 영향 없음
                 self.restarts.append((time.time(), f"{QUIET_RECONNECT} {gap:.1f}초"))
                 self.log.info("유튜브가 연결을 끊음 → 중계기가 %.1f초 만에 다시 접속 (송출 프로그램은 계속)", gap)
