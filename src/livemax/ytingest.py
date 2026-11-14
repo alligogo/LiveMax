@@ -32,6 +32,11 @@ RESERVE_S = 120          # 고른 뒤 중계기가 '붙었다' 고 알려 오기
 LOAD_WRITE_S = 10        # 중계기용 현재 분포 파일 갱신 간격
 NEAR_MS = 15             # 가까운 IP: 가장 빠른 곳의 2배 이내 또는 이 값 이하 (v2.22 — 먼 IP 65ms 에서 시청자 영향 사건 두 번)
 NEAR_X = 2.0
+SITE_GAP_X, SITE_GAP_MS = 1.5, 1.0  # v2.23 지역 묶기: 왕복 시간을 정렬해 앞 IP 의 1.5배 + 1ms 를 넘으면 다른 지역
+                                     # (11-14 02:23: 9ms 대 3곳이 같은 순간 18~27ms 로 — 같은 지역, 2.4ms 1곳은 멀쩡)
+HEALTHY_X, HEALTHY_MS = 1.6, 5.0     # 지금 왕복이 기준의 1.6배·+5ms 를 넘으면 그 지역은 '막힘' (옮길 곳으로 안 고름)
+TRACE_X, TRACE_MS = 2.0, 8.0         # E: 지금 왕복이 기준의 2배이면서 +8ms 넘게 15초 두 번 → 길 추적 저장
+TRACE_COOLDOWN_S = 1800
 MIN_IPS = 4              # 모음이 이보다 적으면 켜기 전에 넉넉히 모은다 (v2.20 — 업데이트 순간 DNS 가 1개만 줘서 50개가 한 IP 로 간 일)
 BOOT_COOLDOWN_S = 600    # 넉넉히 모으기는 이 간격 안에 다시 안 함
 DOH = ("https://dns.google/resolve?name={host}&type=A",            # 구글 공개 DNS (우리 서버 위치 기준으로 답함)
@@ -93,7 +98,7 @@ def _norm(res) -> tuple[bool, float | None]:
 
 class IngestPool:
     def __init__(self, paths: Paths, peers_fn=None, resolve=None, tls_ok=None, cafile: str | None = None, doh=None,
-                 sleep=time.sleep):
+                 sleep=time.sleep, tracer=None):
         self.file = paths.state / "ingest_pool.json"        # 모음 (재시작해도 남김)
         self.load_file = paths.run_dir / "ingest_load.json"  # 중계기용 지금 분포
         self.peers_fn = peers_fn or (lambda: {})            # () -> {라이브 ID: 지금 붙은 IP}
@@ -106,6 +111,11 @@ class IngestPool:
         self._sleep = sleep
         self._boot_lock = threading.Lock()
         self._boot_at: dict[str, float] = {}
+        self.rtt_now_fn = lambda: {}  # () -> {IP: 최근 15초 평균 왕복 ms} — 수집기가 끼워 넣는다 (중계기 실측)
+        self.paths = paths
+        self._tracer = tracer or _trace
+        self._spike: dict[str, int] = {}
+        self._traced_at: dict[str, float] = {}
         self._load()
 
     # ---------------------------------------------------------------- 저장
@@ -216,6 +226,26 @@ class IngestPool:
         lim = max(NEAR_MS, best * NEAR_X)
         return sorted((ip for ip, v in rtt.items() if v <= lim), key=lambda ip: (rtt[ip], ip_key(ip)))
 
+    def sites(self, host: str, port: int) -> dict[str, int]:
+        """IP → 지역 번호 (0 = 가장 빠른 지역). 왕복 시간을 정렬해 크게 벌어지는 곳에서 끊는다 (v2.23)."""
+        rtt = self.rtt_of(host, port)
+        out: dict[str, int] = {}
+        sid, prev = -1, None
+        for ip in sorted(rtt, key=lambda x: (rtt[x], ip_key(x))):
+            if prev is None or rtt[ip] > prev * SITE_GAP_X + SITE_GAP_MS:
+                sid += 1
+            out[ip] = sid
+            prev = rtt[ip]
+        return out
+
+    def site_label(self, host: str, port: int) -> dict[str, str]:
+        """IP → '지역 A (2ms대)' 처럼 사람이 읽는 이름."""
+        rtt, st = self.rtt_of(host, port), self.sites(host, port)
+        first: dict[int, float] = {}
+        for ip, sid in st.items():
+            first[sid] = min(first.get(sid, 1e9), rtt[ip])
+        return {ip: f"지역 {chr(65 + sid)} ({int(first[sid])}ms대)" for ip, sid in st.items()}
+
     def _measure_missing(self, host: str, port: int) -> None:
         """왕복 시간을 모르는 살아 있는 IP 를 바로 잰다 (처음 고를 때 — 동시에, 1초 안팎)."""
         key = f"{host}:{port}"
@@ -250,8 +280,16 @@ class IngestPool:
             near = self.near(host, int(port or 0))
             if near and ip not in near:  # 먼 IP 에 붙어 있음 → 가까운 곳으로 (v2.22)
                 return True
-            others = [x for x in near if x != ip]
-            if others and cnt.get(ip, 0) - min(cnt.get(x, 0) for x in others) >= 2:
+            st = self.sites(host, int(port or 0))
+            sload: dict[int, int] = {}
+            for x in near:
+                sload[st.get(x, 0)] = sload.get(st.get(x, 0), 0) + cnt.get(x, 0)
+            mine = st.get(ip, 0)
+            others_s = [n for sid, n in sload.items() if sid != mine]
+            if others_s and sload.get(mine, 0) - min(others_s) >= 2:  # 지역끼리 고르게 (v2.23)
+                return True
+            same = [x for x in near if x != ip and st.get(x, 0) == mine]
+            if same and cnt.get(ip, 0) - min(cnt.get(x, 0) for x in same) >= 2:
                 return True
         return False
 
@@ -296,6 +334,14 @@ class IngestPool:
             cur = self.peers_fn()[live_id]
             if cur in cnt:
                 cnt[cur] -= 1
+        st = self.sites(host, port)
+        if len({st.get(ip, 0) for ip in ips}) > 1:  # v2.23: 지역끼리 먼저 고르게 (한 지역이 막혀도 절반은 멀쩡)
+            sload: dict[int, int] = {}
+            for x in ips:
+                sload[st.get(x, 0)] = sload.get(st.get(x, 0), 0) + cnt.get(x, 0)
+            low_s = min(sload.values())
+            best_sites = [sid for sid, n in sload.items() if n == low_s]
+            ips = [ip for ip in ips if st.get(ip, 0) == min(best_sites)]
         low = min(cnt.get(ip, 0) for ip in ips)
         ties = [ip for ip in ips if cnt.get(ip, 0) == low]
         if rtt:  # 같으면 더 빠른 곳 (왕복 시간 차이 1ms 안은 같은 걸로 보고 라이브 번호로 돌림)
@@ -310,13 +356,22 @@ class IngestPool:
     def write_load(self) -> None:
         """중계기(별도 프로세스)가 다시 접속할 때 읽는 지금 분포."""
         cnt = self.load()
+        try:
+            now_rtt = dict(self.rtt_now_fn() or {})
+        except Exception:  # noqa: BLE001
+            now_rtt = {}
         with self.lock:
             keys = list(self.hosts)
         d = {"ts": time.time(), "hosts": {}}
         for key in keys:
             host, _, port = key.rpartition(":")
             ips = self.near(host, int(port or 0))
-            d["hosts"][key] = {"ips": ips, "load": {ip: cnt.get(ip, 0) for ip in ips}}
+            st = self.sites(host, int(port or 0))
+            base = self.rtt_of(host, int(port or 0))
+            d["hosts"][key] = {"ips": ips, "load": {ip: cnt.get(ip, 0) for ip in ips},
+                               "site": {ip: st.get(ip, 0) for ip in ips},
+                               "rtt_base": {ip: base[ip] for ip in ips if ip in base},
+                               "rtt_now": {ip: now_rtt[ip] for ip in ips if ip in now_rtt}}
         try:
             self.load_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.load_file.with_suffix(".tmp")
@@ -341,11 +396,66 @@ class IngestPool:
         used = {ip: n for ip, n in cnt.items() if ip}
         total, mx = sum(used.values()), max(used.values()) if used else 0
         # 심하게 몰림 (v2.21): 유튜브가 준 IP 로 고르게 나눈 수보다 눈에 띄게 많을 때만. IP 가 적은 건 유튜브가 정하는 일이라 경고 안 함
-        fair = -(-total // max(1, len(near))) if total else 0
-        crowded = bool(total) and len(near) >= 2 and mx > fair + max(3, -(-fair // 4))
+        site_of: dict[str, str] = {}
+        sload: dict[str, int] = {}
+        for key in keys:
+            host, _, port = key.rpartition(":")
+            lab = self.site_label(host, int(port or 0))
+            site_of.update(lab)
+            for ip in self.near(host, int(port or 0)):
+                sload[lab.get(ip, ip)] = sload.get(lab.get(ip, ip), 0) + used.get(ip, 0)
+        # 몰림 판정은 지역 단위 (v2.23): 지역이 1곳이면 판정 안 함
+        fair = -(-total // max(1, len(sload))) if total else 0
+        smax = max(sload.values()) if sload else 0
+        crowded = bool(total) and len(sload) >= 2 and smax > fair + max(3, -(-fair // 4))
         return {"ips": len(ips), "near": len(near), "used": len(used), "load": dict(sorted(used.items(), key=lambda x: -x[1])),
                 "max": mx, "total": total, "fair": fair, "crowded": crowded,
-                "far_used": sum(n for ip, n in used.items() if near and ip not in near), "rtt": rtt}
+                "far_used": sum(n for ip, n in used.items() if near and ip not in near), "rtt": rtt,
+                "site_of": site_of, "site_load": sload, "site_max": smax}
+
+    def check_spikes(self, now: float | None = None) -> list[str]:
+        """E (v2.23): 어떤 IP 의 지금 왕복이 기준의 2배이면서 +8ms 넘게 두 번 이어지면 그 길을 추적해 저장 (30분에 한 번).
+        비교용으로 멀쩡한 다른 지역 IP 도 같이 — 막힌 곳이 OVH 안·중간 통신사·구글 입구 중 어디인지 가린다. 추적은 따로 돌아 송출과 무관."""
+        now = time.time() if now is None else now
+        try:
+            cur = dict(self.rtt_now_fn() or {})
+        except Exception:  # noqa: BLE001
+            return []
+        started = []
+        with self.lock:
+            keys = list(self.hosts)
+        for key in keys:
+            host, _, port = key.rpartition(":")
+            base = self.rtt_of(host, int(port or 0))
+            st = self.sites(host, int(port or 0))
+            for ip, b in base.items():
+                v = cur.get(ip)
+                bad = v is not None and v >= max(b * TRACE_X, b + TRACE_MS)
+                self._spike[ip] = self._spike.get(ip, 0) + 1 if bad else 0
+                if self._spike[ip] >= 2 and now - self._traced_at.get(ip, 0) >= TRACE_COOLDOWN_S:
+                    self._traced_at[ip] = now
+                    ok = [x for x in base if st.get(x) != st.get(ip) and not (cur.get(x) and cur[x] >= max(base[x] * TRACE_X, base[x] + TRACE_MS))]
+                    ref = min(ok, key=lambda x: base[x]) if ok else None
+                    threading.Thread(target=self._trace_job, args=(ip, b, v, ref, base.get(ref) if ref else None),
+                                     name=f"trace-{ip}", daemon=True).start()
+                    started.append(ip)
+        return started
+
+    def _trace_job(self, ip: str, base: float, now_ms: float, ref: str | None, ref_base: float | None) -> None:
+        from . import db
+
+        t = time.time()
+        texts = [f"# 막힌 곳 후보 {ip}: 평소 {base}ms → 지금 {now_ms}ms\n{self._tracer(ip)}"]
+        if ref:
+            texts.append(f"# 비교 (멀쩡한 다른 지역) {ref}: 평소 {ref_base}ms\n{self._tracer(ref)}")
+        try:
+            with db.session(self.paths.db) as c:
+                c.execute("INSERT INTO traces(ts, ip, rtt_base, rtt_now, text) VALUES (?,?,?,?,?)",
+                          (t, ip, base, now_ms, "\n\n".join(texts)[:20000]))
+                c.execute("DELETE FROM traces WHERE ts < ?", (t - 11 * 86400,))
+            log.warning("유튜브 수신 %s 왕복 %sms → %sms — 길 추적 저장", ip, base, now_ms)
+        except Exception:  # noqa: BLE001
+            log.exception("길 추적 저장 실패")
 
     def run(self, stop: threading.Event) -> None:
         last = 0.0
@@ -361,21 +471,54 @@ class IngestPool:
                         self.refresh(host, int(port or 0))
                         self.ensure(host, int(port or 0))
                 self.write_load()
+                self.check_spikes()
             except Exception:  # noqa: BLE001 — 모음 갱신 실패가 송출을 막지 않게
                 log.exception("수신 IP 모음 갱신 실패")
 
 
-def pick_from_file(load_file: str | Path, host: str, port: int, current: str | None) -> str | None:
-    """중계기(별도 프로세스) 쪽: 다시 접속할 때 지금 분포 파일에서 가장 적게 붙은 IP (지금 IP 제외)."""
+def _healthy_ip(e: dict, ip: str) -> bool:
+    b, v = (e.get("rtt_base") or {}).get(ip), (e.get("rtt_now") or {}).get(ip)
+    return b is None or v is None or v <= max(b * HEALTHY_X, b + HEALTHY_MS)
+
+
+def pick_from_file(load_file: str | Path, host: str, port: int, current: str | None,
+                   avoid_site: bool = False, healthy_only: bool = False) -> str | None:
+    """중계기(별도 프로세스) 쪽: 다시 접속·옮길 때 분포 파일에서 고른다 (지금 IP 제외).
+    avoid_site: 지금 IP 와 다른 지역만 (v2.23 — 막힌 지역을 건너뜀). healthy_only: 지금 왕복이 정상인 지역만 (다 느리면 None).
+    덜 붐비는 지역 → 그 안에서 가장 적게 붙은 IP → 더 빠른 IP."""
     try:
         d = json.loads(Path(load_file).read_text(encoding="utf-8"))
         e = d["hosts"][f"{host}:{port}"]
         ips, load = list(e.get("ips") or []), dict(e.get("load") or {})
     except (OSError, ValueError, KeyError, TypeError):
         return None
+    site = dict(e.get("site") or {})
     if current in load:
         load[current] = max(0, int(load[current]) - 1)
     cand = [ip for ip in ips if ip != current]
+    if avoid_site and current in site:
+        cand = [ip for ip in cand if site.get(ip) != site[current]]
+    if healthy_only:
+        cand = [ip for ip in cand if _healthy_ip(e, ip)]
     if not cand:
         return None
-    return min(cand, key=lambda ip: (int(load.get(ip, 0)), ip_key(ip)))
+    sload: dict = {}
+    for ip in ips:
+        sload[site.get(ip, 0)] = sload.get(site.get(ip, 0), 0) + int(load.get(ip, 0))
+    base = dict(e.get("rtt_base") or {})
+    return min(cand, key=lambda ip: (sload.get(site.get(ip, 0), 0), int(load.get(ip, 0)), base.get(ip, 1e9), ip_key(ip)))
+
+
+def _trace(ip: str) -> str:
+    """mtr(TCP 443) 보고서 — 홉마다 손실·왕복. 없으면 tracepath. 실패하면 이유만."""
+    import shutil
+    import subprocess
+
+    for cmd in (["mtr", "-n", "-r", "-c", "10", "-T", "-P", "443", "-Z", "1", ip], ["tracepath", "-n", "-m", "20", ip]):
+        if shutil.which(cmd[0]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                return (r.stdout or r.stderr).strip()[:8000]
+            except Exception as e:  # noqa: BLE001
+                return f"{cmd[0]} 실패: {e}"
+    return "길 추적 도구 없음 (mtr·tracepath)"

@@ -516,3 +516,75 @@ def test_relay_switches_ingest_ip_on_signal_without_restarting_ffmpeg(tmp_path: 
     assert flags and flags[0].startswith("K")  # 새 IP 쪽은 키프레임부터
     dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(outs["127.0.0.2"]), "-f", "null", "-"], capture_output=True, text=True)
     assert dec.stderr.strip() == ""
+
+
+def _stall_case(tmp_path: Path, rtt_now: dict):
+    """가짜 유튜브 두 지역(127.0.0.1 = 지역 0, 127.0.0.2 = 지역 1). 송출 중 지역 0 을 얼려(SIGSTOP) 길이 막힌 상황을 만든다."""
+    import signal as _sig
+
+    clip = tmp_path / "v.mp4"  # 높은 비트레이트(커널 버퍼가 금방 차게) — 11-14 02:23 처럼 쓰기가 막히는 상황
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30", "-f", "lavfi",
+                    "-i", "sine=f=440:sample_rate=48000", "-t", "30", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "8",
+                    "-g", "30", "-bf", "0", "-c:a", "aac", "-shortest", str(clip)], check=True)
+    sink_port, relay_port = _free_port(), _free_port()
+    outs = {ip: tmp_path / f"out-{ip}.flv" for ip in ("127.0.0.1", "127.0.0.2")}
+    sinks = {ip: subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-listen", "1", "-i", f"rtmp://{ip}:{sink_port}/live2/k",
+                                   "-c", "copy", "-f", "flv", str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+             for ip, out in outs.items()}
+    load = tmp_path / "load.json"
+    load.write_text(json.dumps({"hosts": {f"127.0.0.1:{sink_port}": {
+        "ips": ["127.0.0.1", "127.0.0.2"], "load": {"127.0.0.1": 1, "127.0.0.2": 1}, "site": {"127.0.0.1": 0, "127.0.0.2": 1},
+        "rtt_base": {"127.0.0.1": 2.0, "127.0.0.2": 9.0}, "rtt_now": rtt_now}}}))
+    log = tmp_path / "relay.log"
+    relay = subprocess.Popen([sys.executable, "-m", "livemax.rtmp_relay"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
+    pub = None
+    try:
+        time.sleep(1)
+        relay.stdin.write((json.dumps({"listen_port": relay_port, "host": "127.0.0.1", "port": sink_port, "app": "live2",
+                                       "key": "k", "tcurl": f"rtmp://127.0.0.1:{sink_port}/live2", "tls": False,
+                                       "connect_addr": "127.0.0.1", "load_file": str(load), "log": str(log)}) + "\n").encode())
+        relay.stdin.close()
+        time.sleep(1.5)
+        pub = subprocess.Popen(["ffmpeg", "-v", "error", "-re", "-i", str(clip), "-c", "copy", "-flush_packets", "0",
+                                "-f", "flv", f"tcp://127.0.0.1:{relay_port}"])
+        time.sleep(4)
+        sinks["127.0.0.1"].send_signal(_sig.SIGSTOP)  # 지역 0 이 막힘 (받기를 멈춤)
+        rc = pub.wait(timeout=90)
+        time.sleep(0.5)
+        relay.kill()
+        sinks["127.0.0.2"].wait(timeout=30)
+    finally:
+        sinks["127.0.0.1"].send_signal(_sig.SIGCONT)
+        for p in [relay, pub, *sinks.values()]:
+            if p and p.poll() is None:
+                p.kill()
+    events = [json.loads(x) for x in relay.stdout.read().decode().splitlines() if x.strip().startswith("{")]
+    return rc, log.read_text(encoding="utf-8"), events, outs["127.0.0.2"]
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg 없음")
+def test_relay_moves_to_other_site_before_it_gets_bad(tmp_path: Path):
+    """v2.23 C: 못 보낸 영상이 6초 넘게 쌓이고 다른 지역이 정상이면, 쓰기 시간 초과(10초)를 기다리지 않고 옮긴다.
+    (11-14 02:23: 22개가 10~26초 밀리고 6개는 재접속 13~17초)"""
+    rc, text, events, out2 = _stall_case(tmp_path, rtt_now={"127.0.0.1": 25.0, "127.0.0.2": 9.0})
+    assert rc == 0  # ffmpeg 는 끝까지 (재시작 없음)
+    assert "막히기 전에 다른 지역으로 옮김: 127.0.0.1 → 127.0.0.2" in text
+    rec = [e for e in events if e.get("event") == "reconnect"]
+    assert rec and rec[-1]["auto"] is True and rec[-1]["gap"] < 3
+    slow_end = [e for e in events if e.get("event") == "slow_end"]
+    assert not slow_end or max(e["max_delay"] for e in slow_end) < 9  # 유튜브 '나쁨'(9초대) 전에 피함
+    dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out2), "-f", "null", "-"], capture_output=True, text=True)
+    assert dec.stderr.strip() == ""
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg 없음")
+def test_relay_stalled_write_skips_graceful_close_and_blocked_site(tmp_path: Path):
+    """v2.23 A: 다른 지역도 느려 보여 미리 옮기지 못했을 때 — 쓰기가 막히면 정중히 닫느라 기다리지 않고(6.7초 낭비),
+    막힌 지역을 다시 두드리지 않고(10.3초 낭비) 다른 지역으로 바로. 끊긴 순간부터 다시 붙기까지 짧게."""
+    rc, text, events, out2 = _stall_case(tmp_path, rtt_now={"127.0.0.1": 25.0, "127.0.0.2": 40.0})
+    assert rc == 0
+    assert "막히기 전에" not in text  # 다른 지역도 느려 보임 → 미리 옮기지 않음
+    assert "쓰기가 막힌 지역을 건너뜀: 127.0.0.1 → 127.0.0.2" in text
+    rec = [e for e in events if e.get("event") == "reconnect"]
+    assert rec and rec[-1]["auto"] is False and rec[-1]["gap"] < 3  # 예전: 17.5초

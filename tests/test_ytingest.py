@@ -113,8 +113,11 @@ def test_prefers_near_fast_ips_and_moves_off_far(paths, tmp_path):
         pool.pick(f"live{i}", "a.rtmps.youtube.com", 443)
     cnt = pool.load()
     assert set(cnt) <= set(pool.near("a.rtmps.youtube.com", 443))  # 먼 IP 에는 하나도 안 붙음
-    assert sorted(cnt.values()) == [12, 12, 13, 13]
+    # v2.23: 지역끼리 먼저 고르게 — 지역 A(2.4ms, 1곳) 25 · 지역 B(9ms 대 3곳) 8·8·9
+    assert cnt["74.125.197.134"] == 25 and sorted(v for k, v in cnt.items() if k != "74.125.197.134") == [8, 8, 9]
     # 먼 IP 에 붙어 있던 라이브는 자정에 옮김 대상, 가까운 IP 는 붐빌 때만
+    for lid, (ip, _t) in pool.reserved.items():
+        peers[lid] = ip
     assert pool.should_move("142.250.69.140") and not pool.should_move("74.125.197.134")
     # 중계기용 파일엔 가까운 IP 만 → 다시 접속·옮김도 먼 곳으로 안 감
     pool.write_load()
@@ -133,3 +136,58 @@ def test_single_near_ip_takes_all_rather_than_far(paths):
     for i in range(1, 11):
         assert pool.pick(f"live{i}", "a.rtmps.youtube.com", 443) == "74.125.197.134"
     assert pool.summary()["crowded"] is False  # 할 수 있는 게 없으면 경고 안 함
+
+
+
+def test_sites_grouped_by_rtt_and_file_picks_other_healthy_site(paths, tmp_path):
+    """v2.23: 왕복 시간이 비슷한 IP 는 같은 지역 (11-14 02:23: 9ms 대 3곳이 같이 막힘, 2.4ms 는 멀쩡).
+    막혔을 때 중계기는 다른 지역 · 지금 왕복이 정상인 곳으로."""
+    peers: dict = {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: sorted(REAL), doh=lambda h: [],
+                               tls_ok=lambda ip, h, p: (True, REAL[ip]), sleep=lambda s: None)
+    pool.refresh("a.rtmps.youtube.com", 443, now=1000.0)
+    st = pool.sites("a.rtmps.youtube.com", 443)
+    assert st["74.125.197.134"] == 0
+    assert st["64.233.178.134"] == st["192.178.192.134"] == st["142.250.139.134"] == 1
+    assert st["142.250.69.140"] == 2
+    lab = pool.site_label("a.rtmps.youtube.com", 443)
+    assert lab["74.125.197.134"].startswith("지역 A") and lab["64.233.178.134"].startswith("지역 B (8ms")
+    # 02:23 처럼 지역 B 가 18~27ms 로 느려진 순간
+    pool.rtt_now_fn = lambda: {"64.233.178.134": 25.2, "192.178.192.134": 18.1, "142.250.139.134": 18.5, "74.125.197.134": 2.6}
+    for i in range(1, 51):
+        pool.pick(f"live{i}", "a.rtmps.youtube.com", 443)
+    for lid, (ip, _t) in pool.reserved.items():
+        peers[lid] = ip
+    pool.write_load()
+    f = pool.load_file
+    # 지역 B 의 라이브가 막힘 → 다른 지역(A)의 정상 IP
+    assert ytingest.pick_from_file(f, "a.rtmps.youtube.com", 443, "64.233.178.134", avoid_site=True, healthy_only=True) == "74.125.197.134"
+    # 지역 A 가 막혔는데 다른 지역(B)도 다 느리면 → 옮기지 않음 (우리 회선 쪽일 수 있음)
+    assert ytingest.pick_from_file(f, "a.rtmps.youtube.com", 443, "74.125.197.134", avoid_site=True, healthy_only=True) is None
+    # 정상 조건 없이 다른 지역이면 B 중 하나
+    assert ytingest.pick_from_file(f, "a.rtmps.youtube.com", 443, "74.125.197.134", avoid_site=True) in {
+        "64.233.178.134", "192.178.192.134", "142.250.139.134"}
+    s = pool.summary()
+    assert s["site_load"] and s["crowded"] is False and s["site_of"]["74.125.197.134"].startswith("지역 A")
+
+
+def test_trace_on_rtt_spike_twice(paths, monkeypatch):
+    """E: 지금 왕복이 기준의 2배 + 8ms 넘게 두 번 → 길 추적 저장 (비교용 다른 지역 IP 도), 30분에 한 번."""
+    from livemax import db
+
+    db.init(paths.db)
+    traced = []
+    peers: dict = {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: sorted(REAL), doh=lambda h: [],
+                               tls_ok=lambda ip, h, p: (True, REAL[ip]), sleep=lambda s: None,
+                               tracer=lambda ip: traced.append(ip) or f"hop1 {ip}")
+    pool.refresh("a.rtmps.youtube.com", 443, now=1000.0)
+    pool.rtt_now_fn = lambda: {"64.233.178.134": 25.2, "74.125.197.134": 2.6}
+    monkeypatch.setattr(ytingest.threading, "Thread", lambda target, args, **k: type("T", (), {"start": lambda self: target(*args)})())
+    assert pool.check_spikes(now=2000.0) == []           # 한 번은 출렁임일 수 있음
+    assert pool.check_spikes(now=2015.0) == ["64.233.178.134"]
+    assert traced == ["64.233.178.134", "74.125.197.134"]  # 막힌 곳 + 비교용 멀쩡한 지역
+    assert pool.check_spikes(now=2030.0) == []           # 30분 안엔 다시 안 함
+    with db.session(paths.db) as c:
+        row = c.execute("SELECT ip, rtt_base, rtt_now, text FROM traces").fetchone()
+    assert row["ip"] == "64.233.178.134" and "비교" in row["text"]

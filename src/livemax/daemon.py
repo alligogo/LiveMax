@@ -58,6 +58,8 @@ class App:
         self.notifier = notify.Notifier(self.paths, self.settings)
         self.supervisor.notify = self.notifier.send
         self.collector = Collector(self.paths, self.settings, self.supervisor, on_emergency=self.cleanup_async)
+        # 유튜브 수신 IP 모음에 지금 왕복(중계기 실측, 15초 평균)을 — 막힌 지역 판단·길 추적용 (v2.23)
+        self.supervisor.yt_pool.rtt_now_fn = lambda: {ip: v[1] for ip, v in (self.collector.latest_net.get("per_ip") or {}).items()}
         self.peaks = sysmetrics.PeakTracker(lambda now: config.day_start(self.settings, now))  # CPU·메모리 오늘 최고값
         self.started_at = time.time()
         self._cleanup_lock = threading.Lock()

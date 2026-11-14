@@ -39,11 +39,12 @@ def test_verdict_causes_and_ours(paths, settings):
         rep = health.compute(c, settings, end, "v-test", names={"live32": "LIVE 32 (MilSim)"})
     assert rep["verdict"] == "bad" and rep["counts"]["bad"] == 4 and rep["counts"]["warn"] == 3
     assert rep["counts"]["minor"] == 1 and rep["counts"]["ours"] == 1 and rep["counts"]["ours_program"] == 1
-    assert rep["causes"]["유튜브 IP 142.250.69.140"] == 3 and rep["causes"]["회선 (여러 유튜브 IP 동시)"] == 3
+    assert rep["causes"]["유튜브 IP 142.250.69.140 경로 혼잡"] == 3 and rep["causes"]["회선 (여러 지역 동시)"] == 3
     assert any(e["name"] == "LIVE 32 (MilSim)" for e in rep["events"])
     assert 0.999 < rep["avail"] < 1 and rep["server"]["cpu_avg"] == 33.0
     title, body = health.message(rep)
-    assert "✗" in title and "가동률" in body and "소리 없음" in body
+    assert "✗" in title and "정상 46/50" in title and "가장 길게" in body and "소리 없음" in body
+    assert (rep["lives_total"], rep["lives_ok"], rep["lives_bad"]) == (50, 46, 4) and rep["longest_s"] == 15.0
 
 
 def test_daily_restart_window_and_thresholds(paths, settings):
@@ -87,3 +88,25 @@ def test_health_api_and_settings(client):
     assert (s["time_kst"], s["notify_mode"], s["warn_s"], s["crit_s"]) == ("06:30", "problem", 4, 9)
     n = client.get("/api/system").json()["notify"]
     assert n["health"]["time_kst"] == "06:30" and any(c["key"] == "health" for c in n["catalog"])
+
+
+
+def test_same_site_is_path_congestion_not_line(paths, settings):
+    """v2.23 D: 11-14 02:23 — IP 3곳(9ms 대 같은 지역)의 22개가 같이 밀림. '여러 IP 동시 = 회선' 이 아니라 '지역 B 경로 혼잡'.
+    정상 N/50 · 가장 길게 · 사건 횟수."""
+    end = time.time()
+    site_of = {"64.233.178.134": "지역 B (8ms대)", "192.178.192.134": "지역 B (8ms대)", "142.250.139.134": "지역 B (8ms대)",
+               "74.125.197.134": "지역 A (2ms대)"}
+    with db.session(paths.db) as c:
+        _metrics(c, end - 86400, end)
+        t = end - 5 * 3600
+        ips = ["64.233.178.134", "192.178.192.134", "142.250.139.134"]
+        for i in range(22):
+            _ins(c, t + i, f"live{i}", "slow", sec=20, max_delay=10 + i, peer=ips[i % 3], where="network")
+        _ins(c, t + 30, "live40", "auto_move", sec=0.4, peer="74.125.197.134")
+        rep = health.compute(c, settings, end, ingest={"site_of": site_of})
+    assert rep["causes"] == {"유튜브 지역 B (8ms대) 경로 혼잡": 22}
+    assert (rep["lives_ok"], rep["lives_total"], rep["longest_s"]) == (28, 50, 31.0)
+    assert len(rep["episodes"]) == 1 and rep["episodes"][0]["n"] == 22 and rep["server"]["auto_moves"] == 1
+    title, body = health.message(rep)
+    assert title.endswith("정상 28/50") and "사건 1번" in body and "지역 B" in body

@@ -122,6 +122,10 @@ CREATE INDEX IF NOT EXISTS ix_net_metrics_ts ON net_metrics(ts);
 CREATE TABLE IF NOT EXISTS health_days (
     day TEXT PRIMARY KEY, ts REAL NOT NULL, data TEXT NOT NULL
 );
+-- v2.23 E: 유튜브 수신 IP 왕복이 튄 순간의 길 추적 (mtr) — 막힌 곳이 OVH 안·중간·구글 입구 중 어디인지
+CREATE TABLE IF NOT EXISTS traces (
+    ts REAL NOT NULL, ip TEXT, rtt_base REAL, rtt_now REAL, text TEXT
+);
 """
 
 

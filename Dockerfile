@@ -11,6 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive TZ=UTC LANG=C.UTF-8 PYTHONUNBUFFERED=1 \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ffmpeg liquidsoap stunnel4 vnstat tini ca-certificates python3 python3-venv \
+      mtr-tiny iputils-tracepath \
  && rm -rf /var/lib/apt/lists/* \
  && sed -i 's|^;\?DatabaseDir .*|DatabaseDir "/data/state/vnstat"|' /etc/vnstat.conf
 

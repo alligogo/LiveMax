@@ -50,6 +50,8 @@ WRITE_TIMEOUT = 10.0  # 유튜브 쪽 쓰기가 이만큼 막히면 끊긴 것�
 BATCH_S = 0.1  # ffmpeg 쪽에서 이만큼 모아 한 번에 보낸다
 RECONNECT_GIVEUP_S = 30.0  # 유튜브 재접속을 이만큼 시도해도 안 되면 ffmpeg 재시작으로 넘긴다
 RECONNECT_TRY_S = 4.0  # 재접속 한 번에 이만큼만 기다린다 (정상은 0.3~0.8초 — 응답 없는 서버를 15초씩 기다리지 않게)
+AUTO_MOVE_DELAY_S = 6.0      # v2.23 막히기 전에 옮기기: 못 보낸 영상이 이만큼 쌓이면 다른 (정상) 지역으로 — 유튜브 '나쁨' 은 9초대부터
+AUTO_MOVE_COOLDOWN_S = 600.0  # 한 번 옮긴 뒤 이만큼은 다시 안 옮김 (왔다 갔다 방지)
 KEEP_S = 20  # ffmpeg 가 바뀌는 동안(영상 교체·일일 재시작) 유튜브 연결을 이만큼 살려 둔다
 MAX_BUFFER = 40 * 1024 * 1024  # 재접속 동안 쌓아 둘 최대 크기 (5Mbps 기준 약 60초)
 TS_RENEW_MS = 40 * 86400 * 1000  # RTMP 시각은 32비트(약 49.7일)에서 0으로 돌아간다 → 40일 넘으면 다음 영상 교체 때 새로 접속
@@ -541,6 +543,8 @@ class Relay:
         self.peer = "?"  # 지금 붙은 유튜브 수신 서버 IP (로그용)
         self.sock = None
         self.switch_req = False  # v2.22: 관리 프로그램이 SIGUSR1 로 '덜 붐비고 빠른 수신 IP 로 옮겨' 요청 (ffmpeg 는 그대로)
+        self.auto_target: str | None = None  # v2.23: 밀림이 쌓여 스스로 고른 '다른 정상 지역' IP (막히기 전에 옮기기)
+        self.last_auto_move = 0.0
         self.reconnecting = False
 
     def _pending(self) -> tuple[int, int, int]:
@@ -636,6 +640,7 @@ class Relay:
         w["win"].append((dt, d_in, d_out))
         self._watch_content(w, dt, d_in)
         delay = pend / w["rate"] if w["rate"] > 0 and self.busy else 0.0
+        self._maybe_auto_move(delay, now)
         if self.busy and dt >= 2.5:  # 1초마다 깨어나야 하는데 한참 늦음 = 중계기 자체가 멈춤 (그동안 유튜브로 아무것도 안 감)
             log.warning("중계기가 %.1f초 멈췄다가 다시 움직임 (서버 처리 지연)", dt - 1)
             _emit({"event": "stall", "sec": round(dt - 1, 1)})
@@ -812,6 +817,7 @@ class Relay:
             while True:
                 pub = self.pub
                 planned = False
+                stalled = False
                 # --- 보내기: 버퍼에 쌓인 태그를 모아 한 번에 (100ms 마다 깨어남 — CPU 절약)
                 while not pub.closed.is_set():
                     if self.switch_req:  # 계획된 옮김: 지금 연결을 닫고 아래 '다시 접속' 길로 (ffmpeg·버퍼는 그대로)
@@ -837,7 +843,9 @@ class Relay:
                         try:
                             await pub.send_media(out)
                         except (asyncio.TimeoutError, ConnectionError, OSError, ssl.SSLError) as e:
-                            log.warning("유튜브 쓰기 실패: %s", type(e).__name__)
+                            if not self.auto_target:
+                                log.warning("유튜브 쓰기 실패: %s", type(e).__name__)
+                            stalled = True
                             break
                         self.last_wall = time.monotonic()
                         sent += len(out)
@@ -846,11 +854,26 @@ class Relay:
                         keep = True
                         return
                     await asyncio.sleep(BATCH_S)
-                # --- 유튜브가 끊음(또는 계획된 옮김) → 빠른 재접속
+                # --- 유튜브가 끊음 · 쓰기 막힘 · 계획된 옮김 · 막히기 전에 옮기기 → 빠른 재접속
                 cut = time.monotonic()
-                if not planned:
+                auto = self.auto_target is not None
+                if auto:
+                    c["connect_addr"], self.auto_target = self.auto_target, None
+                elif not planned:
                     log.warning("유튜브 쪽 연결이 끊김 — 중계기만 바로 다시 접속 (ffmpeg 는 계속)")
-                await pub.close()
+                if planned:
+                    try:  # 계획된 옮김은 정중히 닫되 2초까지만
+                        await asyncio.wait_for(pub.close(), 2)
+                    except Exception:  # noqa: BLE001
+                        pub.abort()
+                else:
+                    # v2.23: 막혔거나 끊긴 연결은 기다리지 않고 바로 버린다 (11-14 02:24: 정중히 닫다 6.7초 낭비)
+                    pub.abort()
+                    if stalled and not auto:  # 쓰기가 막혔다 = 그 지역 길이 막힘 → 첫 시도부터 다른 지역 (같은 IP 재시도에 10초 낭비)
+                        alt = self._other_site()
+                        if alt:
+                            log.info("쓰기가 막힌 지역을 건너뜀: %s → %s", c.get("connect_addr"), alt)
+                            c["connect_addr"] = alt
                 self.reconnecting = True
                 try:
                     self.pub = await self._reconnect(feed)
@@ -866,8 +889,9 @@ class Relay:
                 await self.pub.send_media(b"".join(self.pub.tag_bytes(t, 0, d) for t, _ts, d in feed.headers()))
                 gap = time.monotonic() - cut
                 (log.info if planned else log.warning)("유튜브 재접속 성공%s — 공백 %.1f초 (수신 서버 %s)",
-                                                       " (계획된 옮김)" if planned else "", gap, self.peer)
-                _emit({"event": "reconnect", "gap": round(gap, 2), "planned": planned})
+                                                       " (계획된 옮김)" if planned else " (막히기 전에 옮김)" if auto else "",
+                                                       gap, self.peer)
+                _emit({"event": "reconnect", "gap": round(gap, 2), "planned": planned, "auto": auto})
         except asyncio.IncompleteReadError:
             log.info("ffmpeg 연결 종료")
             keep = True
@@ -891,6 +915,34 @@ class Relay:
 
     def _on_switch(self) -> None:
         self.switch_req = True
+
+    def _maybe_auto_move(self, delay: float, now: float) -> None:
+        """v2.23: 못 보낸 영상이 AUTO_MOVE_DELAY_S 넘게 쌓이면 지금 지역이 막힌 것 → 왕복 시간이 정상인 '다른 지역' IP 로 즉시.
+        다른 지역도 다 느리면(우리 회선 쪽) 옮기지 않는다. 막힌 연결은 정중히 닫지 않고 바로 버린다 (닫는 신호도 안 나가 수 초 낭비)."""
+        c = self.cfg
+        pub = self.pub
+        if (delay < AUTO_MOVE_DELAY_S or not self.busy or self.reconnecting or pub is None or pub.closed.is_set()
+                or not c.get("load_file") or not c.get("connect_addr") or now - self.last_auto_move < AUTO_MOVE_COOLDOWN_S):
+            return
+        from .ytingest import pick_from_file
+
+        new = pick_from_file(c["load_file"], c["host"], int(c["port"]), c["connect_addr"], avoid_site=True, healthy_only=True)
+        if not new:
+            return
+        self.last_auto_move = now
+        self.auto_target = new
+        log.warning("유튜브 전송 밀림 %.1f초 — 막히기 전에 다른 지역으로 옮김: %s → %s", delay, c["connect_addr"], new)
+        pub.abort()  # 보내기 고리가 '쓰기 실패' 로 빠져나와 아래 다시 접속 길로
+
+    def _other_site(self) -> str | None:
+        """지금 IP 와 다른 지역의 IP (정상인 곳 우선, 없으면 다른 지역 아무 곳)."""
+        c = self.cfg
+        if not c.get("load_file") or not c.get("connect_addr"):
+            return None
+        from .ytingest import pick_from_file
+
+        return (pick_from_file(c["load_file"], c["host"], int(c["port"]), c["connect_addr"], avoid_site=True, healthy_only=True)
+                or pick_from_file(c["load_file"], c["host"], int(c["port"]), c["connect_addr"], avoid_site=True))
 
     def _switch_target(self) -> str | None:
         """옮길 IP: 관리 프로그램의 분포 파일에서 (가깝고 빠른 IP 중) 가장 적게 붙은 곳, 지금 IP 제외."""

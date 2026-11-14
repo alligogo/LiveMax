@@ -710,3 +710,11 @@ html.modal-open, html.modal-open body { overflow: hidden; }
   .hd-bars { grid-auto-columns: 46px; }
   .hd-ev { grid-template-columns: 16px 40px 1fr; } .hd-ev > span:nth-child(4), .hd-ev-c { grid-column: 2 / -1; text-align: left; }
 }
+
+/* v2.23: 서버 상태는 왼쪽 정렬 (이름 칸 고정 · 값은 바로 옆) — 값이 오른쪽 끝으로 멀어져 읽기 힘들던 것 */
+.hd-kv > div { display: grid; grid-template-columns: 130px 1fr; justify-content: start; }
+.hd-kv > div b { text-align: left; word-break: break-word; }
+@media (max-width: 560px) { .hd-kv > div { grid-template-columns: 1fr; gap: 2px; } }
+.hd-trace { border-bottom: 1px solid #2c2c2c; padding: 6px 0; }
+.hd-trace summary { cursor: pointer; font-size: 12.5px; }
+.hd-pre { margin: 8px 0 4px; padding: 10px; background: #141414; border-radius: 6px; font-size: 11px; line-height: 1.45; overflow-x: auto; white-space: pre; }

@@ -612,7 +612,7 @@ function renderSide(side, ov) {
         h("div", { class: "cap-rows" },
           row("mem", "메모리", memT ? `${fmt.num(memU / 1024, 1)} / ${fmt.num(memT / 1024, 1)} GB` : "-",
             // 남은 여유분은 스왑으로 옮겨진 몫까지 '쓰는 메모리'로 쳐서 계산 (여유가 부풀려 보이지 않게)
-            memT ? [`라이브당 약 ${Math.round(c.mem_per_live_mb || 0)}MB · 남은 여유분 ${Math.max(0, Math.round(memT - reserve - memU - swapU)).toLocaleString()}MB`,
+            memT ? [`라이브당 ${Math.round(c.mem_per_live_mb || 0)}MB · 여유분 ${Math.max(0, Math.round(memT - reserve - memU - swapU)).toLocaleString()}MB`,
               swapU >= 50 ? h("span", { class: "swap-note", title: "리눅스가 한동안 안 쓰는 메모리를 비상 스왑으로 옮겨 둔 양 — 계속 오가지만 않으면 괜찮습니다 (오가면 알림)" },
                 ` · 스왑 ${fmt.num(swapU / 1024, 1)}GB`) : null,
               s.mem_peak_mb ? peakNote(`${fmt.num(s.mem_peak_mb / 1024, 1)}GB`, s.mem_peak_at) : null] : null,
@@ -1592,6 +1592,8 @@ const H_KIND = { slow: "밀림", reconnect: "유튜브 재접속", no_audio: "�
   ffmpeg_exit: "송출 프로그램 예상 밖 종료", ip_move: "유튜브 IP 옮김 (계획)" };
 let HEALTH_SEL = null, HEALTH_ITEM = "bad";
 // 가동률: 영향이 없으면 100%, 있으면 99.9986% 처럼 필요한 자리까지만 (v2.20)
+// 정상 라이브 N/전체 (v2.23 — 가동률 % 대신). 옛 기록(v2.22 이전)은 그날 숫자가 없어 가동률로
+const hOk = (r) => (r.lives_total ? `${r.lives_ok}/${r.lives_total}` : hAvail(r));
 const hAvail = (r) => {
   if (r.avail == null) return "-";
   if (!r.impact_s || r.avail >= 0.99999995) return "100%";
@@ -1602,7 +1604,7 @@ const hKst = (ts) => { const d = new Date(ts * 1000 + 9 * 3600 * 1000); return `
 const H_ITEMS = [
   ["bad", "✗ 시청자 영향", (r) => r.counts.bad, "건"],
   ["warn", "△ 영향 가능", (r) => r.counts.warn, "건"],
-  ["avail", "시청자 기준 가동률", (r) => (r.avail == null ? null : +(r.avail * 100).toFixed(4)), "%"],
+  ["ok", "정상 라이브", (r) => (r.lives_total ? r.lives_ok : null), "개"],
   ["prog", "우리 프로그램 원인", (r) => r.counts.ours_program, "건"],
   ["cpu", "CPU 평균", (r) => r.server.cpu_avg, "%"],
   ["cpumax", "CPU 5분 평균 최고", (r) => r.server.cpu5_max, "%"],
@@ -1630,7 +1632,7 @@ async function showHealth() {
 function renderHealth(root, d) {
   const days = [...(d.days || []), d.now];  // 시간순 (추이 그래프용)
   const recent = days.slice().reverse();      // 최신이 먼저 (날짜 칸·히트맵 — v2.22)
-  if (!HEALTH_SEL || !days.some((x) => x.day === HEALTH_SEL)) HEALTH_SEL = d.days?.length ? d.days[d.days.length - 1].day : "지금";
+  if (!HEALTH_SEL || !days.some((x) => x.day === HEALTH_SEL)) HEALTH_SEL = "지금";  // 들어가면 맨 왼쪽 '지금' 먼저 (v2.23)
   const sel = days.find((x) => x.day === HEALTH_SEL) || d.now;
   const prevVer = (r) => { const i = days.indexOf(r); return i > 0 ? days[i - 1].version : null; };
   const strip = h("div", { class: "hd-strip" }, recent.map((r) => {
@@ -1639,7 +1641,7 @@ function renderHealth(root, d) {
     return h("button", { class: `hd-day v-${r.verdict}` + (r.day === HEALTH_SEL ? " on" : ""), title: lb,
       onclick: () => { HEALTH_SEL = r.day; renderHealth(root, d); } },
       h("span", { class: "hd-date" }, r.day === "지금" ? "지금 (24시간)" : r.day.slice(5)),
-      h("b", { class: "hd-mk" }, mk), h("span", { class: "hd-av" }, hAvail(r)),
+      h("b", { class: "hd-mk" }, mk), h("span", { class: "hd-av" }, hOk(r)),
       h("span", { class: "hd-ver" + (upd ? " upd" : "") }, upd ? `업데이트 ${String(r.version).slice(0, 7)}` : String(r.version || "").slice(0, 7)));
   }));
   const c = sel.counts, s = sel.server;
@@ -1654,8 +1656,12 @@ function renderHealth(root, d) {
   const head = h("div", { class: `card hd-head v-${sel.verdict}` }, h("div", { class: "card-body" },
     h("div", { class: "hd-big" }, h("b", {}, vmk, " ", vlb), h("span", {}, sel.day === "지금" ? "최근 24시간 (아직 저장 전)" : `${sel.day} 아침 검진 (지난 24시간)`)),
     h("div", { class: "hd-kpis" },
-      h("div", {}, h("b", {}, hAvail(sel)), h("span", {}, "시청자 기준 가동률")),
-      h("div", {}, h("b", {}, c.bad), h("span", {}, `✗ 시청자 영향 (${sel.thresholds.crit_s}초+)`)),
+      h("div", {}, h("b", {}, sel.lives_total ? `정상 ${sel.lives_ok}/${sel.lives_total}` : hAvail(sel)),
+        h("span", {}, sel.lives_total ? `${Math.floor(100 * sel.lives_ok / sel.lives_total)}% — ✗ 사건이 한 번도 없었던 라이브` : "시청자 기준 가동률")),
+      h("div", {}, h("b", {}, sel.lives_total ? `${sel.lives_bad}개` : c.bad),
+        h("span", {}, sel.lives_total
+          ? (sel.lives_bad ? `✗ 영향 라이브 · 가장 길게 ${sel.longest_s}초 · 사건 ${(sel.episodes || []).length}번 (${(sel.episodes || []).slice(0, 3).map((e) => hKst(e.ts)).join(", ")})` : `✗ 시청자 영향 (${sel.thresholds.crit_s}초+) 없음`)
+          : `✗ 시청자 영향 (${sel.thresholds.crit_s}초+)`)),
       h("div", {}, h("b", {}, c.warn), h("span", {}, `△ 영향 가능 (${sel.thresholds.warn_s}초+)`)),
       h("div", {}, h("b", {}, c.ours_program), h("span", {}, "우리 프로그램 원인 (고칠 것)"))),
     Object.keys(sel.causes || {}).length ? h("div", { class: "hd-causes" }, "원인: ",
@@ -1685,7 +1691,7 @@ function renderHealth(root, d) {
       h("div", { class: "seg hd-items" }, H_ITEMS.map(([k, lb]) => h("button", { class: k === it[0] ? "on" : "", onclick: () => { HEALTH_ITEM = k; renderHealth(root, d); } }, lb))),
       h("div", { class: "hd-bars" }, days.map((r, i) => {
         const v = vals[i];
-        const frac = v == null ? 0 : it[0] === "avail" ? Math.max(0.02, 1 - (100 - v) * 50) : Math.max(0.02, Number(v) / mx);
+        const frac = v == null ? 0 : Math.max(0.02, Number(v) / mx);
         return h("div", { class: "hd-bar" }, h("span", { class: "hd-bar-v" }, v == null ? "-" : `${v}${it[3]}`),
           h("i", { style: `height:${Math.round(frac * 100)}%` }), h("span", { class: "hd-bar-d" }, r.day === "지금" ? "지금" : r.day.slice(5)));
       }))));
@@ -1699,10 +1705,22 @@ function renderHealth(root, d) {
         ["디스크", s.disk_pct != null ? `${s.disk_pct}%` : "-"],
         ["재전송률", s.retrans_avg != null ? `평균 ${s.retrans_avg}% · 최고 ${s.retrans_max}%` : "- (v2.19 부터 기록)"],
         ["유튜브 왕복", s.rtt_avg != null ? `평균 ${s.rtt_avg}ms` + (Object.keys(s.ip_rtt || {}).length ? " · " + Object.entries(s.ip_rtt).map(([ip, v]) => `${ip} ${v}ms`).join(" · ") : "") : "- (v2.19 부터 기록)"],
-        ["유튜브 IP", ing.ips ? `가깝고 빠른 ${ing.near ?? ing.ips}곳 (모음 ${ing.ips}) · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개`
-          + (ing.far_used ? ` · 먼 곳에 ${ing.far_used}개 (자정에 옮김)` : "") : "-"],
-        ["라이브", `평균 ${s.lives_avg}개 송출`]].map(([k, v]) => h("div", {}, h("span", {}, k), h("b", {}, v)))));
-  root.replaceChildren(strip, head, evCard, hmCard, trend, srv);
+        ["유튜브 IP", !ing.ips ? "-" : ing.near == null
+          ? `쓸 수 있는 ${ing.ips}곳 · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개`  // 옛 기록 (v2.21 이전)
+          : `가깝고 빠른 ${ing.near}곳 (모음 ${ing.ips}) · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개`
+            + (ing.far_used ? ` · 먼 곳에 ${ing.far_used}개 (자정에 옮김)` : "")],
+        ...(ing.site_load && Object.keys(ing.site_load).length ? [["유튜브 지역", Object.entries(ing.site_load).map(([k, n]) => `${k} ${n}개`).join(" · ")]] : []),
+        ...(s.auto_moves ? [["막히기 전에 옮김", `${s.auto_moves}번 (밀림이 6초 넘어 다른 지역으로)`]] : []),
+        ["라이브", s.lives_max ? (s.lives_avg < s.lives_max ? `${s.lives_max}개 송출 (평균 ${s.lives_avg})` : `${s.lives_max}개 송출`) : `평균 ${s.lives_avg}개 송출`]]
+        .map(([k, v]) => h("div", {}, h("span", {}, k), h("b", {}, v)))));
+  // 길 추적 (E, v2.23): 그날 왕복이 튄 순간 저장한 mtr — 막힌 곳이 OVH 안·중간 통신사·구글 입구 중 어디인지
+  const from = sel.from || 0, to = sel.to || 1e12;
+  const tr = (d.traces || []).filter((t) => t.ts >= from && t.ts < to);
+  const trCard = tr.length ? h("div", { class: "card" }, h("div", { class: "card-head" }, `길 추적 — 왕복이 튄 순간 ${tr.length}번`),
+    h("div", { class: "card-body" }, tr.map((t) => h("details", { class: "hd-trace" },
+      h("summary", {}, `${hKst(t.ts)} · ${t.ip} · 평소 ${t.rtt_base}ms → ${t.rtt_now}ms`),
+      h("pre", { class: "hd-pre" }, t.text))))) : null;
+  root.replaceChildren(strip, head, evCard, hmCard, trend, srv, ...(trCard ? [trCard] : []));
 }
 
 function notifyCard(n, card) {

@@ -465,6 +465,11 @@ class LiveProc:
         if kind == "reconnect":
             self.sup.note_slow(self.id, False)
             gap = float(ev.get("gap") or 0)
+            if ev.get("auto"):  # v2.23 밀림이 쌓여 막히기 전에 다른 지역으로 옮김 — 대응한 것 (밀림 자체는 따로 기록됨)
+                self.restarts.append((time.time(), f"{QUIET_RECONNECT} {gap:.1f}초 (막히기 전에 다른 지역으로)"))
+                self.sup.incident(self.id, "auto_move", sec=gap, peer=self.st.get("peer"))
+                self.log.warning("유튜브 지역이 막혀 다른 지역으로 옮김 — 공백 %.1f초 (수신 서버 %s)", gap, self.st.get("peer"))
+                return
             if ev.get("planned"):  # 자정 재시작 뒤 가깝고 덜 붐비는 수신 IP 로 옮김 — 일부러 한 일 (끊김·알림·한도에 안 셈)
                 self.restarts.append((time.time(), f"일일 재시작 · 유튜브 IP 옮김 {gap:.1f}초"))
                 self.sup.incident(self.id, "ip_move", sec=gap, peer=self.st.get("peer"))

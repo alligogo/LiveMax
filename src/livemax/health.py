@@ -56,6 +56,7 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
     warn_s, crit_s = float(hc["warn_s"]), float(hc["crit_s"])
     start = end - span
     names = names or {}
+    site_of = dict((ingest or {}).get("site_of") or {})
     rows = [dict(r) for r in conn.execute(
         "SELECT ts, live_id, kind, sec, max_delay, peer, where_, note FROM incidents WHERE ts >= ? AND ts < ? ORDER BY ts",
         (start - OURS_BOOT_S, end)).fetchall()]
@@ -82,11 +83,15 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
         elif k in ("slow", "reconnect"):
             near = [x for x in net if abs(x["ts"] - r["ts"]) <= CLUSTER_S]
             lives = {x["live_id"] for x in near}
-            peers = {x["peer"] for x in near if x["peer"]}
-            if len(lives) >= 3 and len(peers) >= 2:
-                r["cause"] = "회선 (여러 유튜브 IP 동시)"
+            # v2.23: 지역 단위 (11-14 02:23: IP 3곳이었지만 같은 9ms 지역 — '여러 IP 동시 = 회선' 은 틀린 분류였다)
+            sites = {site_of.get(x["peer"], x["peer"]) for x in near if x["peer"]}
+            here = site_of.get(r["peer"], f"IP {r['peer']}") if r["peer"] else "유튜브·경로"
+            if len(lives) >= 3 and len(sites) >= 2:
+                r["cause"] = "회선 (여러 지역 동시)"
+            elif len(lives) >= 3:
+                r["cause"] = f"유튜브 {here} 경로 혼잡"
             else:
-                r["cause"] = f"유튜브 IP {r['peer']}" if r["peer"] else "유튜브·경로"
+                r["cause"] = f"유튜브 {here}"
             r["together"] = len(lives)
         else:
             r["cause"] = ""
@@ -129,7 +134,9 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
         "retrans_avg": round(sum(rts) / len(rts), 3) if rts else None, "retrans_max": round(max(rts), 2) if rts else None,
         "rtt_avg": round(sum(rtt) / len(rtt), 1) if rtt else None,
         "ip_rtt": {ip: round(sum(v) / len(v), 1) for ip, v in sorted(ip_rtt.items())},
-        "lives_avg": round(lives_avg, 1), "minor": sum(1 for r in evs if r["sev"] == "minor"),
+        "lives_avg": round(lives_avg, 1), "lives_max": int(round(max((float(x["lives_running"] or 0) for x in m), default=0))),
+        "minor": sum(1 for r in evs if r["sev"] == "minor"),
+        "auto_moves": sum(1 for r in evs if r["kind"] == "auto_move"),
         "ours": sum(1 for r in evs if r["sev"] == "ours"), "ingest": ingest or {},
     }
     warn_server = []
@@ -144,6 +151,20 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
     ing = ingest or {}
     if ing.get("crowded"):  # 고르게 나눈 수(fair)보다 눈에 띄게 몰렸을 때만 (v2.21)
         warn_server.append(f"유튜브 IP 한 곳에 {ing['max']}개 몰림 (고르게 나누면 {ing.get('fair')}개)")
+
+    # 정상 라이브 N/전체: 그날 ✗ 가 한 번도 없었던 라이브 수 (△ 는 빼지 않음 — 시청자가 못 느꼈을 수 있음)
+    total = int(round(max((float(x["lives_running"] or 0) for x in m), default=0))) or len({r["live_id"] for r in evs if r["live_id"]})
+    bad_lives = sorted({r["live_id"] for r in bad if r["live_id"]})
+    lives_ok = max(0, total - len(bad_lives))
+    longest = max((float(r["max_delay"] or 0) if r["kind"] == "slow" else float(r["sec"] or 0) for r in bad), default=0.0)
+    episodes: list[dict] = []  # ✗ 사건 묶음 (2분 안 = 한 번)
+    for r in sorted(bad, key=lambda x: x["ts"]):
+        if episodes and r["ts"] - episodes[-1]["last"] <= 120:
+            episodes[-1]["lives"].add(r["live_id"])
+            episodes[-1]["last"] = r["ts"]
+        else:
+            episodes.append({"ts": r["ts"], "last": r["ts"], "lives": {r["live_id"]}})
+    episodes_out = [{"ts": e["ts"], "n": len(e["lives"])} for e in episodes]
 
     hourly = {h: [0, 0, 0.0] for h in range(24)}  # KST 시 → [✗, △, 그 시간 평균 라이브 수]
     for r in counted:
@@ -167,6 +188,8 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
         "day": datetime.fromtimestamp(end - 1, KST).strftime("%Y-%m-%d"), "from": start, "to": end, "version": version,
         "verdict": "bad" if bad else "warn" if counted else "ok",
         "avail": avail, "impact_s": round(impact, 1),
+        "lives_total": total, "lives_ok": lives_ok, "lives_bad": len(bad_lives), "longest_s": round(longest, 1),
+        "episodes": episodes_out,
         "counts": {"bad": len(bad), "warn": len(counted) - len(bad), "minor": server["minor"], "ours": server["ours"],
                    "no_audio": sum(1 for r in counted if r["kind"] == "no_audio"),
                    "reconnect": sum(1 for r in counted if r["kind"] == "reconnect"),
@@ -213,10 +236,17 @@ def avail_text(rep: dict) -> str:
 
 def message(rep: dict) -> tuple[str, str]:
     c = rep["counts"]
-    av = avail_text(rep)
     s = rep["server"]
-    title = f"검진 {MARK[rep['verdict']]}"
-    lines = [f"{rep['day'][5:]} · 시청자 기준 가동률 {av} · ✗ {c['bad']}건 △ {c['warn']}건",
+    tot = rep.get("lives_total") or 0
+    title = f"검진 {MARK[rep['verdict']]} · 정상 {rep.get('lives_ok', tot)}/{tot}"
+    if rep.get("lives_bad"):
+        eps = rep.get("episodes") or []
+        when = ", ".join(datetime.fromtimestamp(e["ts"], KST).strftime("%H:%M") for e in eps[:3])
+        head = (f"{rep['day'][5:]} · ✗ 영향 {rep['lives_bad']}개 · 가장 길게 {rep.get('longest_s')}초"
+                f" · 사건 {len(eps)}번 ({when}) · △ {c['warn']}건")
+    else:
+        head = f"{rep['day'][5:]} · 시청자 영향 없음 · △ {c['warn']}건"
+    lines = [head,
              f"서버 {'⚠ ' + ', '.join(rep['warn_server']) if rep['warn_server'] else '✓'} · CPU 평균 {s.get('cpu_avg')}% (최고 {s.get('cpu_max')}%)"]
     if rep["causes"]:
         lines.append("원인: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["causes"].items(), key=lambda x: -x[1])[:3]))

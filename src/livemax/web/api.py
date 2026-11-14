@@ -1137,7 +1137,9 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         now = health.compute(conn, settings, time.time(), core.version, names=sup.short_names(),
                              ingest=sup.yt_pool.summary() if getattr(sup, "yt_pool", None) else None)
         now["day"] = "지금"
-        return {"days": health.days(conn), "now": now, "settings": health.cfg(settings)}
+        traces = [dict(r) for r in conn.execute(
+            "SELECT ts, ip, rtt_base, rtt_now, text FROM traces WHERE ts > ? ORDER BY ts DESC LIMIT 30", (time.time() - 11 * 86400,)).fetchall()]
+        return {"days": health.days(conn), "now": now, "settings": health.cfg(settings), "traces": traces}
 
     @app.get("/api/system")
     def system(request: Request):
