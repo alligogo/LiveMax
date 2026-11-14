@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """LiveMax 유튜브 측정기 (PC 용, LiveMax 서버와 무관)
 
-자는 동안 켜 두면 1분마다 유튜브에 물어서 라이브별 상태를 기록한다.
+자는 동안 켜 두면 30초마다 유튜브에 물어서 라이브별 상태를 기록한다.
   - 방송 상태 (실시간 / 종료 …)
   - 스트림 상태 (좋음 / 보통 / 나쁨 / 데이터 없음) + 유튜브가 지적하는 문제
+  - 수신 (받는 중 / 안 받음) — 유튜브가 지금 영상을 받고 있는지. '데이터 없음' 인데 '받는 중' 이면 표시만 흔들린 것
+  - 상태 갱신 — 유튜브가 스트림 상태를 마지막으로 고친 게 몇 초 전인지 (오래됐으면 유튜브 쪽 집계가 늦은 것)
   - 동시 시청자 수
-기록: yt_logs/YYYY-MM-DD.csv (1분마다 한 줄씩), yt_logs/YYYY-MM-DD_변화.txt (상태가 바뀐 순간만)
+기록: yt_logs/YYYY-MM-DD.csv (물을 때마다 한 줄씩), yt_logs/YYYY-MM-DD_변화.txt (상태가 바뀐 순간만)
 끝낼 때(Ctrl+C) 라이브별 요약을 보여 준다.
 
 설정: 같은 폴더의 yt_monitor_config.json (yt_monitor_config.example.json 을 복사해서 채움)
@@ -34,6 +36,7 @@ CONFIG = HERE / "yt_monitor_config.json"
 LOGDIR = HERE / "yt_logs"
 API = "https://www.googleapis.com/youtube/v3"
 HEALTH_KO = {"good": "좋음", "ok": "보통", "bad": "나쁨", "noData": "데이터 없음", "revoked": "취소됨"}
+RECV_KO = {"active": "받는 중", "inactive": "안 받음", "ready": "준비", "created": "생성됨", "error": "오류"}
 LIFE_KO = {"live": "실시간", "complete": "종료", "ready": "준비", "testing": "테스트", "liveStarting": "시작 중",
            "testStarting": "테스트 시작", "created": "생성됨", "revoked": "취소됨"}
 
@@ -82,7 +85,7 @@ class Channel:
         return self.token
 
     def poll(self) -> list[dict]:
-        """라이브마다 {name, id, life, health, issues, viewers}. API 3회 (채널당)."""
+        """라이브마다 {name, id, life, health, recv, age, issues, viewers}. API 3회 (채널당)."""
         if not self.lives:
             return []
         tok = self.access()
@@ -101,10 +104,16 @@ class Channel:
             bi = bc.get(x["id"])
             life = bi["status"].get("lifeCycleStatus", "?") if bi else "없음"
             sid = bi.get("contentDetails", {}).get("boundStreamId") if bi else None
-            hs = (st.get(sid) or {}).get("status", {}).get("healthStatus", {}) if sid else {}
+            sst = (st.get(sid) or {}).get("status", {}) if sid else {}
+            hs = sst.get("healthStatus", {})
+            try:  # 유튜브가 이 스트림 상태를 마지막으로 고친 시각 → 몇 초 전
+                age = max(0, int(time.time() - int(hs["lastUpdateTimeSeconds"])))
+            except (KeyError, TypeError, ValueError):
+                age = None
             issues = [f"{i.get('severity', '')}:{i.get('type', '')}" for i in hs.get("configurationIssues", [])]
             viewers = vd.get(x["id"], {}).get("concurrentViewers")
             out.append({"name": x["name"], "id": x["id"], "life": life, "health": hs.get("status", "-"),
+                        "recv": sst.get("streamStatus", "-"), "age": age,
                         "issues": issues, "viewers": int(viewers) if viewers else 0})
         return out
 
@@ -120,7 +129,7 @@ def main() -> None:
         return
     cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     chans = [Channel(c, cfg["client_id"], cfg["client_secret"]) for c in cfg.get("channels", [])]
-    interval = max(30, int(cfg.get("interval_seconds", 60)))
+    interval = max(30, int(cfg.get("interval_seconds", 30)))
     units = sum(3 for c in chans if c.lives) * (86400 // interval)
     LOGDIR.mkdir(exist_ok=True)
     print(f"유튜브 측정 시작 — {len(chans)}개 채널, 라이브 {sum(len(c.lives) for c in chans)}개, {interval}초마다")
@@ -136,6 +145,11 @@ def main() -> None:
             day = now.strftime("%Y-%m-%d")
             csv_path, ev_path = LOGDIR / f"{day}.csv", LOGDIR / f"{day}_변화.txt"
             new = not csv_path.exists()
+            if not new:  # 예전 형식(칸 8개)으로 시작한 오늘 파일이면 새 파일로 (칸이 섞이지 않게)
+                with open(csv_path, encoding="utf-8-sig") as f0:
+                    if "수신" not in f0.readline():
+                        csv_path = LOGDIR / f"{day}_v2.csv"
+                        new = not csv_path.exists()
             rows = []
             for ch in chans:
                 try:
@@ -148,10 +162,11 @@ def main() -> None:
             with open(csv_path, "a", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
                 if new:
-                    w.writerow(["시각", "채널", "라이브", "영상ID", "방송", "스트림", "시청자", "유튜브 지적"])
+                    w.writerow(["시각", "채널", "라이브", "영상ID", "방송", "스트림", "시청자", "유튜브 지적", "수신", "상태 갱신(초 전)"])
                 for chn, r in rows:
                     w.writerow([f"{now:%H:%M:%S}", chn, r["name"], r["id"], LIFE_KO.get(r["life"], r["life"]),
-                                HEALTH_KO.get(r["health"], r["health"]), r["viewers"], " ".join(r["issues"])])
+                                HEALTH_KO.get(r["health"], r["health"]), r["viewers"], " ".join(r["issues"]),
+                                RECV_KO.get(r["recv"], r["recv"]), "" if r["age"] is None else r["age"]])
             line = []
             for chn, r in rows:
                 key = f"{chn}/{r['name']}"
@@ -163,11 +178,12 @@ def main() -> None:
                 s["notlive"] += r["life"] != "live"
                 s["vmax"] = max(s["vmax"], r["viewers"])
                 s["vsum"] += r["viewers"]
-                cur = (r["life"], r["health"], tuple(r["issues"]))
+                cur = (r["life"], r["health"], tuple(r["issues"]), r["recv"])
+                extra = f" [수신 {RECV_KO.get(r['recv'], r['recv'])}" + (f" · 상태 갱신 {r['age']}초 전]" if r["age"] is not None else "]")
                 if last.get(key) and last[key] != cur:
                     msg = (f"{now:%H:%M:%S} {key}: {LIFE_KO.get(last[key][0], last[key][0])}/{HEALTH_KO.get(last[key][1], last[key][1])}"
                            f" → {LIFE_KO.get(r['life'], r['life'])}/{HEALTH_KO.get(r['health'], r['health'])}"
-                           f"{' ' + ' '.join(r['issues']) if r['issues'] else ''}")
+                           f"{' ' + ' '.join(r['issues']) if r['issues'] else ''}{extra}")
                     print("  ⚠ " + msg)
                     with open(ev_path, "a", encoding="utf-8") as fe:
                         fe.write(msg + "\n")

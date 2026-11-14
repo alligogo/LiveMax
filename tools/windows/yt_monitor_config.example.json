@@ -2,7 +2,7 @@
   "_설명": "이 파일을 복사해 이름을 yt_monitor_config.json 으로 바꾸고 채우세요. 그 파일은 GitHub 에 올리지 마세요 (토큰이 들어 있음).",
   "client_id": "여기에_OAuth_클라이언트_ID.apps.googleusercontent.com",
   "client_secret": "여기에_클라이언트_보안_비밀번호",
-  "interval_seconds": 60,
+  "interval_seconds": 30,
   "channels": [
     {
       "name": "내 채널",

@@ -60,6 +60,7 @@ SLOW_DELAY_S = 2.0  # 유튜브로 못 보내고 밀린 영상이 이만큼(초)
 SLOW_HOLD_S = 5  # 밀림이 이만큼 계속돼야 기록 (순간 출렁임은 무시), 회복도 이만큼 계속돼야 끝으로 봄
 # 내용 감시 (v2.13): 원인이 무엇이든 사고는 '유튜브로 가는 영상·소리가 모자람'으로 나타난다 → 영상·소리를 따로 센다
 NO_AUDIO_S = 8    # 영상은 오는데 소리가 이만큼(초) 한 조각도 없으면 '소리 없음' (ffmpeg 가 음악 연결을 잃은 채 영상만 보냄)
+NO_VIDEO_S = 8    # v2.25: 소리는 오는데 영상이 이만큼(초) 한 조각도 없으면 '영상 없음' (재생목록이 끝나면 ffmpeg 는 안 죽고 소리만 보냄)
 NO_INPUT_S = (10, 30)  # ffmpeg 가 붙어 있는데 이만큼(초) 아무것도 안 보내면 알림 — 10초: 기록, 30초: 송출 프로그램 재시작 요청
 
 # ------------------------------------------------------------------ AMF0
@@ -578,7 +579,7 @@ class Relay:
     def _watch_state(self, now: float) -> dict:
         return {"t": now, "in": self.stats["in"], "out": self.stats["out"], "rate": 0.0, "win": deque(maxlen=STATS_S),
                 "slow": None, "calm": 0, "emit": now,
-                "a": self.stats.get("a", 0), "v": self.stats.get("v", 0), "mute": 0.0, "mute_on": False,
+                "a": self.stats.get("a", 0), "v": self.stats.get("v", 0), "mute": 0.0, "mute_on": False, "blind": 0.0, "blind_on": False,
                 "idle": 0.0, "idle_lv": 0}
 
     def _tcp_info(self) -> tuple[float | None, int | None]:
@@ -600,9 +601,18 @@ class Relay:
         da, dv = a - w["a"], v - w["v"]
         w["a"], w["v"] = a, v
         if not self.busy:  # ffmpeg 가 바뀌는 중(영상 교체·재시작) — 세지 않는다
-            w["mute"] = w["idle"] = 0.0
-            w["mute_on"], w["idle_lv"] = False, 0
+            w["mute"] = w["idle"] = w["blind"] = 0.0
+            w["mute_on"], w["idle_lv"], w["blind_on"] = False, 0, False
             return
+        # --- 영상 없음 (v2.25): 소리 조각은 오는데 영상 조각이 0 — 재생목록 끝 등
+        if dv > 0:
+            w["blind"], w["blind_on"] = 0.0, False
+        elif da > 0:
+            w["blind"] += dt
+            if not w["blind_on"] and w["blind"] >= NO_VIDEO_S:
+                w["blind_on"] = True
+                log.warning("영상 없음 — 소리만 들어온 지 %.0f초 (재생목록이 끝났거나 영상 파일을 못 읽음)", w["blind"])
+                _emit({"event": "no_video", "sec": round(w["blind"])})
         # --- 소리 없음: 영상 조각은 오는데 소리 조각이 0
         if da > 0:
             if w["mute_on"]:
@@ -806,6 +816,7 @@ class Relay:
                 gap = time.monotonic() - self.last_wall
                 base_out = self.last_out + max(33, int(gap * 1000))  # 실제 흐른 시간만큼 시각을 이어 붙임
                 log.info("송출 프로그램 교체 — 유튜브 연결 유지, %.1f초 만에 이어서 송출", gap)
+                _emit({"event": "handoff", "gap": round(gap, 2)})  # v2.25: 재시작 공백을 기록으로 (검진 '서버 상태')
             else:
                 if self.pub:
                     await self.pub.close()

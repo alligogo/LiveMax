@@ -126,6 +126,24 @@ def test_planned_restart_skipped_with_timer(sup, settings, monkeypatch):
     assert sup.procs["live1"].restarted == ["일일 재시작"]
 
 
+def test_playlist_renewed_before_it_ends(sup, settings, monkeypatch):
+    """v2.25: 재생목록(24시간 + 여유 45분)이 끝나면 ffmpeg 는 소리만 보낸다 — 일일 재시작을 건너뛴 날·재시작 시각을 바꾼 날엔
+    끝나기 전에 새 목록으로."""
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setitem(settings["restart"], "base_utc", (datetime.now(timezone.utc) + timedelta(hours=6)).strftime("%H:%M"))
+    _save(sup)
+    sup.start("live1")
+    p = sup.procs["live1"]
+    limit = float(settings["concat"]["hours"]) * 3600 + float(settings["concat"]["margin_minutes"]) * 30
+    p.st["ffmpeg_started_at"] = time.time() - limit + 60
+    sup._planned_restarts()
+    assert p.restarted == []  # 아직 여유 있음
+    p.st["ffmpeg_started_at"] = time.time() - limit - 5
+    sup._planned_restarts()
+    assert len(p.restarted) == 1 and p.restarted[0].startswith("일일 재시작")  # 계획된 재시작으로 셈 (끊김 아님)
+
+
 def test_stop_clears_session(sup):
     _save(sup, timer_mode="duration", timer_minutes=60, timer_repeat=True)
     sup.start("live1")

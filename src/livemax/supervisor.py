@@ -419,6 +419,13 @@ class LiveProc:
             self.sup.incident(self.id, "no_audio", sec=ev.get("sec"), peer=self.st.get("peer"))
             self._auto_restart("소리 없음", f"영상만 송출되고 소리가 {ev.get('sec')}초째 없음 — 송출 프로그램을 다시 띄워 음악을 다시 붙임")
             return
+        if kind == "handoff":  # 재시작·영상 교체 때 유튜브로 아무것도 안 간 시간 (v2.25 — 기록만)
+            self.sup.incident(self.id, "handoff", sec=ev.get("gap"), peer=self.st.get("peer"))
+            return
+        if kind == "no_video":  # 소리만 가고 영상이 없다 — 재생목록 끝 등 (v2.25)
+            self.sup.incident(self.id, "no_video", sec=ev.get("sec"), peer=self.st.get("peer"))
+            self._auto_restart("영상 없음", f"소리만 송출되고 영상이 {ev.get('sec')}초째 없음 — 송출 프로그램을 다시 띄워 새 재생목록으로 이어감")
+            return
         if kind == "audio_back":
             self.log.info("소리가 다시 나감 (%s초 만에)", ev.get("sec"))
             return
@@ -1249,12 +1256,26 @@ class Supervisor:
             self.notify("down", f"{name}: 송출 중단", f"{int(now - p.bad_since)}초째 송출 안 됨 — {msg}", dedupe_s=0)
             self.incident(lv.id, "down", sec=now - p.bad_since, note=msg)
 
+    def _playlist_limit(self) -> float:
+        c = self.settings["concat"]
+        return float(c["hours"]) * 3600 + float(c["margin_minutes"]) * 30
+
     def _planned_restarts(self) -> None:
         now = datetime.now(timezone.utc)
         gap = 30
         for lv in self.store.all():
             p = self.procs.get(lv.id)
             if not p or not p.desired or p.st.get("state") != "running":
+                continue
+            # v2.25: 재생목록(24시간 + 여유 45분)이 끝나기 전에 새 목록으로 — 일일 재시작을 건너뛴 날·재시작 시각을 바꾼 날.
+            # 끝나 버리면 ffmpeg 는 죽지 않고 소리만 보낸다 (영상 멈춤). 여유의 절반이 남았을 때 미리 갈아탄다 (공백 약 1.4초)
+            started = float(p.st.get("ffmpeg_started_at") or 0)
+            if started and time.time() - started >= self._playlist_limit():
+                if time.time() - self.last_planned < gap:
+                    return
+                self.last_planned = time.time()
+                self.incident(lv.id, "planned_restart", note="재생목록 갱신", peer=p.st.get("peer"))
+                p.restart("일일 재시작 (재생목록이 끝나기 전에 새로)")
                 continue
             end = lv.timer_end_at(self.session(lv.id).get("started_at"))
             if end and end - time.time() < 26 * 3600:

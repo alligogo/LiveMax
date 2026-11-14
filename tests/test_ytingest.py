@@ -191,3 +191,27 @@ def test_trace_on_rtt_spike_twice(paths, monkeypatch):
     with db.session(paths.db) as c:
         row = c.execute("SELECT ip, rtt_base, rtt_now, text FROM traces").fetchone()
     assert row["ip"] == "64.233.178.134" and "비교" in row["text"]
+
+
+def test_in_use_ip_is_kept_and_near_shortage_recollects(paths):
+    """v2.25 (11-15): 8.7ms 로 라이브를 잘 보내던 IP 가 'DNS 에 48시간 안 보임' 으로 모음에서 빠져 가까운 IP 가 4곳 → 2곳.
+    붙어서 쓰는 중인 IP 는 안 빼고, 가까운 IP 가 4곳 아래면 (먼 IP 가 숫자를 채워도) 다시 모은다."""
+    h = "a.rtmps.youtube.com"
+    rt = {"74.125.197.134": 2.4, "64.233.178.134": 8.8, "192.178.192.134": 8.7, "142.250.139.134": 8.9,
+          "142.250.69.44": 67.0, "142.250.69.140": 65.8, "142.250.69.76": 65.5}
+    dns, doh, peers = [sorted(rt)], [[]], {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h_, p: list(dns[0]), doh=lambda h_: list(doh[0]),
+                               tls_ok=lambda ip, h_, p: (True, rt[ip]), sleep=lambda s: None)
+    pool.refresh(h, 443, now=1000.0)
+    assert len(pool.near(h, 443)) == 4
+    peers["live1"] = "192.178.192.134"  # 이 IP 로 송출 중
+    dns[0] = ["74.125.197.134", "64.233.178.134", "142.250.69.44", "142.250.69.140", "142.250.69.76"]  # DNS 가 2곳을 더는 안 알려 줌
+    pool.refresh(h, 443, now=1000.0 + ytingest.POOL_TTL_S + 10)
+    assert "192.178.192.134" in pool.healthy(h, 443)       # 쓰는 중 → 남김
+    assert "142.250.139.134" not in pool.healthy(h, 443)   # 안 쓰고 48시간 안 보임 → 뺌
+    assert len(pool.healthy(h, 443)) == 6 and len(pool.near(h, 443)) == 3
+    doh[0] = ["142.250.139.134"]  # 공개 DNS 는 아직 알려 줌
+    pool.ensure(h, 443)           # 전체는 6곳이라 예전엔 안 모았다 — 가까운 곳이 3곳이라 모은다
+    assert len(pool.near(h, 443)) == 4 and "142.250.139.134" in pool.near(h, 443)
+    peers["live2"] = "9.9.9.9"    # 모음 밖 IP 에 붙은 라이브는 '먼 곳(자정에 옮김)' 으로 세지 않는다 (옮김 대상이 아님)
+    assert pool.summary()["far_used"] == 0

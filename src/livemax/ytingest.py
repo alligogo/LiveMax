@@ -144,11 +144,21 @@ class IngestPool:
             fresh = self._resolve(host, port)
         except OSError:
             fresh = []
+        try:
+            used = self.load()
+        except Exception:  # noqa: BLE001
+            used = {}
         with self.lock:
             pool = self.hosts.setdefault(key, {})
             for ip in fresh:
                 e = pool.setdefault(ip, {"seen": now, "ok": True, "checked": None})  # None = 아직 확인 안 함
                 e["seen"] = now
+            # v2.25: 라이브가 붙어 잘 가고 있는 IP 는 '본 것' 으로 친다 — DNS 가 48시간 안 알려 줬다고 빼지 않는다
+            # (11-15: 8.7ms 로 16개를 보내던 IP 2곳이 모음에서 빠져 가까운 IP 가 4곳 → 2곳)
+            for ip, n in used.items():
+                e = pool.get(ip)
+                if n and e is not None and e.get("ok", True):
+                    e["seen"] = now
             for ip in [ip for ip, e in pool.items() if now - float(e.get("seen", 0)) > POOL_TTL_S]:
                 del pool[ip]
             todo = [ip for ip, e in pool.items()
@@ -170,10 +180,10 @@ class IngestPool:
         """모음이 MIN_IPS 보다 적으면 넉넉히 모은다: 시스템 DNS 를 몇 번 더 묻고 공개 DNS 에도 묻고, 새 IP 는 TLS 인사로 바로 확인.
         업데이트 직후 처음 고를 때 한 번 (몇 초) — 그 사이 다른 라이브는 기다렸다가 같은 결과를 쓴다."""
         key = f"{host}:{port}"
-        if len(self.healthy(host, port)) >= MIN_IPS:
+        if self._enough(host, port):
             return
         with self._boot_lock:
-            if len(self.healthy(host, port)) >= MIN_IPS or time.time() - self._boot_at.get(key, 0) < BOOT_COOLDOWN_S:
+            if self._enough(host, port) or time.time() - self._boot_at.get(key, 0) < BOOT_COOLDOWN_S:
                 return
             self._boot_at[key] = time.time()
             found: set[str] = set()
@@ -209,6 +219,10 @@ class IngestPool:
             with self.lock:
                 self._save()
             log.info("유튜브 수신 IP 넉넉히 모음: %d곳 (새로 %d곳)", len(self.healthy(host, port)), len(new))
+
+    def _enough(self, host: str, port: int) -> bool:
+        """v2.25: '가깝고 빠른' IP 가 MIN_IPS 이상인가 (먼 IP 가 숫자만 채우고 있으면 부족한 것 — 그래야 다시 모은다)."""
+        return len(self.healthy(host, port)) >= MIN_IPS and len(self.near(host, port)) >= MIN_IPS
 
     def rtt_of(self, host: str, port: int) -> dict[str, float]:
         with self.lock:
@@ -410,7 +424,7 @@ class IngestPool:
         crowded = bool(total) and len(sload) >= 2 and smax > fair + max(3, -(-fair // 4))
         return {"ips": len(ips), "near": len(near), "used": len(used), "load": dict(sorted(used.items(), key=lambda x: -x[1])),
                 "max": mx, "total": total, "fair": fair, "crowded": crowded,
-                "far_used": sum(n for ip, n in used.items() if near and ip not in near), "rtt": rtt,
+                "far_used": sum(n for ip, n in used.items() if near and ip in ips and ip not in near), "rtt": rtt,
                 "site_of": site_of, "site_load": sload, "site_max": smax}
 
     def check_spikes(self, now: float | None = None) -> list[str]:

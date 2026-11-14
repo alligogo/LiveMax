@@ -112,3 +112,20 @@ def test_same_site_is_path_congestion_not_line(paths, settings):
     assert len(rep["episodes"]) == 1 and rep["episodes"][0]["n"] == 22 and rep["server"]["auto_moves"] == 1
     title, body = health.message(rep)
     assert title.endswith("정상 28/50") and "사건 1번" in body and "지역 B" in body
+
+
+def test_handoff_gap_is_recorded_not_judged_and_no_video_is_ours(paths, settings):
+    """v2.25: 재시작 공백(유튜브 연결은 유지, 약 1.4초)은 '서버 상태' 숫자로만 — 판정·사건 목록엔 안 넣는다.
+    재생목록이 끝나 소리만 나간 '영상 없음' 은 우리 프로그램 문제 ✗."""
+    end = time.time()
+    with db.session(paths.db) as c:
+        _metrics(c, end - 86400, end)
+        for i, g in enumerate((1.2, 1.4, 1.6)):
+            _ins(c, end - 7200 + i * 120, f"live{i}", "handoff", sec=g)
+        rep = health.compute(c, settings, end)
+        assert rep["verdict"] == "ok" and rep["events"] == []
+        s = rep["server"]
+        assert (s["handoff_n"], s["handoff_avg"], s["handoff_max"]) == (3, 1.4, 1.6)
+        _ins(c, end - 3600, "live9", "no_video", sec=8)
+        rep = health.compute(c, settings, end)
+    assert rep["verdict"] == "bad" and rep["causes"] == {"우리 프로그램": 1}

@@ -635,3 +635,39 @@ def test_auto_move_rule(tmp_path: Path):
     assert r.auto_target is None                               # 10분 안엔 다시 안 옮김
     r._maybe_auto_move(8.0, 1000.0 + rr.AUTO_MOVE_COOLDOWN_S + 1)
     assert r.auto_target == "2.2.2.2"
+
+
+def test_relay_reports_missing_video(monkeypatch):
+    """v2.25: 재생목록이 끝나면 ffmpeg 는 죽지 않고 소리만 보낸다 — 소리만 오고 영상이 8초 없으면 'no_video' 한 번."""
+    events = []
+    monkeypatch.setattr(rr, "_emit", lambda e: events.append(e) if e["event"] != "stats" else None)
+    r = rr.Relay({})
+    r.busy = True
+    r.feed = rr.Feed(r.stats)
+    w = r._watch_state(0.0)
+    t = 0.0
+
+    def tick(video=30):
+        nonlocal t
+        t += 1
+        r.stats["v"] += video
+        r.stats["a"] += 43
+        r.stats["in"] += 20_000
+        r.stats["out"] += 20_000
+        r._watch_step(w, t)
+
+    for _ in range(20):
+        tick()
+    for _ in range(7):
+        tick(video=0)
+    assert events == []
+    tick(video=0)
+    assert events == [{"event": "no_video", "sec": 8}]
+    for _ in range(5):
+        tick(video=0)
+    assert len(events) == 1  # 한 번만
+    for _ in range(3):
+        tick()
+    for _ in range(8):
+        tick(video=0)
+    assert len(events) == 2  # 영상이 돌아왔다가 다시 없어지면 다시

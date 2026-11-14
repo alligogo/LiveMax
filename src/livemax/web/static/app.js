@@ -1588,7 +1588,7 @@ function serverCard(s, card) {
 // ------------------------------------------------------------------ 건강검진 (v2.19)
 // 판정은 '시청자가 끊김·무음을 겪었을 가능성' 기준. 서버 숫자는 최적화 참고로 따로 (접힘).
 const HV = { ok: ["✓", "정상"], warn: ["△", "주의"], bad: ["✗", "시청자 영향"] };
-const H_KIND = { slow: "밀림", reconnect: "유튜브 재접속", no_audio: "소리 없음", no_input: "입력 없음", stall: "중계기 멈춤", down: "송출 중단",
+const H_KIND = { slow: "밀림", reconnect: "유튜브 재접속", no_audio: "소리 없음", no_video: "영상 없음", no_input: "입력 없음", stall: "중계기 멈춤", down: "송출 중단",
   ffmpeg_exit: "송출 프로그램 예상 밖 종료", ip_move: "유튜브 IP 옮김 (계획)" };
 let HEALTH_SEL = null, HEALTH_ITEM = "bad";
 // 가동률: 영향이 없으면 100%, 있으면 99.9986% 처럼 필요한 자리까지만 (v2.20)
@@ -1711,6 +1711,7 @@ function renderHealth(root, d) {
             + (ing.far_used ? ` · 먼 곳에 ${ing.far_used}개 (자정에 옮김)` : "")],
         ...(ing.site_load && Object.keys(ing.site_load).length ? [["유튜브 지역", Object.entries(ing.site_load).map(([k, n]) => `${k} ${n}개`).join(" · ")]] : []),
         ...(s.auto_moves ? [["막히기 전에 옮김", `${s.auto_moves}번 (밀림이 6초 넘어 다른 지역으로)`]] : []),
+        ...(s.handoff_n ? [["재시작 공백", `평균 ${s.handoff_avg}초 · 최고 ${s.handoff_max}초 (${s.handoff_n}번 — 유튜브 연결은 유지)`]] : []),
         ["라이브", s.lives_max ? (s.lives_avg < s.lives_max ? `${s.lives_max}개 송출 (평균 ${s.lives_avg})` : `${s.lives_max}개 송출`) : `평균 ${s.lives_avg}개 송출`]]
         .map(([k, v]) => h("div", {}, h("span", {}, k), h("b", {}, v)))));
   // 길 추적 (E, v2.23): 그날 왕복이 튄 순간 저장한 mtr — 막힌 곳이 OVH 안·중간 통신사·구글 입구 중 어디인지
