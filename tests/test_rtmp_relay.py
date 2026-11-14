@@ -1,5 +1,6 @@
 """새 송출 중계기(lmrelay): RTMP 조각·확장 타임스탬프·AMF·FLV 파싱, 그리고 실제 ffmpeg RTMP 서버로 중계."""
 
+import asyncio
 import json
 import shutil
 import socket
@@ -522,9 +523,11 @@ def _stall_case(tmp_path: Path, rtt_now: dict):
     """가짜 유튜브 두 지역(127.0.0.1 = 지역 0, 127.0.0.2 = 지역 1). 송출 중 지역 0 을 얼려(SIGSTOP) 길이 막힌 상황을 만든다."""
     import signal as _sig
 
-    clip = tmp_path / "v.mp4"  # 높은 비트레이트(커널 버퍼가 금방 차게) — 11-14 02:23 처럼 쓰기가 막히는 상황
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30", "-f", "lavfi",
-                    "-i", "sine=f=440:sample_rate=48000", "-t", "30", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "8",
+    clip = tmp_path / "v.mp4"  # 잡음 영상 약 66Mbps — 커널 버퍼가 큰 환경(CI, 최대 약 36MB)에서도 몇 초 안에 차서 쓰기가 막히게
+    # (약 9Mbps 로는 CI 의 큰 버퍼에 30초치가 다 들어가 '막힘' 이 재현 안 됐다)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "nullsrc=s=640x360:r=30,geq=lum='random(1)*255':cb=128:cr=128,format=yuv420p", "-f", "lavfi",
+                    "-i", "sine=f=440:sample_rate=48000", "-t", "30", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "12",
                     "-g", "30", "-bf", "0", "-c:a", "aac", "-shortest", str(clip)], check=True)
     sink_port, relay_port = _free_port(), _free_port()
     outs = {ip: tmp_path / f"out-{ip}.flv" for ip in ("127.0.0.1", "127.0.0.2")}
@@ -569,9 +572,11 @@ def test_relay_moves_to_other_site_before_it_gets_bad(tmp_path: Path):
     (11-14 02:23: 22개가 10~26초 밀리고 6개는 재접속 13~17초)"""
     rc, text, events, out2 = _stall_case(tmp_path, rtt_now={"127.0.0.1": 25.0, "127.0.0.2": 9.0})
     assert rc == 0  # ffmpeg 는 끝까지 (재시작 없음)
-    assert "막히기 전에 다른 지역으로 옮김: 127.0.0.1 → 127.0.0.2" in text
+    # 어느 쪽이 먼저든(C: 밀림 6초 / A: 쓰기 막힘 — 비트레이트·커널 버퍼 크기에 따라 다름) 다른 지역으로 빨리 넘어가야 한다
+    assert ("막히기 전에 다른 지역으로 옮김: 127.0.0.1 → 127.0.0.2" in text
+            or "쓰기가 막힌 지역을 건너뜀: 127.0.0.1 → 127.0.0.2" in text), text
     rec = [e for e in events if e.get("event") == "reconnect"]
-    assert rec and rec[-1]["auto"] is True and rec[-1]["gap"] < 3
+    assert rec and rec[-1]["gap"] < 3, text
     slow_end = [e for e in events if e.get("event") == "slow_end"]
     assert not slow_end or max(e["max_delay"] for e in slow_end) < 9  # 유튜브 '나쁨'(9초대) 전에 피함
     dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out2), "-f", "null", "-"], capture_output=True, text=True)
@@ -585,6 +590,44 @@ def test_relay_stalled_write_skips_graceful_close_and_blocked_site(tmp_path: Pat
     rc, text, events, out2 = _stall_case(tmp_path, rtt_now={"127.0.0.1": 25.0, "127.0.0.2": 40.0})
     assert rc == 0
     assert "막히기 전에" not in text  # 다른 지역도 느려 보임 → 미리 옮기지 않음
-    assert "쓰기가 막힌 지역을 건너뜀: 127.0.0.1 → 127.0.0.2" in text
+    assert "쓰기가 막힌 지역을 건너뜀: 127.0.0.1 → 127.0.0.2" in text, text
     rec = [e for e in events if e.get("event") == "reconnect"]
     assert rec and rec[-1]["auto"] is False and rec[-1]["gap"] < 3  # 예전: 17.5초
+
+
+
+def test_auto_move_rule(tmp_path: Path):
+    """v2.23 C 규칙: 밀림 6초 이상 + 다른 지역 지금 왕복이 정상 → 그 지역 IP 를 골라 지금 연결을 끊음.
+    다른 지역도 느리면 안 옮김(우리 회선일 수 있음), 6초 미만이면 안 옮김, 한 번 옮기면 10분은 다시 안 옮김."""
+    load = tmp_path / "load.json"
+
+    def write(rtt_now):
+        load.write_text(json.dumps({"hosts": {"a:443": {
+            "ips": ["1.1.1.1", "2.2.2.2"], "load": {"1.1.1.1": 25, "2.2.2.2": 25}, "site": {"1.1.1.1": 0, "2.2.2.2": 1},
+            "rtt_base": {"1.1.1.1": 9.0, "2.2.2.2": 2.4}, "rtt_now": rtt_now}}}))
+
+    class Pub:
+        def __init__(self):
+            self.closed, self.aborted = asyncio.Event(), False
+
+        def abort(self):
+            self.aborted = True
+            self.closed.set()
+
+    r = rr.Relay({"listen_port": 0, "host": "a", "port": 443, "app": "live2", "key": "k", "tcurl": "", "tls": True,
+                          "connect_addr": "1.1.1.1", "load_file": str(load)})
+    r.busy, r.pub = True, Pub()
+    write({"1.1.1.1": 25.0, "2.2.2.2": 2.5})
+    r._maybe_auto_move(5.9, 1000.0)
+    assert r.auto_target is None and not r.pub.aborted        # 6초 미만
+    write({"1.1.1.1": 25.0, "2.2.2.2": 9.0})                   # 다른 지역도 기준(2.4)의 1.6배·+5ms 넘게 느림
+    r._maybe_auto_move(7.0, 1000.0)
+    assert r.auto_target is None and not r.pub.aborted
+    write({"1.1.1.1": 25.0, "2.2.2.2": 2.6})
+    r._maybe_auto_move(7.0, 1000.0)
+    assert r.auto_target == "2.2.2.2" and r.pub.aborted        # 옮김
+    r.auto_target, r.pub = None, Pub()
+    r._maybe_auto_move(8.0, 1300.0)
+    assert r.auto_target is None                               # 10분 안엔 다시 안 옮김
+    r._maybe_auto_move(8.0, 1000.0 + rr.AUTO_MOVE_COOLDOWN_S + 1)
+    assert r.auto_target == "2.2.2.2"
