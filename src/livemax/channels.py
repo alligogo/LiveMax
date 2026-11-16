@@ -54,6 +54,7 @@ class Channel:
     logo_ver: int = 0       # 로고를 바꿀 때마다 +1 (브라우저 캐시 갱신용)
     keys: list[dict] = field(default_factory=list)   # [{id, label, created_at}]
     created_at: float = 0.0
+    order: int = 0          # v2.27 화면 순서 (라이브 화면·채널 메뉴 공통, ▲▼). 0 = 아직 안 정함 → 만든 번호 순
     restart_kst: str = ""   # v2.26 일일 재시작 시각 (한국 시간 HH:MM, 빈 값 = 기본 시각). 채널 안 라이브는 2분 간격
 
     @property
@@ -63,7 +64,7 @@ class Channel:
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "description": self.description, "url": self.url,
                 "logo": self.logo, "logo_ver": self.logo_ver, "keys": [dict(k) for k in self.keys],
-                "created_at": self.created_at, "restart_kst": self.restart_kst}
+                "created_at": self.created_at, "restart_kst": self.restart_kst, "order": int(self.order or 0)}
 
     def validate(self) -> None:
         if not CH_ID_RE.match(self.id):
@@ -115,7 +116,20 @@ class ChannelStore:
                     out.append(_from_dict(read_yaml_cached(p)))
                 except Exception:  # noqa: BLE001
                     continue
-        return sorted(out, key=lambda c: c.number)
+        return sorted(out, key=lambda c: (int(c.order or 0) if int(c.order or 0) > 0 else 100000 + c.number, c.number))
+
+    def move(self, cid: str, delta: int) -> bool:
+        """채널 순서를 한 칸 위(-1)·아래(+1)로 (v2.27). 처음 옮길 때 지금 보이는 순서대로 1, 2, 3 … 을 매긴다."""
+        lst = self.all()
+        i = next((k for k, c in enumerate(lst) if c.id == cid), None)
+        if i is None or not 0 <= i + delta < len(lst):
+            return False
+        lst[i], lst[i + delta] = lst[i + delta], lst[i]
+        for k, c in enumerate(lst, 1):
+            if c.order != k:
+                c.order = k
+                self.save(c)
+        return True
 
     def get(self, cid: str) -> Channel | None:
         if not CH_ID_RE.match(cid or ""):

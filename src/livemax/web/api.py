@@ -389,6 +389,20 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             return err(str(e))
         return {"ok": True}
 
+    @app.post("/api/channels/{cid}/move")
+    def channel_move(cid: str, b: dict = Body(default={})):
+        """채널 순서 ▲▼ (v2.27 — 라이브 화면·채널 메뉴 공통)."""
+        if not chstore.get(cid):
+            return err("채널 없음", 404)
+        d = {"up": -1, "down": 1}.get(str(b.get("dir")))
+        if d is None:
+            return err("방향 오류")
+        try:
+            moved = chstore.move(cid, d)
+        except ConfigError as e:
+            return err(str(e))
+        return {"ok": True, "moved": moved}
+
     @app.delete("/api/channels/{cid}")
     def channel_delete(request: Request, cid: str):
         c = chstore.get(cid)
@@ -1413,7 +1427,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return err("'영향 가능' 기준은 '시청자 영향' 기준보다 작아야 합니다")
             config.save_settings_override(paths, ["health"], hc)
             settings["health"] = hc
-        if b.get("lives_sort") in ("name", "new"):  # v2.26 라이브 화면 정렬 (이름순 | 최신순)
+        if b.get("lives_sort") in ("name", "new", "old"):  # 라이브 화면 정렬 (이름순 | 최신순 | 오래된순)
             config.save_settings_override(paths, ["ui", "lives_sort"], b["lives_sort"])
             settings.setdefault("ui", {})["lives_sort"] = b["lives_sort"]
         if b.get("lives_view") in ("grid", "list", "cctv"):

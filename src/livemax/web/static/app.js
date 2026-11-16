@@ -272,10 +272,26 @@ function openCamDetail(id) {
 
 // 라이브 보기 방식: grid(블록, 기본) | list(목록, 쇼핑몰처럼) | cctv(관제 — 썸네일만 작게 한 줄 5개). 서버 설정에 저장되어 PC·휴대폰 어디서나 같게
 let LIVES_VIEW = "grid";
-// 라이브 정렬 (v2.26): name(이름순 — LIVE 2 < LIVE 10) | new(최신순 — 새로 만든 것 위). 채널 묶음 안에서, 채널끼리도 같은 기준. 서버에 저장
+// 라이브 정렬 (v2.27): name(이름순 — LIVE 2 < LIVE 10) | new(최신순) | old(오래된순). 채널 묶음 '안' 에서만 — 채널 순서는 채널 메뉴의 ▲▼ (공통). 서버에 저장
 let LIVES_SORT = "name";
+let VIEW_MENU = false;  // 정렬·보기 메뉴가 펼쳐져 있는지 (몇 초마다 다시 그려도 유지)
+const SORTS = [["name", "이름순"], ["new", "최신순"], ["old", "오래된순"]];
+const VIEWS = [["grid", "블록 보기"], ["list", "목록 보기"], ["cctv", "관제 보기 (CCTV)"]];
 const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko", { numeric: true, sensitivity: "base" });
-const livesCmp = () => (LIVES_SORT === "new" ? (a, b) => (b.created_at || 0) - (a.created_at || 0) || byName(a, b) : byName);
+const livesCmp = () => (LIVES_SORT === "new" ? (a, b) => (b.created_at || 0) - (a.created_at || 0) || byName(a, b)
+  : LIVES_SORT === "old" ? (a, b) => (a.created_at || 0) - (b.created_at || 0) || byName(a, b) : byName);
+document.addEventListener("click", (e) => {  // 메뉴 밖을 누르면 닫힘
+  if (VIEW_MENU && !e.target.closest(".vmenu")) { VIEW_MENU = false; document.querySelectorAll(".vmenu.open").forEach((m) => m.classList.remove("open")); }
+});
+// 채널 순서 ▲▼ (라이브 화면·채널 메뉴 공통 — 채널에 저장)
+async function moveChannel(cid, dir, after) {
+  try { await api("POST", `/api/channels/${cid}/move`, { dir }); after(); } catch (e) { toast(e.message, true); }
+}
+const chMoveBtns = (c, i, n, after) => h("span", { class: "ch-move" },
+  h("button", { type: "button", class: "btn sm ghost", title: "채널 순서 위로 (라이브 화면·채널 메뉴 공통)", "aria-label": "채널 위로", disabled: i === 0,
+    onclick: (e) => { e.preventDefault(); moveChannel(c.id, "up", after); } }, "▲"),
+  h("button", { type: "button", class: "btn sm ghost", title: "채널 순서 아래로 (라이브 화면·채널 메뉴 공통)", "aria-label": "채널 아래로", disabled: i === n - 1,
+    onclick: (e) => { e.preventDefault(); moveChannel(c.id, "down", after); } }, "▼"));
 
 function renderLives(grid, ov) {
   const now = ov.server_time;
@@ -390,39 +406,43 @@ function renderLives(grid, ov) {
   }
   // 채널별로 묶어서: 채널 머리줄(로고·이름 ──── 설명) 아래에 그 채널의 라이브들
   const cmp = livesCmp();
-  const groups = (ov.channels || []).slice().sort(cmp).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id).sort(cmp) }))
+  const groups = (ov.channels || []).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id).sort(cmp) }))
     .filter((g) => g.lives.length);
   const orphan = ov.lives.filter((l) => !chById[l.channel_id]).sort(cmp);
   if (orphan.length) groups.push({ ch: null, lives: orphan });
   const body = (lives) => LIVES_VIEW === "list" ? h("div", { class: "rows" }, lives.map(row))
     : LIVES_VIEW === "cctv" ? h("div", { class: "cams" }, h("div", { class: "cam-grid" }, lives.map(cam)))
     : h("div", { class: "grid" }, lives.map(card));
-  const sections = groups.map((g) => h("section", { class: "ch-group" },
+  const sections = groups.map((g, gi) => h("section", { class: "ch-group" },
     h("div", { class: "ch-head" },
       g.ch ? chLink(g.ch, "ch-name", chLogo(g.ch, 40), h("span", {}, g.ch.name)) : h("span", { class: "ch-name muted" }, "채널 미지정"),
       h("span", { class: "ch-count", title: "이 채널의 라이브 수 (유튜브는 채널당 동시 송출 10개까지)" }, `${g.lives.length}개`),
       h("span", { class: "ch-rule" }),
-      g.ch && g.ch.description ? h("span", { class: "ch-desc" }, g.ch.description) : null),
+      g.ch && g.ch.description ? h("span", { class: "ch-desc" }, g.ch.description) : null,
+      g.ch ? chMoveBtns(g.ch, gi, groups.filter((x) => x.ch).length, softRefresh) : null),
     body(g.lives)));
   if (!sections.length) sections.push(h("div", { class: "card empty" }, h("div", { class: "card-body" },
     h("b", {}, "아직 라이브가 없습니다"), h("p", { class: "muted" }, "① 채널 메뉴에서 채널과 스트림 키 등록 → ② 비디오·음악 올리기 → ③ '라이브 추가'"))));
-  const viewBtn = (v, label) => h("button", { type: "button", class: LIVES_VIEW === v ? "on" : "", title: label, "aria-label": label, html: ICON[v],
+  // 정렬·보기: 아이콘 하나 → 누르면 펼쳐서 고름 (관제 요약 칸이 좁아지지 않게). 고른 것은 ✓ 표시 (색만으로 구분하지 않음)
+  const pick = (cur, v, label, key, icon) => h("button", { type: "button", class: cur === v ? "on" : "", role: "menuitemradio", "aria-checked": String(cur === v),
     onclick: async () => {
-      if (LIVES_VIEW === v) return;
-      LIVES_VIEW = v; renderLives(grid, ov);
-      try { await api("PUT", "/api/system/settings", { lives_view: v }); } catch (e) { /* 표시만 바뀌고 저장은 다음에 */ }
-    } });
-  const sortBtn = (v, label, tip) => h("button", { type: "button", class: LIVES_SORT === v ? "on" : "", title: tip,
-    onclick: async () => {
-      if (LIVES_SORT === v) return;
-      LIVES_SORT = v; renderLives(grid, ov);
-      try { await api("PUT", "/api/system/settings", { lives_sort: v }); } catch (e) { /* 표시만 바뀌고 저장은 다음에 */ }
-    } }, label);
+      VIEW_MENU = false;
+      if (cur === v) { renderLives(grid, ov); return; }
+      if (key === "lives_sort") LIVES_SORT = v; else LIVES_VIEW = v;
+      renderLives(grid, ov);
+      try { await api("PUT", "/api/system/settings", { [key]: v }); } catch (e) { /* 표시만 바뀌고 저장은 다음에 */ }
+    } }, h("span", { class: "ck" }, cur === v ? "✓" : ""), icon ? h("span", { class: "vm-ic", html: ICON[icon] }) : null, label);
+  const vmenu = h("div", { class: "vmenu" + (VIEW_MENU ? " open" : "") },
+    h("button", { type: "button", class: "vmenu-btn", title: "정렬·보기 방식", "aria-label": "정렬·보기 방식", "aria-haspopup": "menu",
+      onclick: (e) => { e.stopPropagation(); VIEW_MENU = !VIEW_MENU; e.currentTarget.parentElement.classList.toggle("open", VIEW_MENU); } },
+      h("span", { html: ICON[LIVES_VIEW] || ICON.grid }), h("span", { class: "vm-cur" }, (SORTS.find((x) => x[0] === LIVES_SORT) || SORTS[0])[1]), h("span", { class: "vm-caret" }, "▾")),
+    h("div", { class: "vmenu-pop", role: "menu" },
+      h("div", { class: "vm-h" }, "정렬 (채널 안에서)"), ...SORTS.map(([v, l]) => pick(LIVES_SORT, v, l, "lives_sort")),
+      h("div", { class: "vm-h" }, "보기"), ...VIEWS.map(([v, l]) => pick(LIVES_VIEW, v, l, "lives_view", v)),
+      h("div", { class: "vm-foot" }, "채널 순서는 채널 줄 오른쪽 ▲▼")));
   // 맨 위 한 줄: [미니 관제 | 보기 전환]. 좁은 화면에서는 관제 → 라이브 추가 → (라이브 N개 · 보기 전환) 순서로 쌓인다
   const bar = ov.lives.length ? h("div", { class: "viewbar" }, pulseBox(ov), addBtn("m-only"),
-    h("span", { class: "vb-count muted small" }, `라이브 ${ov.lives.length}개`), h("span", { class: "spacer" }),
-    h("div", { class: "seg sort-seg" }, sortBtn("name", "이름순", "이름순 (LIVE 2 → LIVE 10, 채널도 이름순)"), sortBtn("new", "최신순", "새로 만든 라이브·채널이 위로")),
-    h("div", { class: "seg" }, viewBtn("grid", "블록 보기"), viewBtn("list", "목록 보기"), viewBtn("cctv", "관제 보기 (CCTV)"))) : addBtn("m-only");
+    h("span", { class: "vb-count muted small" }, `라이브 ${ov.lives.length}개`), h("span", { class: "spacer" }), vmenu) : addBtn("m-only");
   grid.replaceChildren(bar, ...sections);
 }
 const addBtn = (cls) => h("button", { class: "add-btn " + cls, onclick: () => {
@@ -1359,7 +1379,7 @@ async function showChannels() {
   let list;
   try { list = (await api("GET", "/api/channels")).channels; } catch (e) { toast(e.message, true); return; }
   const STAT = { free: ["사용 가능", "g"], registered: ["등록", ""], live: ["생방중", "r"] };
-  const cards = list.map((c) => {
+  const cards = list.map((c, ci) => {
     const label = h("input", { class: "input", placeholder: "키 이름 (예: 메인 방송)", maxlength: 30, style: "flex:1;min-width:140px" });
     const value = h("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: "유튜브 스튜디오의 스트림 키", style: "flex:2;min-width:180px" });
     const addKey = async (e) => {
@@ -1369,6 +1389,7 @@ async function showChannels() {
     };
     return h("article", { class: "card ch-card" },
       h("div", { class: "card-head" }, chLink(c, "ch-name", chLogo(c, 44), h("span", {}, c.name)), h("span", { class: "spacer" }),
+        chMoveBtns(c, ci, list.length, showChannels),
         h("button", { class: "btn sm ghost", onclick: () => openChannelEditor(c) }, "수정"),
         h("button", { class: "btn sm danger", onclick: () => deleteChannel(c) }, "삭제")),
       h("div", { class: "card-body" },
@@ -1821,7 +1842,7 @@ async function route() {
   try { sess = await api("GET", "/api/session"); } catch (e) { return; }
   setServerName(sess.server_name);
   LIVES_VIEW = ["list", "cctv"].includes(sess.lives_view) ? sess.lives_view : "grid";
-  LIVES_SORT = sess.lives_sort === "new" ? "new" : "name";
+  LIVES_SORT = ["new", "old"].includes(sess.lives_sort) ? sess.lives_sort : "name";
   if (!sess.authenticated) { showLogin(); return; }
   if (sess.must_change) { mount(shell("lives")); showChangePassword(true); return; }
   const r = location.hash.replace(/^#\/?/, "");

@@ -226,3 +226,26 @@ def test_channel_restart_time_and_lives_sort_and_tls_locked(client, paths, setti
     assert client.get("/api/session").json()["lives_sort"] == "new"
     client.put("/api/system/settings", json={"tls_relay": False})
     assert config.load_settings(paths)["output"]["tls_relay"]["enabled"] is True
+
+
+def test_channel_order_moves_and_is_shared(client, paths, settings):
+    """v2.27: 채널 순서 ▲▼ — 라이브 화면(overview)·채널 메뉴 공통, 일일 재시작도 같은 시각이면 이 순서로."""
+    from types import SimpleNamespace as NS
+
+    _ready(client)
+    client.headers.update(ORIGIN)
+    ids = [client.post("/api/channels", json={"name": n}).json()["id"] for n in ("가", "나", "다")]
+    first = [c["id"] for c in client.get("/api/channels").json()["channels"]]
+    assert first[-3:] == ids
+    assert client.post(f"/api/channels/{ids[2]}/move", json={"dir": "up"}).json()["moved"]
+    want = first[:-3] + [ids[0], ids[2], ids[1]]
+    assert [c["id"] for c in client.get("/api/channels").json()["channels"]] == want
+    assert [c["id"] for c in client.get("/api/overview").json()["channels"]] == want
+    assert client.post(f"/api/channels/{want[0]}/move", json={"dir": "up"}).json()["moved"] is False  # 맨 위는 그대로
+    assert client.post(f"/api/channels/{ids[0]}/move", json={"dir": "sideways"}).status_code == 400
+    client.put("/api/system/settings", json={"lives_sort": "old"})
+    assert client.get("/api/session").json()["lives_sort"] == "old"
+    # 재시작: 같은 시각이면 채널 순서대로
+    lv = [make_live(id="live1", name="A", channel_id="chB"), make_live(id="live2", name="A", channel_id="chA")]
+    s = config.restart_schedule(lv, {"chB": NS(restart_kst="04:00"), "chA": NS(restart_kst="04:00")}, settings)
+    assert s["live1"] < s["live2"]

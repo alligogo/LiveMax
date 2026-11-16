@@ -409,7 +409,23 @@ tr.locked td:first-child { color: #fff; }
 .viewbar .seg button { padding: 6px 9px; display: grid; place-items: center; }
 .viewbar .vb-count { display: none; align-self: center; }
 .viewbar > .seg { align-self: center; }
-.viewbar .sort-seg button { font-size: 12px; white-space: nowrap; }
+/* 정렬·보기 메뉴 (v2.27): 아이콘 하나 → 펼침 */
+.vmenu { position: relative; align-self: center; flex: none; }
+.vmenu-btn { display: inline-flex; align-items: center; gap: 7px; background: #1b1b1b; border: 1px solid #3a3a3a; border-radius: 8px; padding: 8px 11px; color: var(--text); font-weight: 600; font-size: 12.5px; white-space: nowrap; cursor: pointer; }
+.vmenu-btn:hover { border-color: #555; }
+.vmenu .vm-caret { color: var(--muted); font-size: 11px; }
+.vmenu-pop { display: none; position: absolute; right: 0; top: calc(100% + 6px); z-index: 60; min-width: 196px; background: #1f1f1f; border: 1px solid #3a3a3a; border-radius: 10px; padding: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+.vmenu.open .vmenu-pop { display: block; }
+.vmenu-pop .vm-h { font-size: 11.5px; color: var(--muted); padding: 8px 8px 4px; }
+.vmenu-pop button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px; background: transparent; border: 0; border-radius: 6px; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
+.vmenu-pop button:hover { background: #2a2a2a; }
+.vmenu-pop button.on { background: var(--sel); color: #fff; font-weight: 700; }
+.vmenu-pop .ck { width: 14px; flex: none; text-align: center; }
+.vmenu-pop .vm-ic { display: inline-grid; place-items: center; }
+.vmenu-pop .vm-foot { font-size: 11px; color: var(--muted); padding: 8px 8px 4px; border-top: 1px solid #2f2f2f; margin-top: 6px; }
+.ch-move { display: inline-flex; gap: 4px; flex: none; }
+.ch-move .btn { padding: 3px 8px; font-size: 11px; line-height: 1.2; }
+.ch-move .btn:disabled { opacity: .3; cursor: default; }
 .viewbar > .spacer { display: none; }  /* 넓은 화면: 관제 박스가 남는 폭을 다 쓴다 */
 .rows { display: grid; gap: 12px; }
 .row-live { display: grid; grid-template-columns: 220px 1fr auto; gap: 16px; padding: 12px; align-items: center; }

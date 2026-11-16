@@ -102,7 +102,7 @@ DEFAULTS: dict[str, Any] = {
                   "upload_mb_per_s": 10},  # 웹 업로드 속도 상한 (서버 부담 줄이기, 모든 업로드 합산)
     "fetch": {"mb_per_s": 20, "allow_private": False},  # 링크로 가져오기: 받는 속도 상한, 내부 주소 허용(테스트용)
     "harbor_port_base": 8101,
-    "ui": {"lives_view": "grid", "lives_sort": "name"},  # lives_sort: name(이름순) | new(최신순) — v2.26  # 라이브 화면 보기 방식: grid(블록) | list(목록) | cctv(관제)
+    "ui": {"lives_view": "grid", "lives_sort": "name"},  # lives_sort: name(이름순) | new(최신순) | old(오래된순) — v2.27  # 라이브 화면 보기 방식: grid(블록) | list(목록) | cctv(관제)
     "audio_shared": True,  # 음악 프로그램(Liquidsoap)을 채널별로 묶음 — 메모리 절약 (DESIGN 11-D 19, v2.14 부터 기본). 재시작 때 적용
     "audio_group_max": 10,  # 음악 묶음 하나에 넣는 라이브 최대 수 (채널 안에서 라이브 번호 순으로 나눔)
     "max_lives": 50,  # 운영 표준 50 (DESIGN 11-E). 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
@@ -204,7 +204,8 @@ def restart_schedule(lives: list, channels: dict, settings: dict) -> dict[str, i
         except ConfigError:
             return default
 
-    order = sorted(lives, key=lambda lv: (base(lv), lv.channel_id or "~", _nat(lv.name), lv.number))
+    rank = {cid: i for i, cid in enumerate(channels)}  # 같은 시각이면 채널 순서(▲▼)대로
+    order = sorted(lives, key=lambda lv: (base(lv), rank.get(lv.channel_id, 10 ** 6), _nat(lv.name), lv.number))
     taken: set[int] = set()
     cursor: dict[str, int] = {}
     out: dict[str, int] = {}
