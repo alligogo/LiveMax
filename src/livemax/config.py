@@ -74,13 +74,13 @@ DEFAULTS: dict[str, Any] = {
         "lm_relay": {"enabled": True},  # 새 중계기 전체 스위치 (끄면 모든 라이브가 기존 방식)
         "audio_connect_timeout": 60,
     },
-    "concat": {"hours": 24, "margin_minutes": 45},
+    "concat": {"hours": 28, "margin_minutes": 45},  # v2.26: 24→28 — 채널 재시작 시각을 늦춰도(4시간까지) 그날 목록이 먼저 끝나지 않게
     "supervisor": {
         "boot_start_gap_seconds": 3,    # 컨테이너 시작 시 라이브 간 시작 간격 (v2.17: 10→3, 50개 약 8분→2.5분. 메모리 빠듯하면 _wait_for_memory 가 더 기다림)
         "restart_backoff_seconds": [1, 3, 10, 30, 60],  # 오래 잘 돌다 끊긴 경우 1초 뒤 재연결
     },
     # 일일 재시작: 15:00 UTC = 한국 자정 (미국 동부 오전 10시·서부 오전 7시 — 수면 음악 청취가 가장 적은 때) + 슬롯×2분
-    "restart": {"base_utc": "15:00", "slot_minutes": 2},
+    "restart": {"base_utc": "19:00", "slot_minutes": 2},  # 채널에 시각을 따로 안 정했을 때 (v2.26: 한국 04:00 — 11-15 시험값)
     "watchdog": {"speed_min": 0.97, "speed_grace_seconds": 60, "stall_seconds": 30,
                  "startup_grace_seconds": 60, "max_restarts_per_hour": 6},
     "collector": {"interval_seconds": 15, "vnstat_interval_seconds": 300},
@@ -102,7 +102,7 @@ DEFAULTS: dict[str, Any] = {
                   "upload_mb_per_s": 10},  # 웹 업로드 속도 상한 (서버 부담 줄이기, 모든 업로드 합산)
     "fetch": {"mb_per_s": 20, "allow_private": False},  # 링크로 가져오기: 받는 속도 상한, 내부 주소 허용(테스트용)
     "harbor_port_base": 8101,
-    "ui": {"lives_view": "grid"},  # 라이브 화면 보기 방식: grid(블록) | list(목록) | cctv(관제)
+    "ui": {"lives_view": "grid", "lives_sort": "name"},  # lives_sort: name(이름순) | new(최신순) — v2.26  # 라이브 화면 보기 방식: grid(블록) | list(목록) | cctv(관제)
     "audio_shared": True,  # 음악 프로그램(Liquidsoap)을 채널별로 묶음 — 메모리 절약 (DESIGN 11-D 19, v2.14 부터 기본). 재시작 때 적용
     "audio_group_max": 10,  # 음악 묶음 하나에 넣는 라이브 최대 수 (채널 안에서 라이브 번호 순으로 나눔)
     "max_lives": 50,  # 운영 표준 50 (DESIGN 11-E). 이 서버에 만들 수 있는 라이브 최대 개수 (안전장치 — 서버 사양에 맞춰 설정에서 조정)
@@ -124,7 +124,9 @@ def load_settings(paths: Paths) -> dict:
     data: dict = {}
     if paths.settings_file.exists():
         data = yaml.safe_load(paths.settings_file.read_text(encoding="utf-8")) or {}
-    return _merge(DEFAULTS, data)
+    s = _merge(DEFAULTS, data)
+    s["output"]["tls_relay"]["enabled"] = True  # v2.26: 설정 화면에서 끄는 칸을 없앰 — 늘 켬 (예전에 꺼 둔 값도 무시)
+    return s
 
 
 def save_settings_override(paths: Paths, key_path: list[str], value: Any) -> None:
@@ -163,13 +165,60 @@ def valid_folder_name(name: str) -> bool:
     return bool(FOLDER_RE.fullmatch(name or "")) and ".." not in name
 
 
+KST_MIN = 9 * 60  # 한국 = UTC+9 (서머타임 없음)
+
+
 def day_start(settings: dict, now: float | None = None) -> float:
-    """'하루'의 시작 = 가장 최근의 하루 재시작 기준 시각 (설정 > 일일 재시작, 기본 UTC 15:00 = 한국 자정).
-    화면의 '(1일)' 숫자(끊김·밀림)는 이 시각에 0 으로 돌아간다 — 사용자가 자정 기준으로 따지기 쉽게."""
+    """'하루'의 시작 = 한국 자정 (v2.26 — 재시작 시각이 채널마다 달라져 기준을 고정).
+    화면의 '(1일)' 숫자(끊김·밀림)·오늘 최고값은 이 시각에 0 으로 돌아간다."""
     now = time.time() if now is None else now
-    base = hhmm_to_minutes(settings["restart"]["base_utc"])
-    t = datetime.fromtimestamp(now, timezone.utc).replace(hour=base // 60, minute=base % 60, second=0, microsecond=0).timestamp()
-    return t if t <= now else t - 86400
+    off = KST_MIN * 60
+    return (now + off) // 86400 * 86400 - off
+
+
+def kst_to_utc_min(hhmm: str) -> int:
+    return (hhmm_to_minutes(hhmm) - KST_MIN) % 1440
+
+
+def utc_min_to_kst(m: int) -> str:
+    k = (int(m) + KST_MIN) % 1440
+    return f"{k // 60:02d}:{k % 60:02d}"
+
+
+def _nat(s: str) -> list:
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", str(s)) if t != ""]
+
+
+def restart_schedule(lives: list, channels: dict, settings: dict) -> dict[str, int]:
+    """v2.26 채널별 일일 재시작: 라이브 → 재시작 시각(UTC, 하루 중 분).
+    채널 시각(한국 시간 입력, 없으면 기본값) 순 → 채널 → 라이브 이름순으로 줄 세워 2분 칸에 하나씩.
+    다른 채널과 겹치면 다음 빈 칸으로 밀린다 — 서버 전체에서 두 라이브가 같은 2분에 재시작하지 않는다."""
+    step = max(1, int(settings["restart"]["slot_minutes"]))
+    n = 1440 // step
+    default = hhmm_to_minutes(settings["restart"]["base_utc"])
+
+    def base(lv) -> int:
+        ch = channels.get(lv.channel_id) if lv.channel_id else None
+        try:
+            return kst_to_utc_min(ch.restart_kst) if ch is not None and getattr(ch, "restart_kst", "") else default
+        except ConfigError:
+            return default
+
+    order = sorted(lives, key=lambda lv: (base(lv), lv.channel_id or "~", _nat(lv.name), lv.number))
+    taken: set[int] = set()
+    cursor: dict[str, int] = {}
+    out: dict[str, int] = {}
+    for lv in order:
+        s = cursor.get(lv.channel_id or "", base(lv) // step)
+        for _ in range(n):
+            if s % n not in taken:
+                break
+            s += 1
+        s %= n
+        taken.add(s)
+        cursor[lv.channel_id or ""] = s + 1
+        out[lv.id] = s * step
+    return out
 
 
 def hhmm_to_minutes(s: str) -> int:
@@ -229,14 +278,17 @@ class Live:
             return float(self.timer_until)
         return None
 
-    def restart_time_utc(self, settings: dict) -> str:
-        base = hhmm_to_minutes(settings["restart"]["base_utc"])
-        m = (base + self.restart_slot * int(settings["restart"]["slot_minutes"])) % 1440
+    def restart_time_utc(self, settings: dict, minutes: int | None = None) -> str:
+        """minutes: restart_schedule() 가 정한 시각 (v2.26 채널별). 없으면 예전 방식 (기본 시각 + 슬롯×2분)."""
+        if minutes is None:
+            base = hhmm_to_minutes(settings["restart"]["base_utc"])
+            minutes = base + self.restart_slot * int(settings["restart"]["slot_minutes"])
+        m = int(minutes) % 1440
         return f"{m // 60:02d}:{m % 60:02d}"
 
-    def next_restart(self, settings: dict, now: datetime | None = None) -> datetime:
+    def next_restart(self, settings: dict, now: datetime | None = None, minutes: int | None = None) -> datetime:
         now = now or datetime.now(timezone.utc)
-        h, m = map(int, self.restart_time_utc(settings).split(":"))
+        h, m = map(int, self.restart_time_utc(settings, minutes).split(":"))
         t = now.replace(hour=h, minute=m, second=0, microsecond=0)
         return t if t > now else t + timedelta(days=1)
 

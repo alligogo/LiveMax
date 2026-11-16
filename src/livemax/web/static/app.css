@@ -409,6 +409,7 @@ tr.locked td:first-child { color: #fff; }
 .viewbar .seg button { padding: 6px 9px; display: grid; place-items: center; }
 .viewbar .vb-count { display: none; align-self: center; }
 .viewbar > .seg { align-self: center; }
+.viewbar .sort-seg button { font-size: 12px; white-space: nowrap; }
 .viewbar > .spacer { display: none; }  /* 넓은 화면: 관제 박스가 남는 폭을 다 쓴다 */
 .rows { display: grid; gap: 12px; }
 .row-live { display: grid; grid-template-columns: 220px 1fr auto; gap: 16px; padding: 12px; align-items: center; }

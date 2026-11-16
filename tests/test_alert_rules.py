@@ -92,9 +92,10 @@ def test_live_log_uses_readable_name(paths, settings):
     assert "[OVH1 · LIVE 2 · live2] 테스트 줄" in line
 
 
-def test_day_start_is_last_daily_restart_base(settings):
+def test_day_start_is_korean_midnight(settings):
+    """v2.26: '하루' 는 한국 자정부터 (재시작 시각이 채널마다 달라져 고정). 재시작 기본 시각을 바꿔도 그대로."""
     from datetime import datetime, timezone
-    settings["restart"]["base_utc"] = "15:00"  # 한국 자정
+    settings["restart"]["base_utc"] = "19:00"
     t = datetime(2026, 11, 7, 3, 0, tzinfo=timezone.utc).timestamp()   # 한국 12:00 → 그날 자정(전날 15:00 UTC)
     assert config.day_start(settings, t) == datetime(2026, 11, 6, 15, 0, tzinfo=timezone.utc).timestamp()
     t2 = datetime(2026, 11, 7, 15, 30, tzinfo=timezone.utc).timestamp()  # 한국 00:30 → 30분 전 자정

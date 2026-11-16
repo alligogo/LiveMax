@@ -205,3 +205,24 @@ def test_4k_live_takes_two_slots(client, paths):
     lid = r.json()["id"]
     r = client.put(f"/api/lives/{lid}", headers=ORIGIN, json={"video_folders": ["4K Rain"], "apply": "later"})
     assert r.status_code == 400 and "4K 라 2칸" in r.json()["error"]
+
+
+def test_channel_restart_time_and_lives_sort_and_tls_locked(client, paths, settings):
+    """v2.26: 채널마다 일일 재시작 시각(한국) · 라이브 화면 정렬 저장 · TLS 중계는 늘 켬."""
+    from livemax import config
+
+    _ready(client)
+    client.headers.update(ORIGIN)
+    r = client.post("/api/channels", json={"name": "재즈", "restart_kst": "05:30"}).json()
+    cid = r["id"]
+    ch = next(c for c in client.get("/api/channels").json()["channels"] if c["id"] == cid)
+    assert ch["restart_kst"] == "05:30" and ch["restart_times"] == []
+    assert client.put(f"/api/channels/{cid}", json={"restart_kst": "25:00"}).status_code == 400  # 형식 오류
+    r2 = client.post("/api/channels", json={"name": "기본"}).json()
+    ch2 = next(c for c in client.get("/api/channels").json()["channels"] if c["id"] == r2["id"])
+    assert ch2["restart_kst"] == "04:00"  # 따로 안 정하면 기본 (한국 04:00)
+    assert client.get("/api/session").json()["lives_sort"] == "name"
+    client.put("/api/system/settings", json={"lives_sort": "new"})
+    assert client.get("/api/session").json()["lives_sort"] == "new"
+    client.put("/api/system/settings", json={"tls_relay": False})
+    assert config.load_settings(paths)["output"]["tls_relay"]["enabled"] is True

@@ -272,6 +272,10 @@ function openCamDetail(id) {
 
 // 라이브 보기 방식: grid(블록, 기본) | list(목록, 쇼핑몰처럼) | cctv(관제 — 썸네일만 작게 한 줄 5개). 서버 설정에 저장되어 PC·휴대폰 어디서나 같게
 let LIVES_VIEW = "grid";
+// 라이브 정렬 (v2.26): name(이름순 — LIVE 2 < LIVE 10) | new(최신순 — 새로 만든 것 위). 채널 묶음 안에서, 채널끼리도 같은 기준. 서버에 저장
+let LIVES_SORT = "name";
+const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko", { numeric: true, sensitivity: "base" });
+const livesCmp = () => (LIVES_SORT === "new" ? (a, b) => (b.created_at || 0) - (a.created_at || 0) || byName(a, b) : byName);
 
 function renderLives(grid, ov) {
   const now = ov.server_time;
@@ -385,9 +389,10 @@ function renderLives(grid, ov) {
     else closeModal($("#modal-root .cam-modal"));
   }
   // 채널별로 묶어서: 채널 머리줄(로고·이름 ──── 설명) 아래에 그 채널의 라이브들
-  const groups = (ov.channels || []).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id) }))
+  const cmp = livesCmp();
+  const groups = (ov.channels || []).slice().sort(cmp).map((c) => ({ ch: c, lives: ov.lives.filter((l) => l.channel_id === c.id).sort(cmp) }))
     .filter((g) => g.lives.length);
-  const orphan = ov.lives.filter((l) => !chById[l.channel_id]);
+  const orphan = ov.lives.filter((l) => !chById[l.channel_id]).sort(cmp);
   if (orphan.length) groups.push({ ch: null, lives: orphan });
   const body = (lives) => LIVES_VIEW === "list" ? h("div", { class: "rows" }, lives.map(row))
     : LIVES_VIEW === "cctv" ? h("div", { class: "cams" }, h("div", { class: "cam-grid" }, lives.map(cam)))
@@ -407,9 +412,16 @@ function renderLives(grid, ov) {
       LIVES_VIEW = v; renderLives(grid, ov);
       try { await api("PUT", "/api/system/settings", { lives_view: v }); } catch (e) { /* 표시만 바뀌고 저장은 다음에 */ }
     } });
+  const sortBtn = (v, label, tip) => h("button", { type: "button", class: LIVES_SORT === v ? "on" : "", title: tip,
+    onclick: async () => {
+      if (LIVES_SORT === v) return;
+      LIVES_SORT = v; renderLives(grid, ov);
+      try { await api("PUT", "/api/system/settings", { lives_sort: v }); } catch (e) { /* 표시만 바뀌고 저장은 다음에 */ }
+    } }, label);
   // 맨 위 한 줄: [미니 관제 | 보기 전환]. 좁은 화면에서는 관제 → 라이브 추가 → (라이브 N개 · 보기 전환) 순서로 쌓인다
   const bar = ov.lives.length ? h("div", { class: "viewbar" }, pulseBox(ov), addBtn("m-only"),
     h("span", { class: "vb-count muted small" }, `라이브 ${ov.lives.length}개`), h("span", { class: "spacer" }),
+    h("div", { class: "seg sort-seg" }, sortBtn("name", "이름순", "이름순 (LIVE 2 → LIVE 10, 채널도 이름순)"), sortBtn("new", "최신순", "새로 만든 라이브·채널이 위로")),
     h("div", { class: "seg" }, viewBtn("grid", "블록 보기"), viewBtn("list", "목록 보기"), viewBtn("cctv", "관제 보기 (CCTV)"))) : addBtn("m-only");
   grid.replaceChildren(bar, ...sections);
 }
@@ -1362,6 +1374,9 @@ async function showChannels() {
       h("div", { class: "card-body" },
         c.description ? h("p", { class: "muted", style: "margin:0 0 6px" }, c.description) : null,
         safeUrl(c.url) ? h("a", { class: "small link", href: c.url, target: "_blank", rel: "noopener noreferrer" }, c.url) : h("span", { class: "small faint" }, "채널 주소 없음"),
+        h("div", { class: "small muted", style: "margin-top:8px", title: (c.restart_times || []).map((t) => `${t.kst} ${t.name}`).join("\n") },
+          `일일 재시작 ${c.restart_kst} (한국)`, c.restart_times?.length
+            ? ` · 라이브 ${c.restart_times.length}개 ${c.restart_times[0].kst}~${c.restart_times[c.restart_times.length - 1].kst} (2분 간격)` : ""),
         h("div", { class: "section-title", style: "margin:18px 0 8px" }, `스트림 키 ${c.keys.length}개`),
         c.keys.length ? h("table", { class: "list-table", style: "margin-top:0" }, h("tbody", {}, c.keys.map((k) => h("tr", {},
           h("td", {}, h("b", {}, k.label), h("div", { class: "small faint mono" }, k.masked)),
@@ -1387,6 +1402,7 @@ function openChannelEditor(c) {
   const name = h("input", { class: "input", value: c?.name || "", maxlength: 40, placeholder: "예: Jazz Night Radio" });
   const desc = h("input", { class: "input", value: c?.description || "", maxlength: 120, placeholder: "라이브 목록의 채널 줄 오른쪽에 보입니다" });
   const url = h("input", { class: "input", value: c?.url || "", maxlength: 300, placeholder: "https://www.youtube.com/@내채널" });
+  const rst = h("input", { class: "input", type: "time", value: c?.restart_kst || "04:00", style: "max-width:160px" });
   const file = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp", hidden: true });
   const prev = h("div", { class: "logo-prev" }, c?.logo ? h("img", { src: c.logo, alt: "" }) : h("span", { class: "faint small" }, "로고 없음"));
   let logoBlob = null, removeLogo = false;
@@ -1410,13 +1426,16 @@ function openChannelEditor(c) {
     h("label", { class: "field" }, h("span", {}, "채널명"), name),
     h("label", { class: "field" }, h("span", {}, "채널 설명"), desc),
     h("label", { class: "field" }, h("span", {}, "채널 주소"), url, h("div", { class: "hint" }, "라이브 목록·썸네일의 채널명을 누르면 이 주소가 새 창으로 열립니다.")),
+    h("label", { class: "field" }, h("span", {}, "일일 자동 재시작 시각 (한국 시간)"), rst,
+      h("div", { class: "hint" }, "이 채널의 라이브가 이 시각부터 이름순으로 2분 간격, 하루 1번 비디오만 재시작합니다 (약 1~2초). " +
+        "시청자가 가장 적은 시간으로 — 다른 채널과 겹치면 자동으로 뒤로 밀립니다. 타이머를 켠 라이브는 건너뜁니다.")),
     h("div", { class: "field" }, h("span", { class: "flabel" }, "채널 로고 (정사각형 PNG/JPG/WEBP, 1MB 이하)"), logoDrop),
     msg,
   ], [h("span", { class: "spacer" }), h("button", { class: "btn ghost", onclick: closeModal }, "취소"),
     h("button", { class: "btn primary", onclick: async () => {
       msg.textContent = "";
       try {
-        const body = { name: name.value, description: desc.value, url: url.value };
+        const body = { name: name.value, description: desc.value, url: url.value, restart_kst: rst.value };
         const id = isNew ? (await api("POST", "/api/channels", body)).id : (await api("PUT", `/api/channels/${c.id}`, body), c.id);
         if (logoBlob) await api("POST", `/api/channels/${id}/logo`, logoBlob);
         else if (removeLogo) await api("DELETE", `/api/channels/${id}/logo`);
@@ -1442,19 +1461,6 @@ async function showSystem() {
     sysRetried = true;
     setTimeout(() => { if (location.hash.startsWith("#/system")) showSystem(); }, 5000);
   }
-  const [bh, bm] = s.settings.restart_base_utc.split(":").map(Number);
-  const local = new Date(Date.UTC(2000, 0, 1, bh, bm));
-  const base = h("input", { class: "input", type: "time", value: `${pad(local.getHours())}:${pad(local.getMinutes())}`, style: "max-width:160px" });
-  const relay = h("input", { type: "checkbox" }); relay.checked = s.settings.tls_relay;
-  relay.addEventListener("change", () => {
-    if (relay.checked) return;
-    const ok = confirm("⚠ TLS 중계를 끄면 안 됩니다 (권장: 켜 둠)\n\n" +
-      "• 서버 송신 트래픽이 라이브마다 약 30~50% 늘어납니다 (5.2 → 약 8 Mbps).\n" +
-      "• 라이브 15개 기준 월 약 25TB → 39TB 로, 목표 28TB·한계 32TB 를 크게 넘습니다.\n" +
-      "• 저장 후 각 라이브가 다음 재시작 때부터 직접 암호화 방식으로 바뀝니다.\n\n" +
-      "문제 해결용으로 잠깐 끄는 경우가 아니라면 '취소'를 누르세요.\n정말 끌까요?");
-    if (!ok) relay.checked = true;
-  });
   // 라이브 목록은 이 화면에서 직접 받는다 (라이브 화면을 거치지 않고 설정으로 바로 와도 로그 목록이 다 보이게)
   if (!lastOverview) { try { lastOverview = await api("GET", "/api/overview"); } catch (e) { /* 관리 프로그램 로그만이라도 */ } }
   const logSel = h("select", { class: "input", style: "max-width:260px" }, h("option", { value: "livemaxd" }, "관리 프로그램 (livemaxd)"),
@@ -1489,14 +1495,9 @@ async function showSystem() {
         h("p", {}, "보안 업데이트(커널 등)가 설치되어 재부팅을 기다리고 있습니다. 송출 영향이 적은 시간에 서버에서 ", h("code", {}, "sudo reboot"), " 하세요."),
         s.reboot_packages.length ? h("p", { class: "small muted" }, s.reboot_packages.join(", ")) : null) : null,
       card("송출 설정",
-        h("label", { class: "field" }, h("span", {}, "일일 자동 재시작 시작 시각 (내 시간 기준)"), base,
-          h("div", { class: "hint" }, "라이브마다 이 시각부터 2분 간격으로 하루 1번 비디오만 재시작합니다 (1~3초 끊김). 타이머를 켠 라이브는 건너뜁니다.")),
-        h("label", { class: "check", style: "margin-bottom:14px" }, relay, h("span", { class: "nm" }, "TLS 중계 사용 — 꼭 켜 두세요 (송출 트래픽 약 30% 절감)")),
-        h("button", { class: "btn primary", onclick: async () => {
-          const [lh, lm] = base.value.split(":").map(Number); const d = new Date(2000, 0, 1, lh, lm);
-          try { await api("PUT", "/api/system/settings", { restart_base_utc: `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`, tls_relay: relay.checked }); toast("저장했습니다 (각 라이브의 다음 재시작 때 적용)"); }
-          catch (e) { toast(e.message, true); }
-        } }, "저장")),
+        h("p", { class: "small muted", style: "margin:0" }, "일일 자동 재시작 시각은 ", h("a", { class: "link", href: "#/channels" }, "채널"),
+          " 메뉴에서 채널마다 정합니다 (한국 시간 · 채널 안 라이브는 이름순 2분 간격 · 다른 채널과 겹치면 자동으로 뒤로)."),
+        h("p", { class: "small muted", style: "margin:8px 0 0" }, "TLS 중계(송출 트래픽 약 30% 절감)는 늘 켜져 있습니다.")),
       card("디스크",
         h("table", { class: "list-table", style: "margin-top:0" }, h("tbody", {}, s.disk.map((d) => h("tr", {}, h("td", {}, d.label), h("td", { class: "r" }, fmt.bytes(d.bytes)))))),
         h("button", { class: "btn", style: "margin-top:12px", onclick: async () => { const r = await api("POST", "/api/system/cleanup"); toast(r.message); } }, "지금 정리 실행"),
@@ -1820,6 +1821,7 @@ async function route() {
   try { sess = await api("GET", "/api/session"); } catch (e) { return; }
   setServerName(sess.server_name);
   LIVES_VIEW = ["list", "cctv"].includes(sess.lives_view) ? sess.lives_view : "grid";
+  LIVES_SORT = sess.lives_sort === "new" ? "new" : "name";
   if (!sess.authenticated) { showLogin(); return; }
   if (sess.must_change) { mount(shell("lives")); showChangePassword(true); return; }
   const r = location.hash.replace(/^#\/?/, "");

@@ -27,7 +27,33 @@ def test_store_auto_assigns_id_port_slot(paths, settings):
 def test_restart_times_are_staggered(settings):
     times = {make_live(id=f"live{i}", restart_slot=i).restart_time_utc(settings) for i in range(15)}
     assert len(times) == 15  # 같은 시각 재시작 없음 (DESIGN 11-6)
-    assert make_live(restart_slot=1).restart_time_utc(settings) == "15:02"  # 기본 15:00 UTC = 한국 자정
+    assert make_live(restart_slot=1).restart_time_utc(settings) == "19:02"  # 기본 19:00 UTC = 한국 04:00 (v2.26)
+
+
+def test_restart_schedule_per_channel_two_minutes_apart(settings):
+    """v2.26 채널별 일일 재시작: 채널 시각(한국)부터 이름순 2분 간격, 다른 채널과 겹치면 뒤로 — 서버 전체에서 같은 2분 없음."""
+    from types import SimpleNamespace as NS
+
+    from livemax import config
+
+    a = [make_live(id=f"live{i}", name=f"LIVE {n}", channel_id="ch1") for i, n in ((1, 6), (2, 7), (16, 1), (17, 2), (18, 10))]
+    b = [make_live(id=f"live{20 + i}", name=f"B {i}", channel_id="ch2") for i in range(1, 4)]
+    c = [make_live(id="live30", name="C 1", channel_id="ch3")]
+    lone = [make_live(id="live40", name="혼자")]
+    chs = {"ch1": NS(restart_kst="04:00"), "ch2": NS(restart_kst="04:04"), "ch3": NS(restart_kst="23:59")}
+    s = config.restart_schedule(a + b + c + lone, chs, settings)
+    kst = {k: config.utc_min_to_kst(v) for k, v in s.items()}
+    # ch1: 이름순 LIVE 1, 2, 6, 7, 10 → 04:00 ~ 04:08
+    assert [kst[x] for x in ("live16", "live17", "live1", "live2", "live18")] == ["04:00", "04:02", "04:04", "04:06", "04:08"]
+    assert kst["live40"] == "04:10"     # 채널 없음 → 기본 04:00 (ch1 과 같은 시각이라 ch1 뒤로)
+    # ch2 는 04:04 를 원했지만 앞 시각(04:00) 줄이 04:10 까지 차서 04:12 부터
+    assert [kst[f"live{20 + i}"] for i in range(1, 4)] == ["04:12", "04:14", "04:16"]
+    assert kst["live30"] == "23:58"     # 2분 칸에 맞춤 (23:59 → 23:58 칸)
+    assert len(set(s.values())) == len(s)  # 같은 칸 없음
+    # 하루 끝을 넘어도 다음 날 0시대로 이어짐
+    d = [make_live(id=f"live{50 + i}", name=f"D {i}", channel_id="ch4") for i in range(1, 4)]
+    s2 = config.restart_schedule(d, {"ch4": NS(restart_kst="23:58")}, settings)
+    assert [config.utc_min_to_kst(s2[f"live{50 + i}"]) for i in range(1, 4)] == ["23:58", "00:00", "00:02"]
 
 
 @pytest.mark.parametrize("field,value", [("video_folders", []), ("audio_folders", []), ("name", " "),

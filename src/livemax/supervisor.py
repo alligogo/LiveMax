@@ -1256,6 +1256,20 @@ class Supervisor:
             self.notify("down", f"{name}: 송출 중단", f"{int(now - p.bad_since)}초째 송출 안 됨 — {msg}", dedupe_s=0)
             self.incident(lv.id, "down", sec=now - p.bad_since, note=msg)
 
+    def restart_schedule(self) -> dict[str, int]:
+        """라이브 → 일일 재시작 시각(UTC 분). 채널별 시각 + 서버 전체 2분 간격 (v2.26). 5초 동안 기억."""
+        now = time.monotonic()
+        hit = getattr(self, "_sched", None)
+        if hit and now - hit[0] < 5:
+            return hit[1]
+        try:
+            chs = {c.id: c for c in channels.ChannelStore(self.paths).all()}
+        except Exception:  # noqa: BLE001
+            chs = {}
+        sched = config.restart_schedule(self.store.all(), chs, self.settings)
+        self._sched = (now, sched)
+        return sched
+
     def _playlist_limit(self) -> float:
         c = self.settings["concat"]
         return float(c["hours"]) * 3600 + float(c["margin_minutes"]) * 30
@@ -1263,6 +1277,7 @@ class Supervisor:
     def _planned_restarts(self) -> None:
         now = datetime.now(timezone.utc)
         gap = 30
+        sched = self.restart_schedule()
         for lv in self.store.all():
             p = self.procs.get(lv.id)
             if not p or not p.desired or p.st.get("state") != "running":
@@ -1280,7 +1295,7 @@ class Supervisor:
             end = lv.timer_end_at(self.session(lv.id).get("started_at"))
             if end and end - time.time() < 26 * 3600:
                 continue  # 타이머로 곧 끝날 방송 — 재시작 공백으로 유튜브 방송이 끊기지 않게 건너뜀
-            h, m = map(int, lv.restart_time_utc(self.settings).split(":"))
+            h, m = map(int, lv.restart_time_utc(self.settings, sched.get(lv.id)).split(":"))
             due = now.replace(hour=h, minute=m, second=0, microsecond=0)
             day = now.date().isoformat()
             # 예정 시각부터 30분 안에 한 번 (서버가 잠깐 바빴어도 놓치지 않게)

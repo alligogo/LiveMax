@@ -22,7 +22,7 @@ import yaml
 
 from . import secrets
 from .config import read_yaml_cached
-from .config import ConfigError, Live, LiveStore, _atomic_write
+from .config import ConfigError, Live, LiveStore, _atomic_write, hhmm_to_minutes
 from .paths import Paths
 
 log = logging.getLogger("livemax.channels")
@@ -54,6 +54,7 @@ class Channel:
     logo_ver: int = 0       # 로고를 바꿀 때마다 +1 (브라우저 캐시 갱신용)
     keys: list[dict] = field(default_factory=list)   # [{id, label, created_at}]
     created_at: float = 0.0
+    restart_kst: str = ""   # v2.26 일일 재시작 시각 (한국 시간 HH:MM, 빈 값 = 기본 시각). 채널 안 라이브는 2분 간격
 
     @property
     def number(self) -> int:
@@ -62,7 +63,7 @@ class Channel:
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "description": self.description, "url": self.url,
                 "logo": self.logo, "logo_ver": self.logo_ver, "keys": [dict(k) for k in self.keys],
-                "created_at": self.created_at}
+                "created_at": self.created_at, "restart_kst": self.restart_kst}
 
     def validate(self) -> None:
         if not CH_ID_RE.match(self.id):
@@ -73,6 +74,8 @@ class Channel:
             raise ConfigError("채널 설명은 120자 이하")
         if self.url and not URL_RE.match(self.url):
             raise ConfigError("채널 주소는 https:// 로 시작하는 주소여야 합니다")
+        if self.restart_kst:
+            hhmm_to_minutes(self.restart_kst)  # 형식 오류면 ConfigError
         for k in self.keys:
             if not KEY_ID_RE.match(str(k.get("id", ""))) or not str(k.get("label", "")).strip():
                 raise ConfigError("스트림 키 정보 오류")

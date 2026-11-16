@@ -116,7 +116,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         sess = auth.get_session(request.state.conn, request.cookies.get(auth.COOKIE))
         return {"authenticated": bool(sess), "must_change": auth.must_change(), "version": core.version,
                 "username": settings["dashboard"]["username"], "server_name": config.server_name(settings),
-                "lives_view": settings.get("ui", {}).get("lives_view", "grid")}
+                "lives_view": settings.get("ui", {}).get("lives_view", "grid"),
+                "lives_sort": settings.get("ui", {}).get("lives_sort", "name")}
 
     @app.post("/api/login")
     def login(request: Request, body: dict = Body(default={})):
@@ -193,7 +194,7 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             "song_title": np_.get("title") or (Path(np_.get("file", "")).stem if np_.get("file") else ""),
             "song_artist": np_.get("artist") or "",
             "song_folder": Path(np_["file"]).parent.name if np_.get("file") else "", "restarts_hour": s.get("restarts_hour", 0), "blips_day": s.get("blips_day"),
-            "restarts": s.get("restarts", []), "next_restart": lv.next_restart(settings).timestamp(),
+            "restarts": s.get("restarts", []), "next_restart": lv.next_restart(settings, minutes=sup.restart_schedule().get(lv.id)).timestamp(),
             "key_masked": key_masked, "key_label": _key_label(lv), "desired": desired,
             "idle_thumb": None if state == "running" else _idle_thumb(lv),
             "cpu": (core.collector.per_live.get(lv.id) or {}).get("cpu"),
@@ -329,8 +330,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         }
 
     def _channel_brief(c) -> dict:
-        return {"id": c.id, "name": c.name, "description": c.description, "url": c.url,
+        return {"id": c.id, "name": c.name, "description": c.description, "url": c.url, "created_at": c.created_at,
                 "logo": f"/api/channels/{c.id}/logo?v={c.logo_ver}" if c.logo else ""}
+
+    def _restart_kst(c) -> str:
+        """채널 일일 재시작 시각 (한국 시간). 따로 안 정했으면 기본 시각."""
+        return c.restart_kst or config.utc_min_to_kst(config.hhmm_to_minutes(settings["restart"]["base_utc"]))
 
     # ------------------------------------------------------------------ 채널
     def _channel_full(c, lives, snap) -> dict:
@@ -342,7 +347,12 @@ def create_app(core) -> FastAPI:  # core = daemon.App
             keys.append({"id": k["id"], "label": k["label"], "masked": chstore.masked(c.id, k["id"]),
                          "used_by": lv.id if lv else None, "used_by_name": lv.name if lv else None,
                          "status": "live" if live_now else ("registered" if lv else "free")})
-        return {**_channel_brief(c), "keys": keys, "lives": [lv.id for lv in lives if lv.channel_id == c.id]}
+        sched = sup.restart_schedule()
+        mine = sorted((sched[lv.id], lv.name) for lv in lives if lv.channel_id == c.id and lv.id in sched)
+        # 실제 재시작 시각 (한국): 채널 시각부터 2분 간격 — 다른 채널과 겹치면 뒤로 밀린 시각 그대로
+        times = [{"name": n, "kst": config.utc_min_to_kst(m)} for m, n in sorted(mine, key=lambda x: (x[0] - config.kst_to_utc_min(_restart_kst(c))) % 1440)]
+        return {**_channel_brief(c), "keys": keys, "lives": [lv.id for lv in lives if lv.channel_id == c.id],
+                "restart_kst": _restart_kst(c), "restart_times": times}
 
     @app.get("/api/channels")
     def channels_list():
@@ -353,6 +363,8 @@ def create_app(core) -> FastAPI:  # core = daemon.App
         c.name = str(b.get("name", c.name) or "").strip()[:40]
         c.description = str(b.get("description", c.description) or "").strip()[:120]
         c.url = str(b.get("url", c.url) or "").strip()[:300]
+        if "restart_kst" in b:  # v2.26 채널별 일일 재시작 (한국 시간)
+            c.restart_kst = str(b.get("restart_kst") or "").strip()[:5]
 
     @app.post("/api/channels")
     def channel_create(request: Request, b: dict = Body(default={})):
@@ -1401,12 +1413,13 @@ def create_app(core) -> FastAPI:  # core = daemon.App
                 return err("'영향 가능' 기준은 '시청자 영향' 기준보다 작아야 합니다")
             config.save_settings_override(paths, ["health"], hc)
             settings["health"] = hc
+        if b.get("lives_sort") in ("name", "new"):  # v2.26 라이브 화면 정렬 (이름순 | 최신순)
+            config.save_settings_override(paths, ["ui", "lives_sort"], b["lives_sort"])
+            settings.setdefault("ui", {})["lives_sort"] = b["lives_sort"]
         if b.get("lives_view") in ("grid", "list", "cctv"):
             config.save_settings_override(paths, ["ui", "lives_view"], b["lives_view"])
             settings.setdefault("ui", {})["lives_view"] = b["lives_view"]
-        if "tls_relay" in b:
-            config.save_settings_override(paths, ["output", "tls_relay", "enabled"], bool(b["tls_relay"]))
-            settings["output"]["tls_relay"]["enabled"] = bool(b["tls_relay"])
+        # v2.26: TLS 중계는 늘 켬 — 설정 화면의 끄는 칸을 없앴다 (요청이 와도 무시)
         return {"ok": True}
 
     @app.post("/api/system/cleanup")
