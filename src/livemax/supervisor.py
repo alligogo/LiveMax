@@ -465,7 +465,12 @@ class LiveProc:
                 self.event("warn", msg)
             elif recent >= SLOW_REPEAT_N and now - self.slow_alert_at > 3600:
                 self.slow_alert_at = now
-                self.event("warn", f"1시간에 밀림 {recent}번 — 이 라이브의 파일·설정을 확인해 보세요 (마지막: {msg})")
+                if ev.get("where") == "network":  # v2.28: 길(회선) 문제는 이 라이브 탓이 아님 — 파일·설정 확인으로 보내지 않는다
+                    site = (self.sup.yt_pool.summary().get("site_of") or {}).get(ev.get("peer") or "", "")
+                    self.event("warn", f"1시간에 밀림 {recent}번 — 유튜브 {site or '수신 서버'} 쪽 길이 자주 막힘 "
+                                       f"(이 라이브 문제 아님 · 6초 넘으면 자동으로 다른 지역으로 피함) (마지막: {msg})")
+                else:
+                    self.event("warn", f"1시간에 밀림 {recent}번 — 이 라이브의 파일·설정을 확인해 보세요 (마지막: {msg})")
             elif dur >= SLOW_LOG_S or mx >= SLOW_LOG_S:  # 짧은 밀림은 숫자 기록(DB)과 카드 '최근 24시간 밀림'에만
                 self.log.warning(msg + f" (커널 대기 {ev.get('kern_kb')}KB · 중계기 {ev.get('app_kb')}KB · 멈칫 {ev.get('lag')}초)")
             return
@@ -479,7 +484,8 @@ class LiveProc:
                 self.log.warning("유튜브 지역이 막혀 다른 지역으로 옮김 — 공백 %.1f초 (수신 서버 %s)", gap, self.st.get("peer"))
                 return
             if ev.get("planned"):  # 자정 재시작 뒤 가깝고 덜 붐비는 수신 IP 로 옮김 — 일부러 한 일 (끊김·알림·한도에 안 셈)
-                self.restarts.append((time.time(), f"일일 재시작 · 유튜브 IP 옮김 {gap:.1f}초"))
+                note, self.move_note = getattr(self, "move_note", None), None
+                self.restarts.append((time.time(), f"{note or '일일 재시작'} · 유튜브 IP 옮김 {gap:.1f}초"))
                 self.sup.incident(self.id, "ip_move", sec=gap, peer=self.st.get("peer"))
                 self.log.info("유튜브 수신 IP 옮김 — 공백 %.1f초 (일일 재시작 뒤, 계획된 일)", gap)
                 return
@@ -593,7 +599,9 @@ class Supervisor:
         self._slow_now: dict[str, float] = {}  # 지금 밀리는 중인 라이브 → 시작 시각
         self._slow_peer: dict[str, str] = {}  # 그 라이브가 붙은 유튜브 수신 서버 IP (v2.18)
         # 유튜브 수신 IP 모음 + 가장 적게 붙은 IP 로 (v2.19)
-        self.yt_pool = ytingest.IngestPool(paths, self._peers, cafile=tls_relay.CA_FILE)
+        self.yt_pool = ytingest.IngestPool(paths, self._peers, cafile=tls_relay.CA_FILE,
+                                           share=float(settings.get("ingest", {}).get("primary_share", ytingest.PRIMARY_SHARE)))
+        self._rebal_at = 0.0
         # 음악 프로그램 채널별 묶음 (B안). 켜고 끄기는 LiveMax 가 다시 켜질 때(업데이트·재시작) 적용 — 도중에 바꾸면 꼬인다
         self.shared_audio = bool(settings.get("audio_shared", True))
         # 묶음 키 → {proc, port, seq, inst{라이브 id → {token, sig, since, ready}}, fails, next_try, started}
@@ -663,18 +671,27 @@ class Supervisor:
             names = ", ".join(sorted(self.live_label(k).split(" · ")[-2] if " · " in self.live_label(k) else k for k in self._slow_now))
             peers = {self._slow_peer.get(k, "?") for k in self._slow_now}
         # v2.18: 밀린 라이브들이 모두 같은 유튜브 수신 서버에 붙어 있었으면 그 서버 쪽 (나머지 라이브는 정상이었을 것)
+        # v2.28: 같은 '지역' 이면 그 지역 길 문제 — 자동으로 피하므로 노란 알림, 휴대폰은 '자동 재시작' 분류로 (기본 꺼짐)
+        try:
+            site_of = self.yt_pool.summary().get("site_of") or {}
+        except Exception:  # noqa: BLE001
+            site_of = {}
+        sites = {site_of.get(p_, p_) for p_ in peers if p_ != "?"}
+        one_site = len(sites) == 1 and "?" not in peers
         if len(peers) == 1 and "?" not in peers:
-            why = f"모두 같은 유튜브 수신 서버({next(iter(peers))}) — 유튜브 쪽 일시 문제로 보임"
+            why = f"모두 같은 유튜브 수신 서버({next(iter(peers))}) — 유튜브 쪽 일시 문제로 보임 · 6초 넘으면 자동으로 다른 지역으로 피함"
+        elif one_site:
+            why = f"모두 같은 유튜브 {next(iter(sites))} — 그 지역 길 문제로 보임 · 6초 넘으면 자동으로 다른 지역으로 피함"
         else:
             why = f"유튜브 수신 서버 {len(peers - {'?'})}곳 — 서버나 회선 문제일 수 있습니다"
         msg = f"라이브 {n}개가 동시에 유튜브 전송 밀림 — {why} ({names})"
         log.warning(msg)
         try:
             with db.session(self.paths.db) as c:
-                db.add_event(c, "error", "supervisor", msg)
+                db.add_event(c, "warn" if one_site else "error", "supervisor", msg)
         except Exception:  # noqa: BLE001
             pass
-        self.notify("down", f"동시 밀림 {n}개", msg, dedupe_s=600)
+        self.notify("restart" if one_site else "down", f"동시 밀림 {n}개", msg, dedupe_s=600)
 
     def live_label(self, live_id: str) -> str:
         """로그·알림에 쓰는 이름: '서버명 · 라이브명 (채널명) · live13'. 1분 동안 기억 (로그 줄마다 파일을 읽지 않게)."""
@@ -1183,11 +1200,26 @@ class Supervisor:
                     self.yt_pool.write_load()  # 중계기가 읽을 분포를 최신으로
                     r.request_switch()
 
+    def _rebalance(self, now: float) -> None:
+        """대피 뒤 되돌리기 (v2.28): 1분에 하나 — 목표 몫보다 많은 지역의 라이브를 모자란 지역(30분 넘게 정상)으로 '계획된 옮김'."""
+        if any(p.move_at for p in self.procs.values()):
+            return
+        lid = self.yt_pool.rebalance_pick(now)
+        p = self.procs.get(lid) if lid else None
+        if not p or not p.desired or p.st.get("state") != "running" or not isinstance(getattr(p, "relay", None), rtmp_relay.RelayProc):
+            return
+        p.move_note = "대피 뒤 되돌리기"
+        p.move_at = now
+        p.log.info("유튜브 수신 지역 되돌리기 — %s 에서 목표 몫이 모자란 지역으로 (대피했던 지역이 30분 넘게 정상)", p.st.get("peer"))
+
     def loop(self) -> None:
         while not self.stop_event.wait(5):
             now = time.time()
             try:
                 self._due_moves(now)
+                if now - self._rebal_at >= 60:
+                    self._rebal_at = now
+                    self._rebalance(now)
             except Exception:  # noqa: BLE001
                 log.exception("수신 IP 옮기기 실패")
             if self.shared_audio:

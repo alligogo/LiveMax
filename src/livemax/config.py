@@ -102,6 +102,7 @@ DEFAULTS: dict[str, Any] = {
                   "upload_mb_per_s": 10},  # 웹 업로드 속도 상한 (서버 부담 줄이기, 모든 업로드 합산)
     "fetch": {"mb_per_s": 20, "allow_private": False},  # 링크로 가져오기: 받는 속도 상한, 내부 주소 허용(테스트용)
     "harbor_port_base": 8101,
+    "ingest": {"primary_share": 0.8},  # v2.28 가장 빠른 유튜브 수신 지역 몫 (50개면 40 · 나머지 지역 10)
     "ui": {"lives_view": "grid", "lives_sort": "name"},  # lives_sort: name(이름순) | new(최신순) | old(오래된순) — v2.27  # 라이브 화면 보기 방식: grid(블록) | list(목록) | cctv(관제)
     "audio_shared": True,  # 음악 프로그램(Liquidsoap)을 채널별로 묶음 — 메모리 절약 (DESIGN 11-D 19, v2.14 부터 기본). 재시작 때 적용
     "audio_group_max": 10,  # 음악 묶음 하나에 넣는 라이브 최대 수 (채널 안에서 라이브 번호 순으로 나눔)

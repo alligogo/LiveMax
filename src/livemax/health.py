@@ -101,6 +101,15 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
         else:
             r["cause"] = ""
 
+    # v2.28 '자동 대피': 밀림이 '막히기 전에 옮김'(6초)으로 끝난 사건 — 장치가 막아 낸 것 (진짜 문제와 구분해 보여 줌)
+    moves: dict[str, list[float]] = {}
+    for r in rows:
+        if r["kind"] == "auto_move" and r["live_id"]:
+            moves.setdefault(r["live_id"], []).append(r["ts"])
+    for r in evs:
+        if r["kind"] == "slow":
+            t0, t1 = r["ts"] - 5, r["ts"] + float(r["sec"] or 0) + 30
+            r["rescued"] = any(t0 <= t <= t1 for t in moves.get(r["live_id"] or "", []))
     counted = [r for r in evs if r["sev"] in ("bad", "warn")]
     bad = [r for r in counted if r["sev"] == "bad"]
     impact = sum(float(r["sec"] or 0) or 8.0 for r in bad)
@@ -156,8 +165,8 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
     if server["retrans_avg"] is not None and server["retrans_avg"] >= 1:
         warn_server.append(f"재전송률 평균 {server['retrans_avg']}%")
     ing = ingest or {}
-    if ing.get("crowded"):  # 고르게 나눈 수(fair)보다 눈에 띄게 몰렸을 때만 (v2.21)
-        warn_server.append(f"유튜브 IP 한 곳에 {ing['max']}개 몰림 (고르게 나누면 {ing.get('fair')}개)")
+    if ing.get("crowded"):  # 목표 몫보다 눈에 띄게 몰렸을 때만 (v2.28 — 가장 빠른 지역 80% 는 정상)
+        warn_server.append(f"유튜브 {ing.get('crowded_site') or '한 지역'}에 {ing.get('site_max')}개 (목표 {ing.get('fair')}개)")
 
     # 정상 라이브 N/전체: 그날 ✗ 가 한 번도 없었던 라이브 수 (△ 는 빼지 않음 — 시청자가 못 느꼈을 수 있음)
     total = int(round(max((float(x["lives_running"] or 0) for x in m), default=0))) or len({r["live_id"] for r in evs if r["live_id"]})
@@ -189,7 +198,7 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
     def item(r):
         return {"ts": r["ts"], "live": r["live_id"], "name": names.get(r["live_id"] or "", r["live_id"] or ""),
                 "kind": r["kind"], "sev": r["sev"], "sec": r["sec"], "max_delay": r["max_delay"], "peer": r["peer"],
-                "cause": r.get("cause", ""), "together": r.get("together")}
+                "cause": r.get("cause", ""), "together": r.get("together"), "rescued": bool(r.get("rescued"))}
 
     return {
         "day": datetime.fromtimestamp(end - 1, KST).strftime("%Y-%m-%d"), "from": start, "to": end, "version": version,
@@ -201,7 +210,8 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
                    "no_audio": sum(1 for r in counted if r["kind"] == "no_audio"),
                    "reconnect": sum(1 for r in counted if r["kind"] == "reconnect"),
                    "slow": sum(1 for r in counted if r["kind"] == "slow"),
-                   "ours_program": sum(1 for r in counted if r.get("cause") == "우리 프로그램")},
+                   "ours_program": sum(1 for r in counted if r.get("cause") == "우리 프로그램"),
+                   "rescued": sum(1 for r in counted if r.get("rescued"))},
         "causes": causes, "events": [item(r) for r in counted][:200], "server": server, "warn_server": warn_server,
         "hourly": hourly, "thresholds": {"warn_s": warn_s, "crit_s": crit_s},
     }
@@ -252,7 +262,7 @@ def message(rep: dict) -> tuple[str, str]:
         head = (f"{rep['day'][5:]} · ✗ 영향 {rep['lives_bad']}개 · 가장 길게 {rep.get('longest_s')}초"
                 f" · 사건 {len(eps)}번 ({when}) · △ {c['warn']}건")
     else:
-        head = f"{rep['day'][5:]} · 시청자 영향 없음 · △ {c['warn']}건"
+        head = f"{rep['day'][5:]} · 시청자 영향 없음 · △ {c['warn']}건" + (f" (자동 대피 {c['rescued']})" if c.get("rescued") else "")
     lines = [head,
              f"서버 {'⚠ ' + ', '.join(rep['warn_server']) if rep['warn_server'] else '✓'} · CPU 평균 {s.get('cpu_avg')}% (최고 {s.get('cpu_max')}%)"]
     if rep["causes"]:

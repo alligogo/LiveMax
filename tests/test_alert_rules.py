@@ -217,3 +217,45 @@ def test_mass_slow_names_same_ingest(paths, settings):
     p = sup.proc("live1")
     p._relay_event({"event": "slow_end", "dur": 31, "max_delay": 19, "peer": "142.250.69.140"})
     assert "유튜브 수신 서버 142.250.69.140" in _events(paths)[-1][1]
+
+
+def test_v228_network_slow_not_blamed_on_file_and_same_site_mass_slow_is_yellow(paths, settings):
+    """v2.28: 길(회선) 때문에 1시간에 3번 밀린 라이브에 '파일·설정 확인' 을 안 보냄 (11-17 LIVE 28 — 원인은 지역 B 길).
+    같은 지역 IP 여러 곳의 동시 밀림은 노란 알림 · 휴대폰은 '자동 재시작' 분류 (자동으로 피하므로). 여러 지역이면 예전처럼 빨강."""
+    sup, sent = _sup(paths, settings, n=6)
+    sup.yt_pool.summary = lambda: {"site_of": {"142.250.139.134": "지역 B (8ms대)", "64.233.178.134": "지역 B (8ms대)",
+                                               "192.178.192.134": "지역 B (8ms대)", "74.125.197.134": "지역 A (2ms대)"}}
+    p = sup.proc("live1")
+    for _ in range(3):
+        p._relay_event({"event": "slow_end", "dur": 7, "max_delay": 3, "where": "network", "peer": "142.250.139.134"})
+    lv, msg = _events(paths)[-1]
+    assert "지역 B (8ms대) 쪽 길이 자주 막힘" in msg and "파일·설정" not in msg
+    for lid, ip in (("live2", "142.250.139.134"), ("live3", "64.233.178.134"), ("live4", "192.178.192.134")):
+        sup.proc(lid)._relay_event({"event": "slow_start", "delay": 6, "peer": ip})
+    lv, msg = _events(paths)[-1]
+    assert lv == "warn" and "같은 유튜브 지역 B (8ms대)" in msg and sent[-1][0] == "restart"
+    sup2, sent2 = _sup(paths, settings, n=6)
+    sup2.yt_pool.summary = sup.yt_pool.summary
+    for lid, ip in (("live4", "142.250.139.134"), ("live5", "74.125.197.134"), ("live6", "64.233.178.134")):
+        sup2.proc(lid)._relay_event({"event": "slow_start", "delay": 6, "peer": ip})
+    assert sent2[-1][0] == "down" and "서버나 회선" in sent2[-1][2]
+
+
+def test_rebalance_sends_one_planned_move_per_minute(paths, settings):
+    """v2.28 대피 뒤 되돌리기: 수신 IP 모음이 고른 라이브 하나에 '계획된 옮김' 예약 — 이미 예약된 게 있으면 기다림."""
+    from livemax import rtmp_relay
+
+    sup, sent = _sup(paths, settings)
+    sup.yt_pool.rebalance_pick = lambda now=None: "live2"
+    p = sup.proc("live2")
+    p.desired = True
+    p.st["state"] = "running"
+    p.relay = object.__new__(rtmp_relay.RelayProc)
+    sup._rebalance(1000.0)
+    assert p.move_at == 1000.0 and p.move_note == "대피 뒤 되돌리기"
+    q = sup.proc("live3")
+    sup.yt_pool.rebalance_pick = lambda now=None: "live3"
+    sup._rebalance(1060.0)
+    assert not q.move_at  # live2 옮김이 아직 끝나지 않음
+    p._relay_event({"event": "reconnect", "gap": 0.3, "planned": True})
+    assert p.snapshot()["restarts"][-1]["reason"].startswith("대피 뒤 되돌리기 · 유튜브 IP 옮김")

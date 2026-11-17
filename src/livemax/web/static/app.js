@@ -656,7 +656,7 @@ function renderSide(side, ov) {
             // 유튜브 수신 IP 분포 (v2.19): 한 곳에 몰리면 그 수신 서버가 멈칫할 때 함께 밀림 → 경고
             // 유튜브 IP 는 심하게 몰렸을 때만 (v2.21 — 평소 분포는 '서버' 메뉴의 서버 상태에서)
             ov.ingest?.crowded ? h("div", { class: "ing-line hot", title: Object.entries(ov.ingest.load || {}).map(([ip, n]) => `${ip}  ${n}개`).join("\n") },
-              ico("warn"), ` 유튜브 IP 한 곳에 ${ov.ingest.max}개 몰림 (고르게 나누면 ${ov.ingest.fair}개)`) : null],
+              ico("warn"), ` 유튜브 ${ov.ingest.crowded_site || "한 지역"}에 ${ov.ingest.site_max}개 (목표 ${ov.ingest.fair}개)`) : null],
             c.port_mbit ? (s.net_tx_mbps || 0) / c.port_mbit : 0, portR, c.limiting === "bandwidth"),
           row("disk", "디스크", s.disk_total_gb ? `${fmt.num(s.disk_used_gb, 1)} / ${fmt.num(s.disk_total_gb, 0)} GB` : "-", diskFit,
             s.disk_total_gb ? (s.disk_used_gb || 0) / s.disk_total_gb : 0, diskW / 100, false)),
@@ -1671,7 +1671,7 @@ function renderHealth(root, d) {
     h("span", { class: "hd-ev-mk" }, (HV[e.sev] || ["·"])[0]), h("span", { class: "hd-ev-t" }, hKst(e.ts)),
     h("span", { class: "hd-ev-n" }, e.name || e.live || "-"),
     h("span", {}, H_KIND[e.kind] || e.kind, e.kind === "slow" ? ` 최대 ${e.max_delay}초 (${Math.round(e.sec || 0)}초 동안)` : e.sec != null ? ` ${(+e.sec).toFixed(1)}초` : "",
-      e.together > 1 ? ` · 같은 순간 ${e.together}개` : ""),
+      e.together > 1 ? ` · 같은 순간 ${e.together}개` : "", e.rescued ? h("span", { class: "hd-rescued", title: "6초 넘게 밀려 막히기 전에 다른 지역으로 옮김 (공백 0.2초 안팎) — 장치가 막아 낸 것" }, " · 자동 대피") : ""),
     h("span", { class: "hd-ev-c" }, e.cause || ""));
   const bad = sel.events.filter((e) => e.sev === "bad"), warn = sel.events.filter((e) => e.sev === "warn");
   const [vmk, vlb] = HV[sel.verdict] || HV.ok;
@@ -1684,7 +1684,7 @@ function renderHealth(root, d) {
         h("span", {}, sel.lives_total
           ? (sel.lives_bad ? `✗ 영향 라이브 · 가장 길게 ${sel.longest_s}초 · 사건 ${(sel.episodes || []).length}번 (${(sel.episodes || []).slice(0, 3).map((e) => hKst(e.ts)).join(", ")})` : `✗ 시청자 영향 (${sel.thresholds.crit_s}초+) 없음`)
           : `✗ 시청자 영향 (${sel.thresholds.crit_s}초+)`)),
-      h("div", {}, h("b", {}, c.warn), h("span", {}, `△ 영향 가능 (${sel.thresholds.warn_s}초+)`)),
+      h("div", {}, h("b", {}, c.warn), h("span", {}, `△ 영향 가능 (${sel.thresholds.warn_s}초+)` + (c.rescued ? ` · 그중 자동 대피 ${c.rescued}` : ""))),
       h("div", {}, h("b", {}, c.ours_program), h("span", {}, "우리 프로그램 원인 (고칠 것)"))),
     Object.keys(sel.causes || {}).length ? h("div", { class: "hd-causes" }, "원인: ",
       Object.entries(sel.causes).sort((a, b) => b[1] - a[1]).map(([k, v]) => h("span", { class: "hd-cause" + (k === "우리 프로그램" ? " ours" : "") }, `${k} ${v}`))) : null));
@@ -1731,7 +1731,7 @@ function renderHealth(root, d) {
           ? `쓸 수 있는 ${ing.ips}곳 · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개`  // 옛 기록 (v2.21 이전)
           : `가깝고 빠른 ${ing.near}곳 (모음 ${ing.ips}) · 붙은 ${ing.used}곳 · 한 곳 최대 ${ing.max}개`
             + (ing.far_used ? ` · 먼 곳에 ${ing.far_used}개 (자정에 옮김)` : "")],
-        ...(ing.site_load && Object.keys(ing.site_load).length ? [["유튜브 지역", Object.entries(ing.site_load).map(([k, n]) => `${k} ${n}개`).join(" · ")]] : []),
+        ...(ing.site_load && Object.keys(ing.site_load).length ? [["유튜브 지역", Object.entries(ing.site_load).map(([k, n]) => `${k} ${n}개` + (ing.site_target?.[k] != null ? ` (목표 ${ing.site_target[k]})` : "")).join(" · ")]] : []),
         ...(s.auto_moves ? [["막히기 전에 옮김", `${s.auto_moves}번 (밀림이 6초 넘어 다른 지역으로)`]] : []),
         ...(s.handoff_n ? [["재시작 공백", `평균 ${s.handoff_avg}초 · 최고 ${s.handoff_max}초 (${s.handoff_n}번 — 유튜브 연결은 유지)`]] : []),
         ["라이브", s.lives_max ? (s.lives_avg < s.lives_max ? `${s.lives_max}개 송출 (평균 ${s.lives_avg})` : `${s.lives_max}개 송출`) : `평균 ${s.lives_avg}개 송출`]]

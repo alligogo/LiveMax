@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from livemax import ytingest
 
 IPS6 = ["142.250.117.134", "142.250.129.134", "142.250.140.134", "142.250.151.134", "142.251.29.134", "142.251.30.134"]
@@ -81,15 +83,26 @@ def test_should_move_only_when_crowded(paths):
     assert not pool.should_move(None)
 
 
-def test_crowded_only_when_far_above_fair(paths):
-    """v2.21: IP 가 2곳뿐이라 25/25 인 건 정상(유튜브가 정하는 일) — 고르게 나눈 수보다 눈에 띄게 몰렸을 때만 '몰림'."""
-    pool, peers = _pool(paths, [IPS2])
+def test_crowded_only_when_far_above_target(paths):
+    """v2.28: 목표 몫(가장 빠른 지역 80%) 기준 — 40/10 은 정상, 25/25 는 다른 지역이 목표(10)보다 15 많아 '몰림'.
+    지역을 모르면(왕복 시간 없음) 한 지역으로 보고 경고 안 함."""
+    rt = {"74.125.197.134": 2.4, "64.233.178.134": 8.8}
+    peers: dict = {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h, p: sorted(rt), doh=lambda h: [],
+                               tls_ok=lambda ip, h, p: (True, rt[ip]), sleep=lambda s: None)
     pool.refresh("a.rtmps.youtube.com", 443, now=1000.0)
-    peers.update({f"live{i}": IPS2[i % 2] for i in range(50)})
+    peers.update({f"live{i}": "74.125.197.134" if i < 40 else "64.233.178.134" for i in range(50)})
     s = pool.summary()
-    assert (s["fair"], s["max"], s["crowded"]) == (25, 25, False)
-    peers.update({f"live{i}": IPS2[0] for i in range(30)})  # 35 / 15
-    assert pool.summary()["crowded"] is True
+    assert s["crowded"] is False and s["site_target"] == {"지역 A (2ms대)": 40, "지역 B (8ms대)": 10}
+    peers.update({f"live{i}": "74.125.197.134" if i % 2 else "64.233.178.134" for i in range(50)})  # 25 / 25
+    s = pool.summary()
+    assert s["crowded"] is True and s["crowded_site"] == "지역 B (8ms대)" and (s["site_max"], s["fair"]) == (25, 10)
+    pool0, peers0 = _pool(paths, [IPS2])
+    pool0.hosts.clear()
+    pool0.refresh("a.rtmps.youtube.com", 443, now=1000.0)
+    peers0.update({f"live{i}": IPS2[0] for i in range(35)})
+    peers0.update({f"live{i}": IPS2[1] for i in range(35, 50)})
+    assert pool0.summary()["crowded"] is False
     pool1, peers1 = _pool(paths, [[IPS2[0]]])
     pool1.hosts.clear()
     pool1.refresh("a.rtmps.youtube.com", 443, now=1000.0)
@@ -113,8 +126,8 @@ def test_prefers_near_fast_ips_and_moves_off_far(paths, tmp_path):
         pool.pick(f"live{i}", "a.rtmps.youtube.com", 443)
     cnt = pool.load()
     assert set(cnt) <= set(pool.near("a.rtmps.youtube.com", 443))  # 먼 IP 에는 하나도 안 붙음
-    # v2.23: 지역끼리 먼저 고르게 — 지역 A(2.4ms, 1곳) 25 · 지역 B(9ms 대 3곳) 8·8·9
-    assert cnt["74.125.197.134"] == 25 and sorted(v for k, v in cnt.items() if k != "74.125.197.134") == [8, 8, 9]
+    # v2.28: 가장 빠른 지역 80% — 지역 A(2.4ms, 1곳) 40 · 지역 B(9ms 대 3곳) 3·3·4
+    assert cnt["74.125.197.134"] == 40 and sorted(v for k, v in cnt.items() if k != "74.125.197.134") == [3, 3, 4]
     # 먼 IP 에 붙어 있던 라이브는 자정에 옮김 대상, 가까운 IP 는 붐빌 때만
     for lid, (ip, _t) in pool.reserved.items():
         peers[lid] = ip
@@ -215,3 +228,104 @@ def test_in_use_ip_is_kept_and_near_shortage_recollects(paths):
     assert len(pool.near(h, 443)) == 4 and "142.250.139.134" in pool.near(h, 443)
     peers["live2"] = "9.9.9.9"    # 모음 밖 IP 에 붙은 라이브는 '먼 곳(자정에 옮김)' 으로 세지 않는다 (옮김 대상이 아님)
     assert pool.summary()["far_used"] == 0
+
+
+def test_base_rtt_is_24h_minimum_and_rtmp_check(paths):
+    """v2.28: '평소 왕복' = 24시간 안에 잰 값 중 가장 작은 값 (11-17: 막힌 순간 65ms 가 평소가 돼 9ms IP 가 '지역 C' 로).
+    RTMP 첫 인사에 답이 없는 IP(구글의 다른 서버)는 안 씀 — 단 모두 실패하면 확인 방법 문제로 보고 무시."""
+    h = "a.rtmps.youtube.com"
+    meas = {"74.125.197.134": [(2.3, True)], "64.233.178.134": [(8.7, True)], "142.250.72.12": [(10.3, False)]}
+    step = [0]
+    peers: dict = {}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h_, p: sorted(meas), doh=lambda h_: [], sleep=lambda s: None,
+                               tls_ok=lambda ip, h_, p: (True, meas[ip][min(step[0], len(meas[ip]) - 1)][0],
+                                                         meas[ip][min(step[0], len(meas[ip]) - 1)][1]))
+    pool.refresh(h, 443, now=1000.0)
+    assert "142.250.72.12" not in pool.healthy(h, 443) and len(pool.healthy(h, 443)) == 2
+    meas["64.233.178.134"].append((65.1, True))  # 한 시간 뒤 막힌 순간에 잼
+    step[0] = 1
+    pool.refresh(h, 443, now=1000.0 + 3600)
+    assert pool.rtt_of(h, 443)["64.233.178.134"] == 8.7  # 평소는 그대로
+    assert set(pool.near(h, 443)) == {"74.125.197.134", "64.233.178.134"}
+    pool.refresh(h, 443, now=1000.0 + 3600 + ytingest.RTT_HIST_S + 10)  # 24시간 넘게 지나면 옛 값은 빠짐
+    assert pool.rtt_of(h, 443)["64.233.178.134"] == 65.1
+    # 모두 RTMP 실패 → 확인 방법 문제로 보고 TLS 결과로
+    bad = {"1.1.1.1": 2.0, "2.2.2.2": 9.0}
+    p2 = ytingest.IngestPool(paths, lambda: {}, resolve=lambda h_, p: sorted(bad), doh=lambda h_: [], sleep=lambda s: None,
+                             tls_ok=lambda ip, h_, p: (True, bad[ip], False))
+    p2.hosts.clear()
+    p2.refresh("b", 443, now=1000.0)
+    assert p2.healthy("b", 443) == ["1.1.1.1", "2.2.2.2"]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg 없음")
+def test_rtmp_hello_against_real_rtmp_server():
+    """RTMP 첫 인사 확인이 진짜 RTMP 서버(ffmpeg -listen)에선 성공, RTMP 가 아닌 서버에선 실패."""
+    import socket as so
+    import subprocess as sp
+    import time as tm
+
+    s = so.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    srv = sp.Popen(["ffmpeg", "-v", "quiet", "-listen", "1", "-i", f"rtmp://127.0.0.1:{port}/live/x", "-f", "null", "-"])
+    try:
+        for _ in range(50):
+            try:
+                c = so.create_connection(("127.0.0.1", port), timeout=1)
+                break
+            except OSError:
+                tm.sleep(0.1)
+        with c:
+            assert ytingest.rtmp_hello(c, timeout=3) is True
+    finally:
+        srv.kill()
+    ls = so.socket()
+    ls.bind(("127.0.0.1", 0))
+    ls.listen(1)
+    with so.create_connection(ls.getsockname(), timeout=1) as c2:
+        conn, _ = ls.accept()
+        conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+        conn.close()
+        assert ytingest.rtmp_hello(c2, timeout=1) is False
+    ls.close()
+
+
+def test_primary_share_moves_and_rebalance_after_evacuation(paths, tmp_path):
+    """v2.28 가장 빠른 지역 80%: 고르기·자정 옮김·중계기 파일 고르기 모두 목표 몫 기준.
+    대피 뒤 되돌리기: 모자란 지역이 30분 넘게 정상일 때만, 가장 붐비는 IP 의 라이브부터 하나씩. 라이브 없는 지역은 접속 시간을 직접 잼."""
+    h = "a.rtmps.youtube.com"
+    rt = {"74.125.197.134": 2.4, "64.233.178.134": 8.8, "192.178.192.134": 8.6}
+    peers: dict = {}
+    now_rtt: dict = {}
+    probe = {"74.125.197.134": 2.5}
+    pool = ytingest.IngestPool(paths, lambda: peers, resolve=lambda h_, p: sorted(rt), doh=lambda h_: [], sleep=lambda s: None,
+                               tls_ok=lambda ip, h_, p: (True, rt[ip], True), tcp_rtt=lambda ip, p: probe.get(ip))
+    pool.rtt_now_fn = lambda: now_rtt
+    pool.refresh(h, 443, now=1000.0)
+    # 지역 A 가 막혀 40개가 모두 B 로 대피한 상태: A 0 · B 50
+    peers.update({f"live{i}": ("64.233.178.134" if i % 2 else "192.178.192.134") for i in range(50)})
+    now_rtt.update({"64.233.178.134": 9.0, "192.178.192.134": 8.9})
+    assert pool.should_move("64.233.178.134") and not pool.should_move("74.125.197.134")
+    t = 5000.0
+    pool.track_sites(now=t)  # A 에는 라이브가 없어 접속 시간을 잼 (2.5ms — 정상)
+    assert pool.probe["74.125.197.134"][1] == 2.5
+    assert pool.rebalance_pick(now=t + 60) is None              # 아직 30분 안 됨
+    pool.track_sites(now=t + ytingest.REBAL_OK_S)
+    lid = pool.rebalance_pick(now=t + ytingest.REBAL_OK_S + 1)
+    assert lid is not None and peers[lid] in ("64.233.178.134", "192.178.192.134")
+    # 중계기 쪽 파일 고르기도 몫 기준 → A
+    pool.load_file = tmp_path / "load.json"
+    pool.write_load(now=t + ytingest.REBAL_OK_S + 2)
+    d = json.loads(pool.load_file.read_text())["hosts"][f"{h}:443"]
+    assert d["rtt_now"]["74.125.197.134"] == 2.5 and d["weight"] == {"0": 0.8, "1": 0.2}
+    assert ytingest.pick_from_file(pool.load_file, h, 443, peers[lid]) == "74.125.197.134"
+    # A 가 다시 느려지면(접속 4배) 정상 시각이 지워져 되돌리지 않음
+    probe["74.125.197.134"] = 20.0
+    pool.track_sites(now=t + ytingest.REBAL_OK_S + ytingest.PROBE_S + 1)
+    assert pool.rebalance_pick(now=t + ytingest.REBAL_OK_S + ytingest.PROBE_S + 2) is None
+    # 40 / 10 (B 안에서 5·5) 이면 옮길 것 없음
+    peers.clear()
+    peers.update({f"live{i}": "74.125.197.134" if i < 40 else ("64.233.178.134" if i % 2 else "192.178.192.134") for i in range(50)})
+    assert not any(pool.should_move(ip) for ip in rt)

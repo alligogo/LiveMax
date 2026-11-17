@@ -37,6 +37,10 @@ SITE_GAP_X, SITE_GAP_MS = 1.5, 1.0  # v2.23 지역 묶기: 왕복 시간을 정�
 HEALTHY_X, HEALTHY_MS = 1.6, 5.0     # 지금 왕복이 기준의 1.6배·+5ms 를 넘으면 그 지역은 '막힘' (옮길 곳으로 안 고름)
 TRACE_X, TRACE_MS = 2.0, 8.0         # E: 지금 왕복이 기준의 2배이면서 +8ms 넘게 15초 두 번 → 길 추적 저장
 TRACE_COOLDOWN_S = 1800
+PRIMARY_SHARE = 0.8      # v2.28 가장 빠른 지역 몫 (50개면 40 · 나머지 지역 10) — 11-14·11-17 막힘은 전부 다른 지역, 가장 빠른 지역은 0번
+RTT_HIST_S = 24 * 3600   # v2.28 '평소 왕복' = 이 기간에 잰 값 중 가장 작은 값 (막힌 순간에 잰 값이 평소가 되지 않게 — 11-17 9ms → 65ms 로 오염)
+REBAL_OK_S = 1800        # v2.28 대피했던 지역이 이만큼 계속 정상이면 1분에 하나씩 되돌림
+PROBE_S = 30             # v2.28 라이브가 하나도 없는 지역은 이 간격으로 접속 시간을 재서 상태를 안다
 MIN_IPS = 4              # 모음이 이보다 적으면 켜기 전에 넉넉히 모은다 (v2.20 — 업데이트 순간 DNS 가 1개만 줘서 50개가 한 IP 로 간 일)
 BOOT_COOLDOWN_S = 600    # 넉넉히 모으기는 이 간격 안에 다시 안 함
 DOH = ("https://dns.google/resolve?name={host}&type=A",            # 구글 공개 DNS (우리 서버 위치 기준으로 답함)
@@ -71,34 +75,66 @@ def _doh(host: str, timeout: float = 3.0) -> list[str]:
     return sorted(out, key=ip_key)
 
 
-def _tls_ok(ip: str, host: str, port: int, cafile: str | None = None, timeout: float = 5.0) -> tuple[bool, float | None]:
-    """TLS 인사만 해 보고 닫는다 (인증서는 호스트 이름으로 확인 — 진짜 유튜브 수신 서버인지).
+def rtmp_hello(sock, timeout: float = 4.0) -> bool:
+    """RTMP 첫 인사 (C0+C1 → S0+S1): 방송을 받는 서버면 바로 S0(버전 3)+S1(1536바이트)을 돌려준다 (v2.28).
+    TLS 인사만으로는 구글의 다른 서버(같은 인증서)와 구별이 안 돼서."""
+    sock.settimeout(timeout)
+    sock.sendall(b"\x03" + bytes(8) + os.urandom(1528))
+    got = b""
+    end = time.monotonic() + timeout
+    while len(got) < 1537 and time.monotonic() < end:
+        d = sock.recv(4096)
+        if not d:
+            break
+        got += d
+    return len(got) >= 1537 and got[0] == 3
+
+
+def _tls_ok(ip: str, host: str, port: int, cafile: str | None = None, timeout: float = 5.0):
+    """TLS 인사 (인증서는 호스트 이름으로 확인) + RTMP 첫 인사까지 해 보고 닫는다 → (TLS 성공, 왕복 ms, RTMP 성공).
     왕복 시간: TCP 접속에 걸린 시간 3번의 가운데 값 (ms) — 가깝고 빠른 IP 를 고르는 데 쓴다 (v2.22)."""
     try:
         ctx = ssl.create_default_context(cafile=cafile if cafile and os.path.exists(cafile) else None)
-        rtts = []
+        rtts, rtmp = [], None
         for i in range(3):
             t0 = time.monotonic()
             with socket.create_connection((ip, port), timeout=timeout) as s:
                 rtts.append((time.monotonic() - t0) * 1000)
                 if i == 0:
-                    with ctx.wrap_socket(s, server_hostname=host):
-                        pass
-        return True, round(sorted(rtts)[1], 1)
+                    with ctx.wrap_socket(s, server_hostname=host) as t:
+                        try:
+                            rtmp = rtmp_hello(t)
+                        except (OSError, ssl.SSLError):
+                            rtmp = False
+        return True, round(sorted(rtts)[1], 1), rtmp
     except (OSError, ssl.SSLError):
-        return False, None
+        return False, None, None
 
 
-def _norm(res) -> tuple[bool, float | None]:
-    """tls_ok 결과: (성공, 왕복 ms) — 예전 꼴(성공만)도 받는다."""
+def _tcp_rtt(ip: str, port: int, timeout: float = 3.0) -> float | None:
+    """접속 시간 3번의 가운데 값 (ms) — 라이브가 없는 지역의 지금 상태 (v2.28)."""
+    try:
+        rtts = []
+        for _ in range(3):
+            t0 = time.monotonic()
+            with socket.create_connection((ip, port), timeout=timeout):
+                rtts.append((time.monotonic() - t0) * 1000)
+        return round(sorted(rtts)[1], 1)
+    except OSError:
+        return None
+
+
+def _norm(res) -> tuple[bool, float | None, bool | None]:
+    """tls_ok 결과: (TLS 성공, 왕복 ms, RTMP 성공 또는 모름) — 예전 꼴(성공만 · 둘)도 받는다."""
     if isinstance(res, tuple):
-        return bool(res[0]), (float(res[1]) if res[1] is not None else None)
-    return bool(res), None
+        rtt = float(res[1]) if len(res) > 1 and res[1] is not None else None
+        return bool(res[0]), rtt, (res[2] if len(res) > 2 else None)
+    return bool(res), None, None
 
 
 class IngestPool:
     def __init__(self, paths: Paths, peers_fn=None, resolve=None, tls_ok=None, cafile: str | None = None, doh=None,
-                 sleep=time.sleep, tracer=None):
+                 sleep=time.sleep, tracer=None, tcp_rtt=None, share: float = PRIMARY_SHARE):
         self.file = paths.state / "ingest_pool.json"        # 모음 (재시작해도 남김)
         self.load_file = paths.run_dir / "ingest_load.json"  # 중계기용 지금 분포
         self.peers_fn = peers_fn or (lambda: {})            # () -> {라이브 ID: 지금 붙은 IP}
@@ -116,7 +152,40 @@ class IngestPool:
         self._tracer = tracer or _trace
         self._spike: dict[str, int] = {}
         self._traced_at: dict[str, float] = {}
+        self.share = float(share)                       # 가장 빠른 지역 몫 (v2.28)
+        self._tcp_rtt = tcp_rtt or _tcp_rtt
+        self.probe: dict[str, tuple[float, float]] = {}  # IP → (잰 시각, 접속 ms) — 라이브 없는 지역 상태
+        self._ok_since: dict[tuple[str, int], float] = {}  # (host:port, 지역) → 계속 정상이 된 시각
         self._load()
+
+    # ---------------------------------------------------------------- 확인 결과 적용 (v2.28)
+    def _apply(self, key: str, res: dict, now: float) -> None:
+        """TLS·RTMP 확인 결과를 모음에 넣는다 (잠금 안에서 부를 것).
+        - 평소 왕복 = 최근 24시간 잰 값 중 가장 작은 값 (막힌 순간 값이 평소가 되지 않게)
+        - RTMP 첫 인사에 답이 없으면 방송을 안 받는 서버 → 안 씀. 단 이번에 TLS 는 됐는데 RTMP 가 하나도 안 되면
+          확인 방법이 잘못된 것으로 보고 RTMP 결과는 무시 (모두 빠져 한 IP 로 몰리는 일이 없게)"""
+        pool = self.hosts.get(key, {})
+        tls_ok = [ip for ip, r in res.items() if r[0]]
+        rtmp_seen = [res[ip][2] for ip in tls_ok if res[ip][2] is not None]
+        rtmp_ignored = len(rtmp_seen) >= 2 and not any(rtmp_seen)
+        if rtmp_ignored:
+            log.warning("유튜브 수신 서버 %d곳 모두 RTMP 첫 인사에 답이 없음 — 확인 방법 문제로 보고 TLS 결과만 씀", len(tls_ok))
+        for ip, (ok, rtt, rtmp) in res.items():
+            e = pool.get(ip)
+            if e is None:
+                continue
+            good = ok and (rtmp is not False or rtmp_ignored)
+            if ok and rtmp is False and not rtmp_ignored and e.get("rtmp", True):
+                log.info("유튜브 수신 후보 %s — TLS 는 되지만 방송(RTMP) 인사에 답이 없음 → 안 씀", ip)
+            if e.get("ok", True) != good and not (ok and rtmp is False):
+                log.info("유튜브 수신 서버 %s %s", ip, "다시 정상" if good else "응답 없음 — 당분간 안 씀")
+            e["ok"], e["checked"] = good, now
+            if rtmp is not None and not rtmp_ignored:
+                e["rtmp"] = bool(rtmp)
+            if rtt is not None:
+                hist = [h for h in (e.get("rtts") or []) if now - float(h[0]) < RTT_HIST_S] + [[now, rtt]]
+                e["rtts"] = hist[-48:]
+                e["rtt"] = min(float(h[1]) for h in e["rtts"])
 
     # ---------------------------------------------------------------- 저장
     def _load(self) -> None:
@@ -163,16 +232,9 @@ class IngestPool:
                 del pool[ip]
             todo = [ip for ip, e in pool.items()
                     if check and (e.get("checked") is None or now - float(e["checked"]) >= REFRESH_S - 60)]
-        for ip in todo:
-            ok, rtt = _norm(self._tls_ok(ip, host, port))
-            with self.lock:
-                e = self.hosts.get(key, {}).get(ip)
-                if e is not None:
-                    if e.get("ok", True) != ok:
-                        log.info("유튜브 수신 서버 %s %s", ip, "다시 정상" if ok else "응답 없음 — 당분간 안 씀")
-                    e["ok"], e["checked"] = ok, now
-                    if rtt is not None:
-                        e["rtt"] = rtt
+        res = {ip: _norm(self._tls_ok(ip, host, port)) for ip in todo}
+        with self.lock:
+            self._apply(key, res, now)
         with self.lock:
             self._save()
 
@@ -210,12 +272,7 @@ class IngestPool:
                 with ThreadPoolExecutor(max_workers=8) as ex:
                     res = dict(zip(new, ex.map(lambda ip: _norm(self._tls_ok(ip, host, port)), new)))
                 with self.lock:
-                    for ip, (ok, rtt) in res.items():
-                        e = self.hosts[key].get(ip)
-                        if e is not None:
-                            e["ok"], e["checked"] = ok, now
-                            if rtt is not None:
-                                e["rtt"] = rtt
+                    self._apply(key, res, now)
             with self.lock:
                 self._save()
             log.info("유튜브 수신 IP 넉넉히 모음: %d곳 (새로 %d곳)", len(self.healthy(host, port)), len(new))
@@ -273,13 +330,26 @@ class IngestPool:
             res = dict(zip(miss, ex.map(lambda ip: _norm(self._tls_ok(ip, host, port)), miss)))
         now = time.time()
         with self.lock:
-            for ip, (ok, rtt) in res.items():
-                e = self.hosts.get(key, {}).get(ip)
-                if e is not None:
-                    e["ok"], e["checked"] = ok, now
-                    if rtt is not None:
-                        e["rtt"] = rtt
+            self._apply(key, res, now)
             self._save()
+
+    def weights(self, sids) -> dict[int, float]:
+        """지역 → 몫 (v2.28): 가장 빠른 지역(번호가 가장 작은 곳) share, 나머지 지역이 남은 몫을 똑같이. 지역 1곳이면 전부."""
+        sids = sorted(set(sids))
+        if len(sids) <= 1:
+            return {s: 1.0 for s in sids}
+        return {s: round(self.share if i == 0 else (1 - self.share) / (len(sids) - 1), 6) for i, s in enumerate(sids)}
+
+    def targets(self, host: str, port: int, cnt: dict | None = None) -> tuple[dict, dict, dict]:
+        """(지역별 붙은 수, 지역별 목표 수, IP→지역) — 가까운 IP 기준."""
+        cnt = self.load() if cnt is None else cnt
+        near, st = self.near(host, port), self.sites(host, port)
+        sload: dict[int, int] = {}
+        for x in near:
+            sload[st.get(x, 0)] = sload.get(st.get(x, 0), 0) + cnt.get(x, 0)
+        total = sum(sload.values())
+        w = self.weights(sload)
+        return sload, {s: w[s] * total for s in sload}, st
 
     def should_move(self, ip: str | None) -> bool:
         """자정 재시작 때 이 IP 의 라이브를 덜 붐비는 IP 로 옮길까 (v2.20 — 업데이트 없이도 매일 밤 고르게).
@@ -294,13 +364,10 @@ class IngestPool:
             near = self.near(host, int(port or 0))
             if near and ip not in near:  # 먼 IP 에 붙어 있음 → 가까운 곳으로 (v2.22)
                 return True
-            st = self.sites(host, int(port or 0))
-            sload: dict[int, int] = {}
-            for x in near:
-                sload[st.get(x, 0)] = sload.get(st.get(x, 0), 0) + cnt.get(x, 0)
+            sload, tgt, st = self.targets(host, int(port or 0), cnt)
             mine = st.get(ip, 0)
-            others_s = [n for sid, n in sload.items() if sid != mine]
-            if others_s and sload.get(mine, 0) - min(others_s) >= 2:  # 지역끼리 고르게 (v2.23)
+            # v2.28 지역 몫 (가장 빠른 지역 80%): 내 지역이 목표보다 1 넘게 많고 목표보다 1 넘게 모자란 지역이 있으면
+            if sload.get(mine, 0) - tgt.get(mine, 0) >= 1 and any(tgt[s] - sload[s] >= 1 for s in sload if s != mine):
                 return True
             same = [x for x in near if x != ip and st.get(x, 0) == mine]
             if same and cnt.get(ip, 0) - min(cnt.get(x, 0) for x in same) >= 2:
@@ -349,13 +416,14 @@ class IngestPool:
             if cur in cnt:
                 cnt[cur] -= 1
         st = self.sites(host, port)
-        if len({st.get(ip, 0) for ip in ips}) > 1:  # v2.23: 지역끼리 먼저 고르게 (한 지역이 막혀도 절반은 멀쩡)
+        if len({st.get(ip, 0) for ip in ips}) > 1:  # 지역 먼저: 목표 몫(v2.28 가장 빠른 지역 80%)보다 가장 모자란 지역
             sload: dict[int, int] = {}
             for x in ips:
                 sload[st.get(x, 0)] = sload.get(st.get(x, 0), 0) + cnt.get(x, 0)
-            low_s = min(sload.values())
-            best_sites = [sid for sid, n in sload.items() if n == low_s]
-            ips = [ip for ip in ips if st.get(ip, 0) == min(best_sites)]
+            w = self.weights(sload)
+            n = sum(sload.values()) + 1
+            best = max(sload, key=lambda s: (round(w[s] * n - sload[s], 6), -s))
+            ips = [ip for ip in ips if st.get(ip, 0) == best]
         low = min(cnt.get(ip, 0) for ip in ips)
         ties = [ip for ip in ips if cnt.get(ip, 0) == low]
         if rtt:  # 같으면 더 빠른 곳 (왕복 시간 차이 1ms 안은 같은 걸로 보고 라이브 번호로 돌림)
@@ -367,7 +435,7 @@ class IngestPool:
         self.write_load()
         return ip
 
-    def write_load(self) -> None:
+    def write_load(self, now: float | None = None) -> None:
         """중계기(별도 프로세스)가 다시 접속할 때 읽는 지금 분포."""
         cnt = self.load()
         try:
@@ -376,7 +444,11 @@ class IngestPool:
             now_rtt = {}
         with self.lock:
             keys = list(self.hosts)
-        d = {"ts": time.time(), "hosts": {}}
+        now = time.time() if now is None else now
+        for ip, (t, v) in list(self.probe.items()):  # 라이브가 없는 IP 는 직접 잰 접속 시간으로 (v2.28)
+            if ip not in now_rtt and now - t < 2 * PROBE_S + 15:
+                now_rtt[ip] = v
+        d = {"ts": now, "hosts": {}}
         for key in keys:
             host, _, port = key.rpartition(":")
             ips = self.near(host, int(port or 0))
@@ -384,6 +456,7 @@ class IngestPool:
             base = self.rtt_of(host, int(port or 0))
             d["hosts"][key] = {"ips": ips, "load": {ip: cnt.get(ip, 0) for ip in ips},
                                "site": {ip: st.get(ip, 0) for ip in ips},
+                               "weight": {str(s): w for s, w in self.weights({st.get(ip, 0) for ip in ips}).items()},
                                "rtt_base": {ip: base[ip] for ip in ips if ip in base},
                                "rtt_now": {ip: now_rtt[ip] for ip in ips if ip in now_rtt}}
         try:
@@ -412,20 +485,28 @@ class IngestPool:
         # 심하게 몰림 (v2.21): 유튜브가 준 IP 로 고르게 나눈 수보다 눈에 띄게 많을 때만. IP 가 적은 건 유튜브가 정하는 일이라 경고 안 함
         site_of: dict[str, str] = {}
         sload: dict[str, int] = {}
+        starget: dict[str, int] = {}
         for key in keys:
             host, _, port = key.rpartition(":")
             lab = self.site_label(host, int(port or 0))
             site_of.update(lab)
-            for ip in self.near(host, int(port or 0)):
-                sload[lab.get(ip, ip)] = sload.get(lab.get(ip, ip), 0) + used.get(ip, 0)
-        # 몰림 판정은 지역 단위 (v2.23): 지역이 1곳이면 판정 안 함
-        fair = -(-total // max(1, len(sload))) if total else 0
-        smax = max(sload.values()) if sload else 0
-        crowded = bool(total) and len(sload) >= 2 and smax > fair + max(3, -(-fair // 4))
+            sl, tg, st = self.targets(host, int(port or 0), cnt)
+            names = {st.get(ip, 0): lab.get(ip) or f"지역 {chr(65 + st.get(ip, 0))}" for ip in self.near(host, int(port or 0))}
+            for sid, n in sl.items():
+                nm = names.get(sid, f"지역 {chr(65 + sid)}")
+                sload[nm] = sload.get(nm, 0) + n
+                starget[nm] = starget.get(nm, 0) + int(round(tg[sid]))
+        # 몰림 판정은 지역 단위 · 목표 몫 기준 (v2.28 — 가장 빠른 지역 80% 는 몰림이 아님): 지역이 1곳이면 판정 안 함
+        over = {k: n - starget.get(k, 0) for k, n in sload.items()}
+        worst = max(over, key=over.get) if over else None
+        fair = starget.get(worst, 0) if worst else 0
+        smax = sload.get(worst, 0) if worst else 0
+        crowded = bool(total) and len(sload) >= 2 and worst is not None and over[worst] > max(3, -(-fair // 4))
         return {"ips": len(ips), "near": len(near), "used": len(used), "load": dict(sorted(used.items(), key=lambda x: -x[1])),
                 "max": mx, "total": total, "fair": fair, "crowded": crowded,
                 "far_used": sum(n for ip, n in used.items() if near and ip in ips and ip not in near), "rtt": rtt,
-                "site_of": site_of, "site_load": sload, "site_max": smax}
+                "site_of": site_of, "site_load": sload, "site_max": smax, "site_target": starget,
+                "crowded_site": worst if crowded else None, "share": self.share}
 
     def check_spikes(self, now: float | None = None) -> list[str]:
         """E (v2.23): 어떤 IP 의 지금 왕복이 기준의 2배이면서 +8ms 넘게 두 번 이어지면 그 길을 추적해 저장 (30분에 한 번).
@@ -471,6 +552,60 @@ class IngestPool:
         except Exception:  # noqa: BLE001
             log.exception("길 추적 저장 실패")
 
+    # ---------------------------------------------------------------- 지역 상태 · 되돌리기 (v2.28)
+    def track_sites(self, now: float | None = None) -> None:
+        """지역마다 지금 정상인지: 라이브가 붙은 IP 는 중계기 실측(15초), 라이브가 없는 지역은 PROBE_S 마다 접속 시간을 직접 잰다.
+        계속 정상이 된 시각을 기억 — 대피했던 지역으로 되돌릴 때 '30분 넘게 정상' 을 본다."""
+        now = time.time() if now is None else now
+        try:
+            cur = dict(self.rtt_now_fn() or {})
+        except Exception:  # noqa: BLE001
+            cur = {}
+        with self.lock:
+            keys = list(self.hosts)
+        for key in keys:
+            host, _, port = key.rpartition(":")
+            port_i = int(port or 0)
+            near, st, base = self.near(host, port_i), self.sites(host, port_i), self.rtt_of(host, port_i)
+            for sid in sorted({st.get(ip, 0) for ip in near}):
+                ips = [ip for ip in near if st.get(ip, 0) == sid]
+                vals = {ip: cur[ip] for ip in ips if ip in cur}
+                if not vals:
+                    ip = min(ips, key=lambda x: base.get(x, 1e9))
+                    t, v = self.probe.get(ip, (0.0, None))
+                    if now - t >= PROBE_S:
+                        v = self._tcp_rtt(ip, port_i)
+                        self.probe[ip] = (now, v)
+                    if v is not None and now - self.probe[ip][0] < 2 * PROBE_S + 15:
+                        vals = {ip: v}
+                ok = bool(vals) and all(v <= max(base.get(ip, v) * HEALTHY_X, base.get(ip, v) + HEALTHY_MS) for ip, v in vals.items())
+                k = (key, sid)
+                if ok:
+                    self._ok_since.setdefault(k, now)
+                else:
+                    self._ok_since.pop(k, None)
+
+    def rebalance_pick(self, now: float | None = None) -> str | None:
+        """대피 뒤 되돌리기 (v2.28): 목표보다 2개 넘게 많은 지역의 라이브 하나 — 모자란 지역이 30분 넘게 정상일 때만.
+        관리 프로그램이 1분에 한 번 불러 그 라이브를 '계획된 옮김' 으로 보낸다 (공백 0.3초 안팎)."""
+        now = time.time() if now is None else now
+        peers = dict(self.peers_fn() or {})
+        with self.lock:
+            keys = list(self.hosts)
+        for key in keys:
+            host, _, port = key.rpartition(":")
+            sload, tgt, st = self.targets(host, int(port or 0))
+            under = [s for s in sload if tgt[s] - sload[s] >= 1 and now - self._ok_since.get((key, s), now) >= REBAL_OK_S]
+            over = [s for s in sload if sload[s] - tgt[s] >= 2]
+            if not under or not over:
+                continue
+            src = max(over, key=lambda s: sload[s] - tgt[s])
+            cnt = self.load()
+            cands = [lid for lid, ip in peers.items() if ip and st.get(ip) == src and ip in self.near(host, int(port or 0))]
+            if cands:  # 가장 붐비는 IP 의 라이브부터
+                return max(sorted(cands), key=lambda lid: cnt.get(peers[lid], 0))
+        return None
+
     def run(self, stop: threading.Event) -> None:
         last = 0.0
         while not stop.wait(LOAD_WRITE_S):
@@ -484,6 +619,7 @@ class IngestPool:
                         host, _, port = key.rpartition(":")
                         self.refresh(host, int(port or 0))
                         self.ensure(host, int(port or 0))
+                self.track_sites()
                 self.write_load()
                 self.check_spikes()
             except Exception:  # noqa: BLE001 — 모음 갱신 실패가 송출을 막지 않게
@@ -520,7 +656,13 @@ def pick_from_file(load_file: str | Path, host: str, port: int, current: str | N
     for ip in ips:
         sload[site.get(ip, 0)] = sload.get(site.get(ip, 0), 0) + int(load.get(ip, 0))
     base = dict(e.get("rtt_base") or {})
-    return min(cand, key=lambda ip: (sload.get(site.get(ip, 0), 0), int(load.get(ip, 0)), base.get(ip, 1e9), ip_key(ip)))
+    wt = {int(k): float(v) for k, v in (e.get("weight") or {}).items()}  # v2.28 지역 몫 (없으면 똑같이)
+    n = sum(sload.values()) + 1
+
+    def short(ip) -> float:  # 목표보다 모자란 정도 (클수록 먼저)
+        s = site.get(ip, 0)
+        return wt.get(s, 1.0 / max(1, len(sload))) * n - sload.get(s, 0)
+    return min(cand, key=lambda ip: (-round(short(ip), 6), int(load.get(ip, 0)), base.get(ip, 1e9), ip_key(ip)))
 
 
 def _trace(ip: str) -> str:

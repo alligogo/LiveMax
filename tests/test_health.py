@@ -129,3 +129,19 @@ def test_handoff_gap_is_recorded_not_judged_and_no_video_is_ours(paths, settings
         _ins(c, end - 3600, "live9", "no_video", sec=8)
         rep = health.compute(c, settings, end)
     assert rep["verdict"] == "bad" and rep["causes"] == {"우리 프로그램": 1}
+
+
+def test_rescued_slow_is_marked_auto_evacuated(paths, settings):
+    """v2.28: 밀림이 '막히기 전에 옮김'(6초)으로 끝났으면 '자동 대피' 표시 — 장치가 막아 낸 것과 진짜 문제를 구분."""
+    end = time.time()
+    with db.session(paths.db) as c:
+        _metrics(c, end - 86400, end)
+        t = end - 3600
+        _ins(c, t, "live1", "slow", sec=6, max_delay=6.4, peer="64.233.178.134", where="network")
+        _ins(c, t + 6, "live1", "auto_move", sec=0.2, peer="64.233.178.134")
+        _ins(c, t + 100, "live2", "slow", sec=7, max_delay=5.5, peer="64.233.178.134", where="network")  # 스스로 풀림
+        rep = health.compute(c, settings, end)
+    ev = {e["live"]: e for e in rep["events"]}
+    assert ev["live1"]["rescued"] is True and ev["live2"]["rescued"] is False
+    assert rep["counts"]["warn"] == 2 and rep["counts"]["rescued"] == 1
+    assert "(자동 대피 1)" in health.message(rep)[1]
