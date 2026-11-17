@@ -600,7 +600,7 @@ class Supervisor:
         self._slow_peer: dict[str, str] = {}  # 그 라이브가 붙은 유튜브 수신 서버 IP (v2.18)
         # 유튜브 수신 IP 모음 + 가장 적게 붙은 IP 로 (v2.19)
         self.yt_pool = ytingest.IngestPool(paths, self._peers, cafile=tls_relay.CA_FILE,
-                                           share=float(settings.get("ingest", {}).get("primary_share", ytingest.PRIMARY_SHARE)))
+                                           share=float(settings.get("yt_ingest", {}).get("primary_share", ytingest.PRIMARY_SHARE)))
         self._rebal_at = 0.0
         # 음악 프로그램 채널별 묶음 (B안). 켜고 끄기는 LiveMax 가 다시 켜질 때(업데이트·재시작) 적용 — 도중에 바꾸면 꼬인다
         self.shared_audio = bool(settings.get("audio_shared", True))
