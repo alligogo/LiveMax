@@ -1633,7 +1633,8 @@ const H_ITEMS = [
   ["steal", "steal 최고", (r) => r.server.steal_max, "%"],
   ["retr", "재전송률 평균", (r) => r.server.retrans_avg, "%"],
   ["rtt", "유튜브 왕복 시간", (r) => r.server.rtt_avg, "ms"],
-  ["minor", "짧은 밀림 (내부 처리)", (r) => r.server.minor, "건"],
+  ["mrc", "짧은 재연결 (1초 미만)", (r) => r.server.minor_reconnect ?? null, "번"],
+  ["mslow", "짧은 밀림 (5초 미만)", (r) => r.server.minor_slow ?? null, "건"],
 ];
 
 async function showHealth() {
@@ -1677,6 +1678,7 @@ function renderHealth(root, d) {
   const [vmk, vlb] = HV[sel.verdict] || HV.ok;
   const head = h("div", { class: `card hd-head v-${sel.verdict}` }, h("div", { class: "card-body" },
     h("div", { class: "hd-big" }, h("b", {}, vmk, " ", vlb), h("span", {}, sel.day === "지금" ? "최근 24시간 (아직 저장 전)" : `${sel.day} 아침 검진 (지난 24시간)`)),
+    sel.summary ? h("div", { class: "hd-summary" }, sel.summary) : null,
     h("div", { class: "hd-kpis" },
       h("div", {}, h("b", {}, sel.lives_total ? `정상 ${sel.lives_ok}/${sel.lives_total}` : hAvail(sel)),
         h("span", {}, sel.lives_total ? `${Math.floor(100 * sel.lives_ok / sel.lives_total)}% — ✗ 사건이 한 번도 없었던 라이브` : "시청자 기준 가동률")),
@@ -1692,7 +1694,9 @@ function renderHealth(root, d) {
     h("div", { class: "card-body" }, (bad.length || warn.length) ? [...bad, ...warn].map(evRow)
       : h("div", { class: "muted small" }, "시청자 영향·영향 가능 사건 없음"),
       h("p", { class: "hint", style: "margin-top:10px" },
-        `짧은 밀림(내부 처리) ${s.minor}건 · 업데이트·재시작 직후(우리가 한 일) ${s.ours}건은 판정에서 뺐습니다.`)));
+        s.minor_reconnect != null
+          ? `짧은 재연결(1초 미만) ${s.minor_reconnect}번 · 짧은 밀림(5초 미만) ${s.minor_slow}건 · 업데이트·재시작 직후(우리가 한 일) ${s.ours}건은 판정에서 뺐습니다.`
+          : `짧은 밀림·재연결(내부 처리) ${s.minor}건 · 업데이트·재시작 직후(우리가 한 일) ${s.ours}건은 판정에서 뺐습니다.`)));
   // 시간대 히트맵: 10일 × 24시간 (한국), 칸 = ✗ + △ 건수
   const hm = h("div", { class: "hd-hm" },
     h("div", { class: "hd-hm-row hd-hm-top" }, h("span", {}), ...Array.from({ length: 24 }, (_, i) => h("span", {}, i % 3 === 0 ? String(i) : ""))),

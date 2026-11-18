@@ -145,3 +145,31 @@ def test_rescued_slow_is_marked_auto_evacuated(paths, settings):
     assert ev["live1"]["rescued"] is True and ev["live2"]["rescued"] is False
     assert rep["counts"]["warn"] == 2 and rep["counts"]["rescued"] == 1
     assert "(자동 대피 1)" in health.message(rep)[1]
+
+
+def test_v229_short_reconnects_counted_apart_and_summary_line(paths, settings):
+    """v2.29 (11-18 06:23): 유튜브 A 서버가 연결을 하나씩 닫음 — 0.2초 재연결이 '짧은 밀림' 으로 셌던 것을 나눠 셈.
+    밀림 없이 여러 개가 다시 붙기만 했으면 원인은 '서버가 연결을 끊음'(길 혼잡 아님). 맨 위 한 줄 요약."""
+    end = time.time()
+    site_of = {"74.125.197.134": "지역 A (2ms대)"}
+    with db.session(paths.db) as c:
+        _metrics(c, end - 86400, end)
+        t = end - 6 * 3600
+        for i in range(30):
+            _ins(c, t + i * 20, f"live{i}", "reconnect", sec=0.25, peer="74.125.197.134")
+        _ins(c, t + 5, "live40", "reconnect", sec=1.7, peer="74.125.197.134")
+        _ins(c, t + 330, "live41", "reconnect", sec=2.4, peer="74.125.197.134")
+        _ins(c, t + 7200, "live42", "slow", sec=3, max_delay=2.5, peer="64.233.178.134")
+        rep = health.compute(c, settings, end, ingest={"site_of": site_of})
+    s = rep["server"]
+    assert (s["minor_reconnect"], s["minor_slow"]) == (30, 1)
+    assert rep["causes"] == {"유튜브 지역 A (2ms대) 서버가 연결을 끊음": 2}
+    assert rep["summary"] == ("시청자 영향 없음 · 작은 끊김 2건(최대 2.4초) · 원인: 유튜브 지역 A (2ms대) 서버가 연결을 끊음"
+                              " · 짧은 재연결 30번(1초 미만)")
+    assert health.message(rep)[1].startswith(rep["summary"])
+    with db.session(paths.db) as c:
+        old = dict(rep)
+        old.pop("summary")
+        old["day"] = "2026-11-01"
+        health.store(c, old)
+        assert health.days(c)[0]["summary"] == rep["summary"]  # 예전에 저장된 날도 한 줄 요약

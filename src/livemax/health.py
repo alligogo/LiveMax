@@ -93,6 +93,8 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
             # v2.24: '회선' 은 두 지역 이상이 각각 3개 넘게 같이 막혔을 때만 (한쪽에 작은 밀림 하나 섞인 건 그 지역 문제)
             if len(lives) >= 3 and sum(1 for v in per_site.values() if len(v) >= 3) >= 2:
                 r["cause"] = "회선 (여러 지역 동시)"
+            elif len(lives) >= 3 and k == "reconnect" and not any(x["kind"] == "slow" for x in near):
+                r["cause"] = f"유튜브 {here} 서버가 연결을 끊음"  # v2.29: 밀림 없이 다시 붙기만 — 유튜브 쪽 연결 정리 (11-18 06:23)
             elif len(lives) >= 3:
                 r["cause"] = f"유튜브 {here} 경로 혼잡"
             else:
@@ -150,6 +152,9 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
         "ip_rtt": {ip: round(sum(v) / len(v), 1) for ip, v in sorted(ip_rtt.items())},
         "lives_avg": round(lives_avg, 1), "lives_max": int(round(max((float(x["lives_running"] or 0) for x in m), default=0))),
         "minor": sum(1 for r in evs if r["sev"] == "minor"),
+        # v2.29: '짧은 밀림' 에 1초 미만 다시 붙음이 섞여 셌다 (11-18 93건 = 거의 전부 0.2초 재연결) — 나눠 셈
+        "minor_reconnect": sum(1 for r in evs if r["sev"] == "minor" and r["kind"] == "reconnect"),
+        "minor_slow": sum(1 for r in evs if r["sev"] == "minor" and r["kind"] == "slow"),
         "auto_moves": sum(1 for r in evs if r["kind"] == "auto_move"),
         "handoff_n": len(handoffs), "handoff_avg": round(sum(handoffs) / len(handoffs), 1) if handoffs else None,
         "handoff_max": round(max(handoffs), 1) if handoffs else None,
@@ -200,7 +205,7 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
                 "kind": r["kind"], "sev": r["sev"], "sec": r["sec"], "max_delay": r["max_delay"], "peer": r["peer"],
                 "cause": r.get("cause", ""), "together": r.get("together"), "rescued": bool(r.get("rescued"))}
 
-    return {
+    rep = {
         "day": datetime.fromtimestamp(end - 1, KST).strftime("%Y-%m-%d"), "from": start, "to": end, "version": version,
         "verdict": "bad" if bad else "warn" if counted else "ok",
         "avail": avail, "impact_s": round(impact, 1),
@@ -215,6 +220,8 @@ def compute(conn, settings: dict, end: float, version: str = "", names: dict | N
         "causes": causes, "events": [item(r) for r in counted][:200], "server": server, "warn_server": warn_server,
         "hourly": hourly, "thresholds": {"warn_s": warn_s, "crit_s": crit_s},
     }
+    rep["summary"] = summary_line(rep)
+    return rep
 
 
 def store(conn, rep: dict) -> None:
@@ -232,8 +239,10 @@ def days(conn) -> list[dict]:
     out = []
     for r in conn.execute("SELECT data FROM health_days ORDER BY day DESC LIMIT ?", (KEEP_DAYS,)).fetchall():
         try:
-            out.append(json.loads(r[0]))
-        except ValueError:
+            rep = json.loads(r[0])
+            rep.setdefault("summary", summary_line(rep))  # v2.29 전에 저장된 날도 한 줄 요약
+            out.append(rep)
+        except (ValueError, TypeError, KeyError):
             pass
     return list(reversed(out))
 
@@ -251,6 +260,29 @@ def avail_text(rep: dict) -> str:
     return f"{a * 100:.4f}".rstrip("0").rstrip(".") + "%"
 
 
+def summary_line(rep: dict) -> str:
+    """v2.29 맨 위 한 줄 요약 (아침 알림·검진 화면): 그날 상태를 이 한 줄로 — 예 '시청자 영향 없음 · 작은 끊김 2건(최대 2.4초) · 원인: …'."""
+    c = rep.get("counts") or {}
+    s = rep.get("server") or {}
+    ev = rep.get("events") or []
+    causes = sorted((rep.get("causes") or {}).items(), key=lambda x: -x[1])
+    top = f" · 원인: {causes[0][0]}" if causes else ""
+    if rep.get("lives_bad"):
+        line = f"시청자 영향 {rep['lives_bad']}개 라이브 · 가장 길게 {rep.get('longest_s')}초" + top
+    elif c.get("warn"):
+        mx = max((float(e.get("max_delay") or 0) if e.get("kind") == "slow" else float(e.get("sec") or 0)
+                  for e in ev if e.get("sev") == "warn"), default=0.0)
+        line = f"시청자 영향 없음 · 작은 끊김 {c['warn']}건(최대 {round(mx, 1)}초)" + (
+            f" · 그중 자동 대피 {c['rescued']}" if c.get("rescued") else "") + top
+    else:
+        line = "시청자 영향 없음 · 끊김 없음"
+    if s.get("minor_reconnect"):
+        line += f" · 짧은 재연결 {s['minor_reconnect']}번(1초 미만)"
+    if c.get("ours_program"):
+        line += f" · 우리 프로그램 원인 {c['ours_program']}건 (확인 필요)"
+    return line
+
+
 def message(rep: dict) -> tuple[str, str]:
     c = rep["counts"]
     s = rep["server"]
@@ -263,7 +295,7 @@ def message(rep: dict) -> tuple[str, str]:
                 f" · 사건 {len(eps)}번 ({when}) · △ {c['warn']}건")
     else:
         head = f"{rep['day'][5:]} · 시청자 영향 없음 · △ {c['warn']}건" + (f" (자동 대피 {c['rescued']})" if c.get("rescued") else "")
-    lines = [head,
+    lines = [summary_line(rep), head,
              f"서버 {'⚠ ' + ', '.join(rep['warn_server']) if rep['warn_server'] else '✓'} · CPU 평균 {s.get('cpu_avg')}% (최고 {s.get('cpu_max')}%)"]
     if rep["causes"]:
         lines.append("원인: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["causes"].items(), key=lambda x: -x[1])[:3]))
